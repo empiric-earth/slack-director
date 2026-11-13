@@ -1,0 +1,35 @@
+# Example config. Copy this file into the session directory as
+# `slack-director.yaml` and fill it in.
+
+# The private repo the director writes to. `owner/name`.
+intake_repo: empiric-earth/example-slack-intake
+
+# The sparta account the director sends with. Optional: name it only when the
+# machine has more than one.
+sparta_account: example-account
+
+# How often the user scheduled a pass.
+pass_minutes: 10
+
+# Working time: only these minutes count towards a group delay.
+work_hours:
+  days: [Mon, Tue, Wed, Thu, Fri]
+  start: "09:00"
+  end: "18:00"
+  time_zone: Europe/Amsterdam
+
+# How long a group request waits, in working minutes, before it becomes an
+# issue. Default 60.
+group_delay_working_minutes: 60
+
+# One entry per Slack workspace the director watches.
+workspaces:
+  - name: example
+    # The Slack MCP server for this workspace.
+    mcp_server: slack_example
+    # The user's own Slack id, so the director can find their mentions.
+    user_id: U00000000
+    # The user groups to watch, each with its handle and its Slack id.
+    groups:
+      - handle: example-requests
+        id: S00000000

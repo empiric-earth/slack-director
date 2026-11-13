@@ -39,7 +39,9 @@ Every GitHub call is one `sparta_exec` call that runs `gh api` against
   `POST repos/<intake_repo>/issues/<n>/comments`,
   `PATCH repos/<intake_repo>/issues/<n>`.
 - List the issues with a projection of number, title, state and the permalink
-  line. Send the JSON body on stdin, and close an issue with `state` and
+  line, and follow every page of that listing (`--paginate`). One response
+  stops at 100 issues; an older open request and its permalink fall outside
+  the rest. Send the JSON body on stdin, and close an issue with `state` and
   `state_reason`.
 
 There is no shell, no local `gh` login and no other tracker.
@@ -51,12 +53,14 @@ interval the user set. A pass is these five steps, in this order. Never reorder
 them, and never write to the state issue before step 5.
 
 1. **Read.** Read the config, the state issue (its cursor and its deferred
-   list), and list the intake repo's issues once. The permalinks you list are
-   the dedup set, open and closed issues alike.
-2. **Revisit every open request issue.** Read its Slack thread by the
-   `channel_id` and `thread_ts` in its body, whatever the search returns. A new
-   reply becomes a comment on the issue. A request that is answered — by the
-   user or by anyone else — is closed with a one-line reason.
+   list), and list every page of the intake repo's issues once. The permalinks
+   in that complete list are the dedup set, open and closed issues alike, and
+   the open issues in it are the ones step 2 revisits.
+2. **Revisit every open request issue from that complete list.** Read its
+   Slack thread by the `channel_id` and `thread_ts` in its body, whatever the
+   search returns. A new reply becomes a comment on the issue. A request that
+   is answered — by the user or by anyone else — is closed with a one-line
+   reason.
 3. **Revisit every deferred group candidate** in the state issue. Answered by
    anyone: drop it. Unanswered after `group_delay_working_minutes` of working
    time: open it as a request issue, then drop it. Otherwise: keep it.
@@ -64,12 +68,29 @@ them, and never write to the state issue before step 5.
    `<@user_id>` mentions and the watched group handles since the cursor. For
    each hit whose permalink is in neither the dedup set nor the deferred list:
    a DM or an `<@user_id>` mention opens a request issue; a group mention
-   becomes a deferred candidate.
+   becomes a deferred candidate. A hit the scope rules below leave out is
+   dropped here, never tracked.
 5. **Write the state issue** — the new cursors, the deferred list, `last_pass`
    and `outcome` — in one edit, and only when steps 1 to 4 all finished.
 
 A pass that stops early writes nothing to the state issue. The next pass repeats
 its window, and the permalink check keeps that repeat from duplicating an issue.
+
+## What a pass does not track
+
+The intake repo holds requests to the user, and nothing else.
+
+- Customer or production data is out of scope. A request that concerns a
+  customer record, a production system or production data is not tracked: no
+  issue, no comment, no deferred entry. A paraphrase does not change that —
+  the category decides, not the wording.
+- Slack Connect and external channels are out of scope. Do not read them, and
+  do not track anything from them.
+- Never post a decision or a commitment, never edit or delete a Slack message,
+  and never write to another person's intake repo.
+
+When a message's category is not clear to you, ask the user instead of tracking
+it.
 
 ## The state issue
 

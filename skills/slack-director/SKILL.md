@@ -15,8 +15,17 @@ it before it goes.
 
 ## The config
 
-Read `slack-director.yaml` from this directory at the start of every pass. It
-names:
+The config file is `slack-director.yaml`, and it lives in the session's working
+directory: the directory this session was started in, which is the directory
+OpenCode was started in, and the directory the user put the file in.
+
+Read it at the start of every pass with the relative path `slack-director.yaml`.
+A relative read resolves against the working directory, so that is the only
+path to use. Do not look for the file in the home directory, do not search the
+machine for it, and never ask the user for a path. When the read fails, report
+the path it failed on and stop the pass.
+
+The file names:
 
 - `intake_repo` — `owner/name`; the only repo you read and write.
 - `sparta_account` — the sparta account `sparta_exec` sends with. Optional.
@@ -64,10 +73,19 @@ them, and never write to the state issue before step 5.
 3. **Revisit every deferred group candidate** in the state issue. Answered by
    anyone: drop it. Unanswered after `group_delay_working_minutes` of working
    time: open it as a request issue, then drop it. Otherwise: keep it.
-4. **Search Slack** through each workspace's `mcp_server` for DMs to the user,
-   `<@user_id>` mentions and the watched group handles since the cursor. For
-   each hit whose permalink is in neither the dedup set nor the deferred list:
-   a DM or an `<@user_id>` mention opens a request issue; a group mention
+4. **Search Slack** through each workspace's `mcp_server` for the DMs to the
+   user, the @mentions of the user, and the watched group handles, since the
+   cursor.
+   - **Mentions.** Put the user's Slack id in the query text as a keyword —
+     the token `<@USER_ID>` with that workspace entry's `user_id` — and use no
+     filter for it. Slack ignores the id when it is passed as a search filter
+     and the query then returns unrelated channel traffic. Keep a hit only when
+     the message text really contains `<@USER_ID>`; drop every hit that does
+     not mention the user.
+   - **DMs.** The direct conversation between the user and the sender.
+   - **Groups.** A message in a watched group that names the group.
+   For each hit whose permalink is in neither the dedup set nor the deferred
+   list: a DM or a mention of the user opens a request issue; a group mention
    becomes a deferred candidate. A hit the scope rules below leave out is
    dropped here, never tracked.
 5. **Write the state issue** — the new cursors, the deferred list, `last_pass`

@@ -19,12 +19,15 @@ the Slack permalink — never the message text.
 3. Add `"experimental": { "schedules": true }` to your OpenCode config, so a
    session can be woken on an interval. Optionally bind the agent's model with
    `agents.slack-director.model`.
-4. Create a directory for the session. Copy `slack-director.example.yaml` into
-   it as `slack-director.yaml` and fill it in: the intake repo, the workspaces,
-   the user groups to watch and the working hours.
-5. Restart OpenCode in that directory, pick the `slack-director` agent, and
-   tell it what to watch and which intake repo to use. sparta judges its GitHub
-   requests against what you tell it.
+4. Create a directory for the session — the session directory, which is the
+   working directory OpenCode is started in. Copy `slack-director.example.yaml`
+   into it as `slack-director.yaml` and fill it in: the intake repo, the
+   workspaces, the user groups to watch and the working hours. The director
+   reads that file by its relative name from the working directory, so it must
+   sit there and nowhere else.
+5. Start OpenCode in the session directory, pick the `slack-director` agent,
+   and tell it what to watch and which intake repo to use. sparta judges its
+   GitHub requests against what you tell it.
 6. Run `/schedule every <N> minutes: run one Slack Director pass`.
 
 ## Uninstall

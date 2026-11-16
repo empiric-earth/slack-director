@@ -1,0 +1,10 @@
+{
+  "name": "opencode-slack-director",
+  "version": "0.1.0",
+  "description": "OpenCode package that delivers the Slack Director: its skill and the /slack-director-intake command.",
+  "type": "module",
+  "exports": { ".": "./index.js" },
+  "scripts": { "test": "node --test --test-reporter=tap test/*.test.js" },
+  "license": "MIT",
+  "files": ["index.js", "agents/slack-director.md", "skills", "README.md"]
+}

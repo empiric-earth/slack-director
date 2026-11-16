@@ -14,8 +14,12 @@ the Slack permalink — never the message text.
 
 1. Create a private repo `empiric-earth/<you>-slack-intake`, and give your
    sparta GitHub account write on it.
-2. Copy `agents/slack-director.md` into `~/.config/opencode/agents/`, and the
-   folder `skills/slack-director/` into `~/.config/opencode/skills/`.
+2. From a checkout of this repo, run `make install`, then `opencode reload`.
+   That installs the package into `~/.config/opencode/plugins/slack-director/`
+   and the agent into `~/.config/opencode/agents/`, and removes any
+   `~/.config/opencode/skills/slack-director/`, which would otherwise shadow
+   the skill the package serves. Set `PREFIX` to install into another OpenCode
+   config directory.
 3. Add `"experimental": { "schedules": true }` to your OpenCode config, so a
    session can be woken on an interval. Optionally bind the agent's model with
    `agents.slack-director.model`.
@@ -28,12 +32,14 @@ the Slack permalink — never the message text.
 5. Start OpenCode in the session directory, pick the `slack-director` agent,
    and tell it what to watch and which intake repo to use. sparta judges its
    GitHub requests against what you tell it.
-6. Run `/schedule every <N> minutes: run one Slack Director pass`.
+6. Run `/schedule every <N> minutes: run one Slack Director pass`. Type
+   `/slack-director-intake` in the director session for a pass on demand.
 
 ## Uninstall
 
-Delete the schedule, remove the two files you copied, and restart OpenCode. The
-intake repo stays.
+From the checkout run `make uninstall` — it removes the package directory and
+the agent file — then delete the schedule and restart OpenCode. The intake repo
+stays.
 
 ## Notes
 

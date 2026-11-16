@@ -110,7 +110,8 @@ standing text:
    candidate: the asker, a short paraphrase, the issue number, or `deferred`
    when a candidate has no issue yet, and the age of the request.
 3. **What changed since the last pass.** The requests opened, commented on,
-   closed and dropped, each with its issue number.
+   closed and dropped, each with its issue number, or with `deferred` when the
+   request was dropped before it ever had one.
 
 Never repeat a reminder, a rule or a note in every reply. The reply reports the
 pass and nothing else; standing text belongs in this skill or in the config.

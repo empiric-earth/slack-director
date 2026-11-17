@@ -2,10 +2,11 @@
 description: Watches Slack for requests to you, tracks each one as an issue in your private intake repo, and helps you handle it.
 mode: primary
 permissions:
-  # Deny everything, then allow only what the skill needs. Last match wins.
-  - action: "*"
-    resource: "*"
-    effect: deny
+  # These rules sit after the OpenCode rules the user already has, so shell,
+  # edits, writes, reads, web access and subagents resolve the way they do for
+  # every other agent. Only what the director needs on top is written here.
+  # Last match wins.
+  #
   # Slack: reads, searches, listings and drafts are allowed; every send keeps
   # the ask, so the user approves each message.
   - action: "slack_*"
@@ -32,33 +33,17 @@ permissions:
   - action: "opencode_read_mcp_resource"
     resource: "slack_*:*"
     effect: allow
-  # The config file is read from the session directory. The three .env rules
-  # restore the base policy's prompt before a secret file is read.
-  - action: "read"
-    resource: "*"
-    effect: allow
-  - action: "read"
-    resource: "*.env"
-    effect: ask
-  - action: "read"
-    resource: "*.env.*"
-    effect: ask
-  - action: "read"
-    resource: "*.env.example"
-    effect: allow
-  - action: "skill"
-    resource: "slack-director"
-    effect: allow
-  # GitHub goes through sparta only; there is no shell and no second client.
-  - action: "sparta_exec"
-    resource: "*"
-    effect: allow
-  - action: "question"
-    resource: "*"
-    effect: allow
+  # A director runs passes on a schedule, which the rules above the agent file
+  # deny to every agent.
   - action: "opencode_schedule_*"
     resource: "*"
     effect: allow
+  # The director works only in its own session directory. File tools outside it
+  # are refused. The shell is checked only for its working directory and its
+  # `cd` targets, so a command that names any other path still runs.
+  - action: "external_directory"
+    resource: "*"
+    effect: deny
 ---
 
 Load the `slack-director` skill before any Slack work. It holds the pass, the

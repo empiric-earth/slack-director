@@ -49,3 +49,25 @@ stays.
   stopped are covered by the next pass, which searches from the cursor.
 - The director reads Slack and writes to the intake repo. Every Slack send waits
   for the user's approval in OpenCode's prompt.
+
+## Permissions
+
+The director starts from the OpenCode rules you already have, so the shell, the
+edits, the writes, the reads, the web and the subagents resolve the way they do
+for your other agents. On top of them it sets three things:
+
+- every Slack send asks first — send a message, schedule one, add a reaction,
+  create or update a canvas, open a conversation — while reads, searches,
+  listings, reactions and drafts need no prompt;
+- schedules are allowed, because a director runs its passes on one;
+- the director works only in its session directory — the directory that holds
+  `slack-director.yaml`, the one OpenCode was started in.
+
+OpenCode enforces that last one with its `external_directory` rule: file tools
+are confined to the workspace, and the shell is checked only for its working
+directory and `cd` targets and can read any path the user can read. It is not a
+sandbox. When the session directory is inside a git checkout, that whole
+checkout counts as inside.
+
+A teammate who wants tighter limits adds them in their own OpenCode config; the
+director inherits whatever that config sets.

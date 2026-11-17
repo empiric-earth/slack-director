@@ -123,7 +123,10 @@ standing text:
    and the counts of new, open and deferred requests.
 2. **One row per request.** A row for every open request and every deferred
    candidate: the asker, a short paraphrase, the issue number, or `deferred`
-   when a candidate has no issue yet, and the age of the request.
+   when a candidate has no issue yet, the channel, and the age of the request.
+   The channel is `#<name>`, `DM` or `GDM`, written as a markdown link
+   `[label](permalink)` whose target is the request's stored permalink, so only
+   the label shows. A row whose `channel_name` is empty shows the label `#?`.
 3. **What changed since the last pass.** The requests opened, commented on,
    closed and dropped, each with its issue number, or with `deferred` when the
    request was dropped before it ever had one.
@@ -157,7 +160,9 @@ Its body is a fenced yaml block:
 - `cursors` — one entry per workspace name: the start time of the last complete
   scan, in Unix seconds.
 - `deferred` — the group candidates that are not eligible yet: `permalink`,
-  `workspace`, `channel_id`, `thread_ts`, `group`, `asked_at`. No message text.
+  `workspace`, `channel_id`, `channel_name`, `thread_ts`, `group`, `asked_at`.
+  No message text. A candidate that becomes a request issue carries its
+  `channel_name` over to the issue.
 - `last_pass` — the time of the last complete pass.
 - `outcome` — `ok`, or a short error.
 
@@ -171,9 +176,10 @@ time. The permalink check skips what you already track.
 - Title: `<asker> — <short paraphrase>`.
 - Body: a fenced yaml block, then the paraphrase. The block holds `permalink`
   (the issue's key — check it before every create), `workspace`, `channel_id`,
-  `thread_ts` (so the pass can re-read the thread), `origin` (`dm`, `mention`
-  or `group:<handle>`), `asker` (the Slack id and name), `asked_at`, and `due`
-  when the message names one, else empty.
+  `channel_name` (the channel label: the channel's name without the `#`, `DM`
+  or `GDM`), `thread_ts` (so the pass can re-read the thread), `origin` (`dm`,
+  `mention` or `group:<handle>`), `asker` (the Slack id and name), `asked_at`,
+  and `due` when the message names one, else empty.
 - Comments hold follow-ups and the close reason.
 - An open issue is a pending request. A closed issue is done.
 
@@ -183,12 +189,19 @@ and add the permalink. No verbatim Slack text in a title, a body or a comment.
 ## Where a field comes from
 
 `asked_at`, `thread_ts` and `channel_id` come only from the Slack search result,
-the Slack read result, or the permalink. Take each one as Slack reports it, and
-never guess, compute, round or carry one over from another message. A field with
-no source stays empty.
+the Slack read result, or the permalink. `channel_name` comes only from the
+Slack search result or the Slack read result. Take each one as Slack reports it,
+and never guess, compute, round or carry one over from another message. A field
+with no source stays empty.
 
 - `channel_id` — the channel of the result, or the channel in the permalink's
   path.
+- `channel_name` — the conversation the request came from, as the result reports
+  it: a channel stores its name without the `#`; a direct message stores `DM`; a
+  group DM stores `GDM`, never its raw name. A result marks a group DM by its
+  conversation kind — Slack's `mpim` type, shown as `Group DM`. Store it once,
+  when the request issue or the deferred entry is created; a later pass does not
+  look it up again.
 - `asked_at` — the request message's own `ts`, the value the result reports and
   the permalink's path carries as its `p…` segment.
 - `thread_ts` — the thread root. For a thread reply it is the result's
@@ -196,8 +209,7 @@ no source stays empty.
   message it is the message's own `ts`. So a top-level message's `thread_ts`
   equals its `asked_at`, and a thread reply's is different.
 
-The same three rules hold for a request issue and for a deferred group
-candidate.
+The same rules hold for a request issue and for a deferred group candidate.
 
 ## Working time
 

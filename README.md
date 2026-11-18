@@ -50,6 +50,66 @@ stays.
 - The director reads Slack and writes to the intake repo. Every Slack send waits
   for the user's approval in OpenCode's prompt.
 
+## Add your own rules with a custom skill
+
+You can add your own rules to a pass, in a skill of your own, under one fixed
+id: `my-slack-director`.
+
+- **Where it lives.** The skill is an ordinary user skill, in a skill source
+  OpenCode reads. In your OpenCode config directory that source is its `skills`
+  directory: the skill is the folder `my-slack-director` inside it, holding a
+  `SKILL.md` — `~/.config/opencode/skills/my-slack-director/SKILL.md` by
+  default. A folder directly in the config directory is not in a source and is
+  never found. Every other source works the same way, the global
+  compatibility source `~/.claude/skills` included. OpenCode takes a skill's id
+  from its folder name, so the folder must be named exactly `my-slack-director`.
+  There is no discovery by description or by name pattern: the folder name is
+  the id.
+- **Keep it visible.** The skill needs a non-empty `description`, and must not
+  set `metadata.opencode/autoinvoke: false` or
+  `disable-model-invocation: true`. OpenCode leaves a skill without a
+  description, or one that hides itself this way, out of the skill list — and a
+  pass looks only in that list, so it never sees the skill.
+- **What it may change.** A pass loads the skill when its list carries the id,
+  and follows what it says. The skill may add rules at the hook points the
+  director skill names. This skill names one hook point, **drop a hit**, in
+  step 4 of a pass: a hit the rule matches is dropped before the dedup check —
+  no issue, no comment, no deferred entry. A rule matches on what the Slack search
+  result reports for the hit — its conversation kind, its sender's Slack id and
+  its text — so it needs no Slack call of its own.
+- **What it may not change.** A custom skill adds rules at hook points only. It
+  never changes the issue format, the reply format, the state issue, the scope
+  rules, the work hours or the tool permissions, and the director skill wins
+  where the two conflict. These bounds are instructions the agent follows, not
+  a mechanism: the loaded skill runs with the director agent's own rights, the
+  same as the Slack skills a pass already loads.
+- **In the reply.** Part 3 of the pass reply carries `custom: loaded` when the
+  skill loaded on that pass, and `ignored: <n>` when n hits were dropped, with
+  n greater than zero. When you have installed the skill and `custom: loaded`
+  is missing from the reply, the pass did not load it: it went on as if the
+  skill were not installed, and nothing was dropped.
+
+The skill is one `SKILL.md` file. Save this one at
+`~/.config/opencode/skills/my-slack-director/SKILL.md`, then run
+`opencode reload`. Its `description` is what puts it in the skill list, and its
+one rule drops an automated notification DM by sender id and a literal text
+match — replace both values with your own:
+
+```markdown
+---
+name: my-slack-director
+description: My own rules for a slack-director pass — drops an automated notification DM.
+---
+
+# my-slack-director
+
+- **drop a hit**: the hit is a DM, its sender's Slack id is `U0000000000`, and
+  its text contains `Example notification text`.
+```
+
+Keep the rule narrow: every hit it matches is dropped silently, and a dropped
+hit is never tracked.
+
 ## Permissions
 
 The director starts from the OpenCode rules you already have, so the shell, the

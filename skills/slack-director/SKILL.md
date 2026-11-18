@@ -50,6 +50,32 @@ The file names:
 - `workspaces` — one entry per Slack workspace: `name`, `mcp_server`,
   `user_id`, and `groups`, each a `handle` and an `id`.
 
+## Your custom skill
+
+A user extends this skill with a skill of their own, under one fixed id:
+`my-slack-director`.
+
+- **The id.** Exactly `my-slack-director`, the folder name of that skill in a
+  skill source OpenCode reads. There is one id and no discovery: a skill whose
+  description or name looks like this one is never loaded for a pass, and the
+  pass never calls a load for an id that is not in the skill list.
+- **The load.** At the start of every pass, after the config is read, look for
+  that exact id in your skill list. When the list carries it, load it by that
+  id and follow it. When the list does not, go on as if this section did not
+  exist. A skill that is listed but fails to load leaves the pass as if no
+  custom skill were listed — no rule applies — and the reply carries no
+  `custom: loaded`.
+- **The hook points.** A custom skill adds rules at hook points only. This
+  skill names one hook point, **drop a hit**, in step 4 of a pass. A rule
+  matches on what the Slack search result reports for the hit — its
+  conversation kind, its sender's Slack id, its text — so it never needs
+  another Slack call. A matched hit is dropped before the dedup check: no
+  issue, no comment, no deferred entry, and the count goes in the reply.
+- **The bounds.** A custom skill adds rules at hook points only. It never
+  changes the issue format, the reply format, the state issue, the scope rules,
+  the work hours or the tool permissions. Where it conflicts with this skill,
+  this skill wins.
+
 ## GitHub
 
 Every GitHub call is one `sparta_exec` call that runs `gh api` against
@@ -104,6 +130,10 @@ them, and never write to the state issue before step 5.
      uses `<@USER_ID>`. Search returns the mention as `<@GROUP_ID>`, and a
      thread read returns the same mention as `<!subteam^GROUP_ID`. Keep a hit
      only when its text carries one of those two tokens; drop every other hit.
+   - **Drop a hit.** Drop every hit your custom skill's `drop a hit` rule
+     matches, before the dedup check: no issue, no comment, no deferred entry,
+     and no row in the reply. Count the dropped hits, for the reply's
+     `ignored` count.
    For each hit whose permalink is in neither the dedup set nor the deferred
    list: a DM or a mention of the user opens a request issue; a group mention
    becomes a deferred candidate. A hit the scope rules below leave out is
@@ -129,7 +159,10 @@ standing text:
    the label shows. A row whose `channel_name` is empty shows the label `#?`.
 3. **What changed since the last pass.** The requests opened, commented on,
    closed and dropped, each with its issue number, or with `deferred` when the
-   request was dropped before it ever had one.
+   request was dropped before it ever had one. When your custom skill loaded on
+   this pass, add `custom: loaded`. When its `drop a hit` rule dropped n hits,
+   with n greater than zero, add `ignored: <n>`. A hit dropped at the hook
+   point adds no row here.
 
 Never repeat a reminder, a rule or a note in every reply. The reply reports the
 pass and nothing else; standing text belongs in this skill or in the config.

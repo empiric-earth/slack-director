@@ -55,11 +55,16 @@ stays.
 You can add your own rules to a pass, in a skill of your own, under one fixed
 id: `my-slack-director`.
 
-- **Where it lives.** The skill is an ordinary user skill, in any skill source
-  OpenCode reads — for example a folder `my-slack-director` under your OpenCode
-  config directory, holding a `SKILL.md`. OpenCode takes a skill's id from its
-  folder name, so the folder must be named exactly `my-slack-director`. There
-  is no discovery by description or by name pattern: the folder name is the id.
+- **Where it lives.** The skill is an ordinary user skill, in a skill source
+  OpenCode reads. In your OpenCode config directory that source is its `skills`
+  directory: the skill is the folder `my-slack-director` inside it, holding a
+  `SKILL.md` — `~/.config/opencode/skills/my-slack-director/SKILL.md` by
+  default. A folder directly in the config directory is not in a source and is
+  never found. Every other source works the same way, the global
+  compatibility source `~/.claude/skills` included. OpenCode takes a skill's id
+  from its folder name, so the folder must be named exactly `my-slack-director`.
+  There is no discovery by description or by name pattern: the folder name is
+  the id.
 - **Keep it visible.** The skill needs a non-empty `description`, and must not
   set `metadata.opencode/autoinvoke: false` or
   `disable-model-invocation: true`. OpenCode leaves a skill without a
@@ -84,12 +89,23 @@ id: `my-slack-director`.
   is missing from the reply, the pass did not load it: it went on as if the
   skill were not installed, and nothing was dropped.
 
-A rule for the `drop a hit` hook point reads as one line naming the hit it
-matches. This one drops an automated notification DM by sender id and a
-literal text match — replace both values with your own:
+The skill is one `SKILL.md` file. Save this one at
+`~/.config/opencode/skills/my-slack-director/SKILL.md`, then run
+`opencode reload`. Its `description` is what puts it in the skill list, and its
+one rule drops an automated notification DM by sender id and a literal text
+match — replace both values with your own:
 
-    drop a hit: the hit is a DM, its sender's Slack id is `U0000000000`, and
-    its text contains `Example notification text`.
+```markdown
+---
+name: my-slack-director
+description: My own rules for a slack-director pass — drops an automated notification DM.
+---
+
+# my-slack-director
+
+- **drop a hit**: the hit is a DM, its sender's Slack id is `U0000000000`, and
+  its text contains `Example notification text`.
+```
 
 Keep the rule narrow: every hit it matches is dropped silently, and a dropped
 hit is never tracked.

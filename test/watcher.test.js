@@ -76,6 +76,17 @@ function harness({ pages = {}, statuses = {}, servers = [NEXAR, NAUTO], emoji = 
   const now = () => clock.ms
   const calls = []
   const logs = []
+  const consoleOutput = []
+  const realWarn = console.warn
+  const realLog = console.log
+  const realError = console.error
+  const record = (write) => (...args) => {
+    consoleOutput.push(args.map((value) => String(value)).join(" "))
+    write(...args)
+  }
+  console.warn = record(realWarn)
+  console.log = record(realLog)
+  console.error = record(realError)
   const created = []
   const prompts = []
   const removed = []
@@ -170,6 +181,7 @@ function harness({ pages = {}, statuses = {}, servers = [NEXAR, NAUTO], emoji = 
     now,
     calls,
     logs,
+    consoleOutput,
     created,
     prompts,
     removed,
@@ -184,7 +196,12 @@ function harness({ pages = {}, statuses = {}, servers = [NEXAR, NAUTO], emoji = 
     seen: () => storage.map.get(KEYS.seen) ?? [],
     status: () => storage.map.get(KEYS.status) ?? {},
     toolCalls: () => calls.filter((call) => call.method === "tools/call"),
-    clean: () => rmSync(root, { recursive: true, force: true }),
+    clean: () => {
+      console.warn = realWarn
+      console.log = realLog
+      console.error = realError
+      rmSync(root, { recursive: true, force: true })
+    },
   }
 }
 
@@ -602,6 +619,7 @@ test("the access token reaches the authorization header and nothing else the plu
       ...h.prompts.map((prompt) => prompt.text),
       ...h.created.map((session) => session.title ?? ""),
       ...h.logs,
+      ...h.consoleOutput,
       JSON.stringify(h.status()),
     ]
     for (const text of produced) assert.ok(!text.includes(secret), `the token is not in: ${text.slice(0, 120)}`)

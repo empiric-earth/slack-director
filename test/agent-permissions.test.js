@@ -17,9 +17,9 @@ const ROOT = fileURLToPath(new URL("..", import.meta.url))
 const AGENT_REL = "agents/slack-director.md"
 
 /** The rules `permissions:` declares, in the order the file declares them. */
-function declaredRules(text) {
+function declaredRules(text, rel = AGENT_REL) {
   const block = /^permissions:[ \t]*\n((?:[ \t]+\S.*\n|[ \t]*\n)*)/m.exec(text)
-  assert.ok(block, `${AGENT_REL} declares a permissions list`)
+  assert.ok(block, `${rel} declares a permissions list`)
   const rules = []
   for (const raw of block[1].split("\n")) {
     const line = raw.trim()
@@ -31,10 +31,10 @@ function declaredRules(text) {
     }
     const field = /^(resource|effect):[ \t]*"?([^"]*)"?$/.exec(line)
     const rule = rules.at(-1)
-    assert.ok(field && rule, `${AGENT_REL}: a rule field follows its rule, got: ${line}`)
+    assert.ok(field && rule, `${rel}: a rule field follows its rule, got: ${line}`)
     rule[field[1]] = field[2]
   }
-  assert.ok(rules.length > 0, `${AGENT_REL} declares at least one rule`)
+  assert.ok(rules.length > 0, `${rel} declares at least one rule`)
   for (const rule of rules) {
     assert.ok(
       rule.action && rule.resource && rule.effect,
@@ -131,4 +131,77 @@ test("the director inherits the baseline and adds its own rules on top", () => {
   assert.equal(effect("skill", "slack-minion"), "allow", "the user's Slack skills are loadable")
   assert.equal(effect("sparta_exec"), "allow", "GitHub through sparta is allowed")
   assert.equal(effect("skill", "browser"), "deny", "OpenCode's browser skill stays denied")
+})
+
+// The two agents the watcher runs sessions on. Each file starts from the same
+// baseline and the same trailing rules, and decides everything else itself.
+const TRIAGE_REL = "agents/slack-director-triage.md"
+const REFRESH_REL = "agents/slack-director-refresh.md"
+const TRIAGE = [...BASELINE, ...declaredRules(readFileSync(join(ROOT, TRIAGE_REL), "utf8"), TRIAGE_REL), ...TRAILING]
+const REFRESH = [...BASELINE, ...declaredRules(readFileSync(join(ROOT, REFRESH_REL), "utf8"), REFRESH_REL), ...TRAILING]
+
+/** The effect a tool resolves to under one agent's rules, with `*` as the usual resource. */
+const effectUnder = (rules, action, resource = "*") => resolve(rules, action, resource)
+
+test("the triage agent reads, searches and lists Slack, and reads files", () => {
+  for (const server of SERVERS) {
+    for (const tool of ["read_channel", "search_messages", "list_channels"]) {
+      assert.equal(
+        effectUnder(TRIAGE, `${server}_slack_${tool}`),
+        "allow",
+        `${server}_slack_${tool} proceeds without a prompt`,
+      )
+    }
+  }
+  for (const tool of ["read", "glob", "grep"]) {
+    assert.equal(effectUnder(TRIAGE, tool, "notes.md"), "allow", `the file read tool ${tool} is allowed`)
+  }
+})
+
+test("the triage agent denies every Slack write, the skill tool and the broker", () => {
+  const writes = [
+    "send_message",
+    "schedule_message",
+    "add_reaction",
+    "create_canvas",
+    "update_canvas",
+    "create_conversation",
+    "send_message_draft",
+    "get_reactions",
+  ]
+  for (const server of SERVERS) {
+    for (const tool of writes) {
+      assert.equal(effectUnder(TRIAGE, `${server}_slack_${tool}`), "deny", `${server}_slack_${tool} is refused`)
+    }
+  }
+  assert.equal(effectUnder(TRIAGE, "skill", "slack-director"), "deny", "the skill tool is refused")
+  assert.equal(effectUnder(TRIAGE, "sparta_exec"), "deny", "the broker tool is refused")
+})
+
+test("the triage agent denies edits, writes, the shell, schedules, subagents and outside directories", () => {
+  for (const action of ["edit", "write", "shell", "opencode_schedule_run", "subagent", "external_directory"]) {
+    assert.equal(effectUnder(TRIAGE, action, "*"), "deny", `${action} is refused`)
+    assert.equal(effectUnder(TRIAGE, action, "anything"), "deny", `${action} is refused whatever the resource`)
+  }
+})
+
+test("the refresh agent allows only the Slack search tool", () => {
+  for (const server of SERVERS) {
+    assert.equal(
+      effectUnder(REFRESH, `${server}_slack_search_public_and_private`),
+      "allow",
+      `${server}'s search tool is allowed`,
+    )
+    for (const action of [
+      `${server}_slack_read_channel`,
+      `${server}_slack_list_channels`,
+      `${server}_slack_send_message`,
+      `${server}_slack_search_messages`,
+    ]) {
+      assert.equal(effectUnder(REFRESH, action), "deny", `${action} is refused`)
+    }
+  }
+  for (const action of ["read", "edit", "write", "shell", "skill", "sparta_exec", "subagent", "external_directory"]) {
+    assert.equal(effectUnder(REFRESH, action, "*"), "deny", `${action} is refused`)
+  }
 })

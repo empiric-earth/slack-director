@@ -8,12 +8,17 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import plugin, { COMMANDS, parseSkill, skillPath } from "../index.js"
+import { SlackDirectorRpc } from "../rpc.js"
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url))
 const read = (rel) => readFileSync(join(ROOT, rel), "utf8")
 const SKILL_ID = "slack-director"
 const SKILL_REL = `skills/${SKILL_ID}/SKILL.md`
 const AGENT_REL = "agents/slack-director.md"
+const TRIAGE_AGENT_REL = "agents/slack-director-triage.md"
+const REFRESH_AGENT_REL = "agents/slack-director-refresh.md"
+const SOURCE_MODULES = ["config.js", "claims.js", "state.js", "slack-mcp.js", "first-prompt.js", "watcher.js"]
+const PARTS = ["index.js", "tui.js", "rpc.js", "package.json"]
 
 /**
  * A fake plugin context that records what the plugin registers, and rejects any
@@ -23,7 +28,9 @@ function fakeContext() {
   const skills = []
   const commands = []
   const prompts = []
-  const calls = { skill: 0, command: 0 }
+  const rpcRegistrations = []
+  const storage = new Map()
+  const calls = { skill: 0, command: 0, rpc: 0 }
   const domains = {
     skill: {
       async transform(cb) {
@@ -39,10 +46,55 @@ function fakeContext() {
         return { async dispose() {} }
       },
     },
+    mcp: {
+      async transform(cb) {
+        cb({ list: () => [["slack_nexar", { type: "remote", url: "https://mcp.slack.com/mcp" }]] })
+        return { async dispose() {} }
+      },
+      async list() {
+        return { location: {}, data: [] }
+      },
+    },
+    integration: {
+      connection: {
+        async active() {
+          return undefined
+        },
+        async resolve() {
+          return undefined
+        },
+      },
+    },
+    rpc: {
+      async register(definition, handlers) {
+        calls.rpc += 1
+        rpcRegistrations.push({ definition, handlers })
+        return { async dispose() {}, events: { async emit() {} } }
+      },
+    },
+    storage: {
+      async get(key) {
+        return storage.get(key)
+      },
+      async set(key, value) {
+        storage.set(key, value)
+      },
+      async remove(key) {
+        storage.delete(key)
+      },
+      async scan() {
+        return { entries: [] }
+      },
+    },
     session: {
       async prompt(input) {
         prompts.push(input)
       },
+      async create() {
+        return { id: "ses_fixture" }
+      },
+      async remove() {},
+      async wait() {},
     },
   }
   const ctx = new Proxy(domains, {
@@ -51,7 +103,7 @@ function fakeContext() {
       return target[key]
     },
   })
-  return { ctx, skills, commands, prompts, calls }
+  return { ctx, skills, commands, prompts, rpcRegistrations, storage, calls }
 }
 
 /** Every path under `dir`, relative and sorted; a file's text as its value. */
@@ -87,11 +139,12 @@ test("setup registers exactly the shipped skill", async () => {
   assert.equal(skill.description, parsed.description)
   assert.equal(skill.path, join(ROOT, SKILL_REL))
   assert.equal(skill.content, parsed.body)
+  await dispose()
 })
 
 test("setup registers the command table, and the command prompts its session", async () => {
   const { ctx, commands, prompts, calls } = fakeContext()
-  await plugin.setup(ctx)
+  const dispose = await plugin.setup(ctx)
   assert.equal(calls.command, 1, "one command registration")
   assert.deepEqual(
     commands.map((c) => c.name).sort(),
@@ -107,23 +160,50 @@ test("setup registers the command table, and the command prompts its session", a
   assert.deepEqual(prompts, [
     { sessionID: "ses_fixture", text: "run one Slack Director pass", delivery: "steer" },
   ])
+  await dispose()
 })
 
-test("the package registers nothing but the skill and its commands", () => {
+test("setup registers the RPC contract the TUI part calls", async () => {
+  const { ctx, rpcRegistrations, calls } = fakeContext()
+  const dispose = await plugin.setup(ctx)
+  assert.equal(calls.rpc, 1, "one RPC registration")
+  assert.equal(rpcRegistrations.length, 1)
+  assert.equal(rpcRegistrations[0].definition, SlackDirectorRpc, "the one contract file is registered")
+  assert.equal(typeof rpcRegistrations[0].handlers.status, "function", "the contract's one method is handled")
+  await dispose()
+})
+
+test("the package registers nothing but the skill, its commands and the RPC", () => {
   const pkg = JSON.parse(read("package.json"))
   assert.equal(pkg.type, "module")
-  assert.deepEqual(pkg.exports, { ".": "./index.js" })
+  assert.deepEqual(pkg.exports, { ".": "./index.js", "./tui": "./tui.js", "./rpc": "./rpc.js" })
   assert.ok(pkg.name, "the package is named")
   assert.equal(pkg.dependencies, undefined)
   assert.equal(pkg.devDependencies, undefined)
+  for (const part of ["index.js", "tui.js", "rpc.js"]) assert.ok(pkg.files.includes(part), `${part} ships`)
+  assert.ok(pkg.files.includes("src"), "the modules ship")
 
   const source = read("index.js")
   const banned = [
-    [/\bctx\.(tool|event|permission|agent|vcs|shell|mcp|storage|worktree|rpc|integration)\b/, "no other ctx domain"],
+    [/\bctx\.(tool|event|permission|agent|vcs|shell|worktree)\b/, "no other ctx domain"],
     [/\.hook\s*\(/, "no hook"],
-    [/\bset(Interval|Timeout|Immediate)\b/, "no timer"],
+    [/\bsetInterval\b/, "no repeating timer; one poll reschedules the next"],
   ]
   for (const [pattern, why] of banned) assert.ok(!pattern.test(source), why)
+})
+
+test("no shipped module imports the plugin SDK, so every one loads under plain node", () => {
+  const files = ["index.js", "tui.js", "rpc.js", ...readdirSync(join(ROOT, "src")).map((name) => `src/${name}`)]
+  for (const rel of files) {
+    const text = read(rel)
+    assert.ok(!text.includes("@opencode/"), `${rel} imports no plugin SDK`)
+    for (const match of text.matchAll(/from\s+"([^"]+)"/g)) {
+      assert.ok(
+        match[1].startsWith("node:") || match[1].startsWith("."),
+        `${rel} imports only node builtins and its own modules, not ${match[1]}`,
+      )
+    }
+  }
 })
 
 test("the README install and uninstall steps match the Makefile", () => {
@@ -137,12 +217,14 @@ test("the README install and uninstall steps match the Makefile", () => {
   }
 })
 
-test("a fixture install lays down the package and removes the stale skill; uninstall removes it", () => {
+test("a fixture install lays down the parts, the modules and the agents; uninstall removes them", () => {
   const fixture = mkdtempSync(join(tmpdir(), "slack-director-install-"))
   const home = join(fixture, "home")
   const prefix = join(fixture, "prefix")
   const pluginDir = join(prefix, "plugins", "slack-director")
   const agentFile = join(prefix, "agents", "slack-director.md")
+  const triageFile = join(prefix, "agents", "slack-director-triage.md")
+  const refreshFile = join(prefix, "agents", "slack-director-refresh.md")
   const env = {
     ...process.env,
     HOME: home,
@@ -165,19 +247,27 @@ test("a fixture install lays down the package and removes the stale skill; unins
 
     for (const [installed, source] of [
       [join(pluginDir, "index.js"), "index.js"],
+      [join(pluginDir, "tui.js"), "tui.js"],
+      [join(pluginDir, "rpc.js"), "rpc.js"],
       [join(pluginDir, "package.json"), "package.json"],
       [join(pluginDir, SKILL_REL), SKILL_REL],
       [agentFile, AGENT_REL],
+      [triageFile, TRIAGE_AGENT_REL],
+      [refreshFile, REFRESH_AGENT_REL],
+      ...SOURCE_MODULES.map((name) => [join(pluginDir, "src", name), `src/${name}`]),
     ]) {
       assert.ok(existsSync(installed), `${installed} is installed`)
       assert.equal(readFileSync(installed, "utf8"), read(source), `${source} is installed unchanged`)
     }
     assert.ok(!existsSync(join(pluginDir, "skills", "skills")), "a second install nests no skills directory")
+    assert.ok(!existsSync(join(pluginDir, "src", "src")), "a second install nests no src directory")
     assert.ok(!existsSync(staleSkill), "the stale config-directory skill is removed")
 
     make("uninstall", `PREFIX=${prefix}`)
     assert.ok(!existsSync(pluginDir), "uninstall removes the plugin directory")
-    assert.ok(!existsSync(agentFile), "uninstall removes the agent file")
+    for (const file of [agentFile, triageFile, refreshFile]) {
+      assert.ok(!existsSync(file), `uninstall removes ${file}`)
+    }
     assert.equal(readFileSync(join(prefix, "keep.txt"), "utf8"), "keep me", "uninstall removes nothing else")
 
     const after = tree(home)

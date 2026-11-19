@@ -216,6 +216,12 @@ export function createWatcher({
       await suspend(name, credential)
       return { ok: false, error: SUSPENDED_ERROR }
     }
+    if (search.hits.length === 0 && search.shape.results > 0) {
+      // The shape only: the answer's field names and its block count, never its text.
+      log(
+        `${name}: the search answer listed results but carried no permalink — fields ${search.shape.fields.join(", ")}, result blocks ${search.shape.results}`,
+      )
+    }
     let skipped = 0
     for (const hit of search.hits) {
       if (seen.has(hit.permalink)) {

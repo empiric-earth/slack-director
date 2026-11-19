@@ -20,11 +20,43 @@ const NEXAR = { name: "slack_nexar", url: SLACK_MCP_URL }
 const NAUTO = { name: "slack_nauto", url: SLACK_MCP_URL }
 const TODOIST = { name: "todoist", url: "https://ai.todoist.net/mcp" }
 
-const permalinkOf = (channel, ts) => `https://nexar.slack.com/archives/${channel}/p${ts.replace(".", "")}`
-const page = (messages, next) => ({ messages, next_cursor: next ?? null })
-const hitRow = (channel, ts, channelName) => ({
-  permalink: permalinkOf(channel, ts),
-  channel_name: channelName,
+const permalinkOf = (channel, ts, host = "nexar") =>
+  `https://${host}.slack.com/archives/${channel}/p${ts.replace(".", "")}`
+const hitRow = (channel, ts, channelName, host) => ({
+  channel,
+  ts,
+  channelName,
+  permalink: permalinkOf(channel, ts, host),
+})
+
+/**
+ * One page of the search tool's answer, in the shape the live tool returns: one
+ * markdown report under `results`, one `### Result` block per message, each
+ * carrying its permalink, and the next page's cursor in a `pagination_info`
+ * line.
+ */
+const page = (rows, next) => ({
+  results: [
+    `Search results for: "hasmy::oc:"`,
+    "",
+    `## Messages (${rows.length} results) ===`,
+    ...rows.flatMap((row, index) => [
+      `### Result ${index + 1} of ${rows.length}`,
+      `Channel: ${row.channelName} (${row.channel})`,
+      `From: Someone (U0000000000)`,
+      `Time: 2026-11-19 10:00:00 UTC`,
+      `Message_ts: ${row.ts}`,
+      `Permalink: [link](${row.permalink})`,
+      `Text: A message the user flagged.`,
+      "",
+      `Context before:`,
+      `- From: Someone else (U0000000001)`,
+      `Message_ts: ${row.ts}`,
+      `Text: An earlier message in the same channel.`,
+      "",
+    ]),
+  ].join("\n"),
+  pagination_info: next ? `For the next page of results use cursor \`${next}\`` : "",
 })
 const message = (secondsAgo) => `${Math.floor((NOW - secondsAgo * 1000) / 1000)}.000100`
 
@@ -220,8 +252,9 @@ test("a poll calls only the Slack servers, only the search tool, with the config
     assert.equal(searches.length, 2, "both Slack workspaces are searched")
     for (const call of searches) {
       assert.equal(call.name, SEARCH_TOOL, "every tool call names the search tool and no other")
-      assert.equal(call.args.query, "hasmy::triage:", "the query carries the configured flag")
-      assert.ok(!/(after|before|on|during):/.test(call.args.query), "the query carries no date modifier")
+      assert.equal(call.args.filters, "hasmy::triage:", "the search carries the configured flag as its filter")
+      assert.equal(call.args.query, undefined, "the search sends no `query` argument the tool does not take")
+      assert.ok(!/(after|before|on|during):/.test(call.args.filters), "the filter carries no date modifier")
       assert.equal(call.args.sort, "timestamp", "the scan sorts by message time")
     }
   } finally {
@@ -252,6 +285,42 @@ test("the scan follows the cursor to the last page and gives a week-old hit one 
     )
     assert.equal(h.created.length, 1, "the week-old hit on the last page got one session")
     assert.equal(h.prompts.length, 1)
+  } finally {
+    h.clean()
+  }
+})
+
+test("a week-old hit on an Enterprise Grid permalink gets one session", async () => {
+  const ts = message(7 * 24 * 60 * 60)
+  const grid = `https://grid-nauto.enterprise.slack.com/archives/D03KHBF103X/p${ts.replace(".", "")}`
+  const h = harness({ pages: { "tok-nexar": [page([hitRow("D03KHBF103X", ts, "DM", "grid-nauto.enterprise")], null)] } })
+  try {
+    await h.watcher.poll()
+    assert.equal(h.created.length, 1, "the Grid host does not stop the hit")
+    const prompt = h.prompts[0].text
+    assert.ok(prompt.includes(grid), "the prompt carries the Grid permalink")
+    assert.ok(prompt.includes("DM"), "the prompt carries the channel label")
+    assert.ok(prompt.includes(ts), "the prompt carries the message ts")
+    assert.equal(h.items()[grid].channelID, "D03KHBF103X")
+    assert.equal(h.items()[grid].ts, ts)
+    assert.equal(h.items()[grid].workspace, "slack_nexar", "the workspace is the MCP server's name")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a report that lists results but carries no permalink logs the shape and creates nothing", async () => {
+  const ts = message(60)
+  const h = harness({
+    pages: { "tok-nexar": [page([{ channel: "D03KHBF103X", ts, channelName: "DM", permalink: "" }], null)] },
+  })
+  try {
+    await h.watcher.poll()
+    assert.equal(h.created.length, 0)
+    assert.equal(h.logs.length, 1, "one shape line")
+    assert.match(h.logs[0], /fields results, pagination_info/, "the line names the answer's fields")
+    assert.match(h.logs[0], /result blocks 1/)
+    assert.ok(!h.logs[0].includes("Text:"), "the line carries no message text")
   } finally {
     h.clean()
   }

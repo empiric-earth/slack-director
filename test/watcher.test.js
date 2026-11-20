@@ -541,6 +541,30 @@ test("an instance is never blocked by its own lease, so a shorter configured int
   }
 })
 
+test("a scan that outruns part of the interval leaves no lease that skips the next tick", async () => {
+  const ts = message(60)
+  let h
+  const pages = {
+    "tok-nexar": () => {
+      h.clock.ms += 10_000
+      return page([hitRow("C0PLATFORM", ts, "#platform-help")], null)
+    },
+  }
+  h = harness({ servers: [NEXAR], pages })
+  try {
+    h.config.poll_seconds = 15
+    await h.watcher.poll()
+    assert.equal(h.status().lastPoll, new Date(h.now()).toISOString(), "the first scan ran")
+    // The scan above took ten seconds, so the next tick lands inside the lease
+    // that poll took. The instance's own lease must not skip it.
+    h.clock.ms += 15_000
+    await h.watcher.poll()
+    assert.equal(h.status().lastPoll, new Date(h.now()).toISOString(), "the next tick ran")
+  } finally {
+    h.clean()
+  }
+})
+
 test("another instance's unexpired lease still spares a duplicate poll", async () => {
   const ts = message(60)
   const h = harness({ pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
@@ -1302,6 +1326,25 @@ test("a reply with the two fixed lines fills the item record and retitles the se
     assert.equal(h.status().today.nextStepsPosted, 1, "today's count includes it")
     assert.equal(h.status().today.flagged, 1)
     assert.equal(h.status().today.skipped, 1)
+  } finally {
+    h.clean()
+  }
+})
+
+test("today's skipped count names each already-seen hit once, however many polls meet it", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    assert.equal(h.status().today.skipped, 0, "the poll that claimed the hit skipped nothing")
+    h.clock.ms += h.config.poll_seconds * 1000
+    await h.watcher.poll()
+    assert.equal(h.status().today.skipped, 1, "the hit is skipped once")
+    h.clock.ms += h.config.poll_seconds * 1000
+    await h.watcher.poll()
+    assert.equal(h.status().today.skipped, 1, "the same hit on a third poll does not raise the count")
+    assert.deepEqual(Object.keys(h.items()), [link], "and the item map still holds the one item")
   } finally {
     h.clean()
   }

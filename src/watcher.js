@@ -152,21 +152,29 @@ export function createWatcher({
     return (await storage.get(KEYS.items)) ?? {}
   }
 
-  async function today({ skipped = 0 } = {}) {
+  /**
+   * Today's counts. `skipped` is the permalinks the scan met today that were
+   * already seen: each one counts once a day, however many polls met it, so
+   * the number answers how many flagged messages the scan left alone today and
+   * not how often it looked at them.
+   */
+  async function today({ skipped = [] } = {}) {
     const day = new Date(now()).toISOString().slice(0, 10)
     return serializedWrite(async () => {
-      const stored = (await storage.get(KEYS.today)) ?? { day, skipped: 0 }
-      const counted = stored?.day === day ? stored : { day, skipped: 0 }
+      const stored = (await storage.get(KEYS.today)) ?? { day, skipped: [] }
+      const counted = stored?.day === day ? stored : { day, skipped: [] }
+      const skippedToday = new Set(Array.isArray(counted.skipped) ? counted.skipped : [])
+      for (const permalink of skipped) skippedToday.add(permalink)
       const records = Object.values(await readItems())
       const onDay = (value) => typeof value === "string" && value.slice(0, 10) === day
-      const next = { day, skipped: (counted.skipped ?? 0) + skipped }
+      const next = { day, skipped: [...skippedToday] }
       await storage.set(KEYS.today, next)
       return {
         flagged: records.filter((record) => onDay(record?.flaggedAt)).length,
         // A message the scope rules leave out posted no next steps: its record
         // has a first turn that ended and no issue.
         nextStepsPosted: records.filter((record) => onDay(record?.firstTurnEndedAt) && record?.issueUrl).length,
-        skipped: next.skipped,
+        skipped: next.skipped.length,
       }
     })
   }
@@ -360,10 +368,10 @@ export function createWatcher({
         `${name}: the search answer listed results but carried no permalink — fields ${search.shape.fields.join(", ")}, result blocks ${search.shape.results}`,
       )
     }
-    let skipped = 0
+    const skipped = []
     for (const hit of search.hits) {
       if (seen.has(hit.permalink)) {
-        skipped += 1
+        skipped.push(hit.permalink)
         continue
       }
       await handleHit({ ...hit, workspace: name }, config)
@@ -416,7 +424,7 @@ export function createWatcher({
 
     const seen = new Set((await storage.get(KEYS.seen)) ?? [])
     const workspaces = []
-    let skipped = 0
+    const skipped = []
     let discoveryError = null
     let servers
     try {
@@ -436,7 +444,7 @@ export function createWatcher({
         outcome = { ok: false, error: messageOf(error) }
       }
       workspaces.push({ name: server.name, ok: outcome.ok, error: outcome.error ?? null })
-      skipped += outcome.skipped ?? 0
+      skipped.push(...(outcome.skipped ?? []))
     }
     const failed = workspaces.find((workspace) => !workspace.ok)
     const status = {

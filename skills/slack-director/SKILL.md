@@ -37,9 +37,10 @@ intake repo the first prompt names. Nothing else, and never another repo:
 - reads: `GET repos/<intake_repo>/issues?state=all&per_page=100`,
   `GET repos/<intake_repo>/issues/<n>`,
   `GET repos/<intake_repo>/issues/<n>/comments`.
-- writes: `POST repos/<intake_repo>/issues`,
-  `POST repos/<intake_repo>/issues/<n>/comments`,
-  `PATCH repos/<intake_repo>/issues/<n>`.
+- writes: `POST repos/<intake_repo>/issues` and
+  `POST repos/<intake_repo>/issues/<n>/comments`. `PATCH
+  repos/<intake_repo>/issues/<n>` and the close form belong to a later turn the
+  user drives.
 - List the issues with a projection of number, title, state and the permalink
   line, and follow every page of that listing (`--paginate`). One response
   stops at 100 issues; an older request and its permalink fall outside the
@@ -52,24 +53,43 @@ write to another tracker.
 ## The first turn
 
 The first prompt names the item: its permalink, its workspace, its channel and
-its message timestamp, and the intake repo. The first turn is these steps, in
-this order:
+its message timestamp, and the intake repo. The flag is the user's own triage,
+so a flagged message counts as a request to the user. The first turn applies
+the scope rules below first, and then runs these steps in this order:
 
-1. **Find or create the intake issue.** List every page of the intake repo's
+1. **Apply the scope rules.** Only a message in one of the out-of-scope
+   categories — customer or production data, Slack Connect or an external
+   channel — or one whose category is not clear to you, is left out. For a
+   message you leave out, create no issue and post no comment, and reply with
+   the `Intake issue: none` form below.
+2. **Find or create the intake issue.** List every page of the intake repo's
    issues once, open and closed alike, and look for the one whose `permalink`
-   field equals the item's permalink. That permalink is the issue's key. When
-   no issue carries it, create one in the format below.
-2. **Read the thread and investigate.** Read the flagged message's thread by
+   field equals the item's permalink. That permalink is the issue's key. Create
+   one in the format below only when no issue carries it.
+3. **Read the thread and investigate.** Read the flagged message's thread by
    the channel and the timestamp in the prompt, through the Slack read tools.
    Read only: change nothing.
-3. **Post the findings and proposed next steps** as one comment on the issue.
-4. **Reply with the same findings and next steps**, and end the reply with
+4. **Post the findings and proposed next steps** as one comment on the issue.
+5. **Reply with the same findings and next steps**, and end the reply with
    exactly these two lines:
 
    ```
    Intake issue: <the issue's URL>
    Title: <the issue title's paraphrase>
    ```
+
+   For a message the scope rules leave out, the first line is instead:
+
+   ```
+   Intake issue: none — <the reason, a few words>
+   ```
+
+   and the second line carries the paraphrase the issue's title would have had.
+
+The first turn's GitHub writes are exactly that one issue create and that one
+comment, and nothing else: no issue edit, no label, no close or reopen, and no
+second comment. A correction goes into the one comment. Every other write this
+skill lists belongs to a later turn the user drives.
 
 Then stop. Take no other action: no Slack send, reaction, edit or delete, no
 other issue and no other comment.
@@ -87,8 +107,8 @@ The intake repo holds requests to the user, and nothing else.
 - Never post a decision or a commitment, never edit or delete a Slack message,
   and never write to another person's intake repo.
 
-When a message's category is not clear to you, ask the user instead of tracking
-it.
+When a message's category is not clear to you, leave it out of the first turn
+and say so in the reply; ask the user about it in a later turn.
 
 ## A request issue
 

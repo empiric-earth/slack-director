@@ -55,6 +55,10 @@ stays.
   the search.
 - One permalink gets one item session. A second flag in the same thread finds
   the issue that permalink already has, so no second issue appears.
+- A flagged message the scope rules leave out — customer or production data, a
+  Slack Connect or external channel, or one the session cannot classify — gets
+  no issue and no comment. The session's reply says so instead of naming an
+  issue.
 - An item session's transcript holds the thread text it read. It lives in your
   local OpenCode database, and deleting the session deletes it.
 - The message you flag is read by the triage agent and reaches the model. That
@@ -79,9 +83,10 @@ the way they do for your other agents. On top of them it sets two things:
 The `slack-director-triage` agent, which runs an item session's first turn, is
 read-only: it may read Slack threads, search and list Slack, read files, load
 the `slack-director` skill, and write to the intake repo through the credential
-broker — the intake issue and its one comment. Every Slack send, reaction,
-draft, canvas and conversation tool, every edit and write, the shell, schedules,
-subagents and file access outside its session directory are refused.
+broker — the intake issue and its one comment, and nothing else: no issue edit,
+no label, no close or reopen, and no second comment. Every Slack send,
+reaction, draft, canvas and conversation tool, every edit and write, the shell,
+schedules, subagents and file access outside its session directory are refused.
 
 A teammate who wants tighter limits adds them in their own OpenCode config; the
 agents inherit whatever that config sets.

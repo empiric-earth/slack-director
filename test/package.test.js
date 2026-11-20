@@ -212,7 +212,7 @@ test("the README install and uninstall steps match the Makefile", () => {
   }
 })
 
-test("the item first prompt carries the item, the skill, the comment and the two reply lines", () => {
+test("the item first prompt carries the item, the skill, the writes it allows and the reply's two forms", () => {
   const hit = {
     permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
     workspace: "slack_nexar",
@@ -228,9 +228,23 @@ test("the item first prompt carries the item, the skill, the comment and the two
   assert.ok(prompt.includes("empiric-earth/almeida-slack-intake"), "the prompt carries the intake repo")
   assert.ok(prompt.includes("`slack-director` skill"), "the prompt names the skill it loads")
   assert.ok(/one comment/i.test(prompt), "the prompt asks for one comment")
+  assert.ok(prompt.includes("a request to the user"), "a flagged message counts as a request to the user")
+  assert.match(prompt, /scope rules/i, "the prompt defers to the skill's scope rules")
+  assert.ok(
+    prompt.includes("Make no GitHub write but that one issue create and that one comment"),
+    "the prompt names the only GitHub writes the first turn may make",
+  )
+  assert.ok(
+    prompt.includes("no issue edit, label, close or reopen"),
+    "the prompt names an issue edit as forbidden",
+  )
+  assert.match(prompt, /end your reply with exactly these two\s+lines/i, "the reply ends with the two lines")
   assert.ok(prompt.includes("Intake issue: "), "the reply's first fixed line")
   assert.ok(prompt.includes("Title: "), "the reply's second fixed line")
-  assert.match(prompt, /end your reply with exactly these two\s+lines/i, "the reply ends with the two lines")
+  assert.ok(
+    prompt.includes("Intake issue: none — <the reason, a few words>"),
+    "the reply's first line for a message the scope rules leave out",
+  )
   assert.match(prompt, /take no other action/i, "the first turn is bounded")
 })
 
@@ -264,6 +278,24 @@ test("the skill keeps the item format, the data rule, the field sources and the 
   assert.ok(flat.includes("Customer or production data is out of scope"), "the customer-data scope rule")
   assert.ok(flat.includes("Slack Connect and external channels are out of scope"), "the Slack Connect rule")
   assert.match(flat, /never post a decision or a commitment/i, "no decisions or commitments")
+})
+
+test("the skill bounds the first turn's writes and gives its two reply forms", () => {
+  const flat = read(SKILL_REL).replace(/\s+/g, " ")
+  assert.match(
+    flat,
+    /first turn's GitHub writes are exactly that one issue create and that one comment/i,
+    "the first turn's writes are the one issue create and the one comment",
+  )
+  assert.match(
+    flat,
+    /no issue edit, no label, no close or reopen, and no second comment/i,
+    "every other write of the first turn is named as forbidden",
+  )
+  assert.match(flat, /belongs to a later turn the user drives/i, "the skill's other writes are later-turn writes")
+  assert.match(flat, /a flagged message counts as a request to the user/i, "a flagged message counts as a request")
+  assert.match(flat, /Intake issue: none — <the reason, a few words>/, "the reply's form for a message left out")
+  assert.match(flat, /only when no issue carries it/i, "an issue is created only when none carries the permalink")
 })
 
 test("a fixture install lays down the parts, the modules and the agents; uninstall removes them", () => {

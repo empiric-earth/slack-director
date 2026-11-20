@@ -32,23 +32,19 @@ const messageOf = (error) => (error instanceof Error ? error.message : String(er
 const emptyToday = () => ({ flagged: 0, nextStepsPosted: 0, skipped: 0 })
 
 /**
- * One writer at a time per storage. Plugin storage offers get and set and no
+ * One writer at a time. Plugin storage offers get and set and no
  * compare-and-set, so two polls that both read the item map or the seen-set and
- * then write it back lose the first writer's change. The queue is keyed by the
- * storage itself, so every writer that reaches this module and shares that
- * storage takes its turn, not only one watcher's.
+ * then write it back lose the first writer's change. Every host context gets
+ * its own storage object over the same plugin namespace, so the queue is one
+ * per process and not one per storage object.
  */
-const writeQueues = new WeakMap()
+let writeQueue = Promise.resolve()
 
-function serializedWrite(storage, work) {
-  const queue = writeQueues.get(storage) ?? Promise.resolve()
-  const run = queue.then(work, work)
-  writeQueues.set(
-    storage,
-    run.then(
-      () => {},
-      () => {},
-    ),
+function serializedWrite(work) {
+  const run = writeQueue.then(work, work)
+  writeQueue = run.then(
+    () => {},
+    () => {},
   )
   return run
 }
@@ -111,7 +107,7 @@ export function createWatcher({
    * every recorded one.
    */
   function recordItem(record) {
-    return serializedWrite(storage, () => writeRecord(record))
+    return serializedWrite(() => writeRecord(record))
   }
 
   async function writeRecord(record) {
@@ -239,12 +235,14 @@ export function createWatcher({
       refreshed = true
       credential = (await refresh(name, config)) ?? credential
     }
+    const isSeen = (permalink) => seen.has(permalink)
     let search = await searchFlagged({
       fetch,
       url: server.url,
       token: credential.access,
       emoji: config.flag_emoji,
       timeoutMs: requestTimeoutMs,
+      isSeen,
     })
     if (search.unauthorized && !refreshed) {
       refreshed = true
@@ -255,6 +253,7 @@ export function createWatcher({
         token: credential.access,
         emoji: config.flag_emoji,
         timeoutMs: requestTimeoutMs,
+        isSeen,
       })
     }
     if (search.unauthorized) {

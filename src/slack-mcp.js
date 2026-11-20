@@ -11,9 +11,13 @@
 // the permalink itself.
 //
 // A hit is read from the result's own field lines only, never from a message's
-// text or its context, and never past the number of results the report's own
-// header names: a message body is untrusted text and may contain a permalink or
-// a whole result-looking section of its own.
+// text or its context. A message body is untrusted text and may hold a
+// permalink or a whole result-looking section of its own, so the position of a
+// block inside the report does not show that the block is a result: only the
+// first block of a page is the tool's own. Every other block is a candidate,
+// and a candidate that no poll has seen is established by searching the same
+// page again one result at a time, where each answer's first block is the
+// tool's own. A candidate the page does not establish never becomes a hit.
 //
 // Every request is bounded by a deadline, so one answer that never arrives
 // fails its own workspace instead of stopping the poll.
@@ -42,8 +46,6 @@ export const REQUEST_TIMEOUT_MS = 30_000
 const PERMALINK = /https:\/\/[a-z0-9][a-z0-9.-]*\.slack\.com\/archives\/[A-Z0-9]+\/p\d{10,}(\?[^\s)"'<]*)?/g
 const ARCHIVE = /^https:\/\/[a-z0-9][a-z0-9.-]*\.slack\.com\/archives\/([A-Z0-9]+)\/p(\d{10,})(\?.*)?$/
 const RESULT_MARKER = /^#{2,3}[ \t]*Result[ \t]+\d+/gm
-const RESULT_MARKER_LINE = /^#{2,3}[ \t]*Result[ \t]+\d+/m
-const RESULT_COUNT = /^#{1,4}[ \t]*Messages[ \t]*\([ \t]*(\d+)[ \t]+results?[ \t]*\)/m
 const PERMALINK_FIELD = /^Permalink:[ \t]*(.*)$/m
 const TEXT_FIELD = /^Text:/
 const CHANNEL_LINE = /^Channel:[ \t]*(.*)$/m
@@ -111,19 +113,10 @@ function textOf(content) {
   return content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text)
 }
 
-/**
- * The result blocks of one report, bounded by the count the report's own header
- * names. A marker inside a message body would otherwise become a block of its
- * own, so the count the tool writes is what tells the real blocks from the text.
- */
+/** The result blocks of one report, in the order their markers appear. */
 function resultBlocks(text) {
   const parts = text.split(RESULT_MARKER)
-  if (parts.length <= 1) return [text]
-  const blocks = parts.slice(1)
-  const first = text.search(RESULT_MARKER_LINE)
-  const head = first === -1 ? text : text.slice(0, first)
-  const named = RESULT_COUNT.exec(head)
-  return named ? blocks.slice(0, Number(named[1])) : blocks
+  return parts.length <= 1 ? [text] : parts.slice(1)
 }
 
 /**
@@ -173,16 +166,29 @@ function dedupe(hits) {
   return out
 }
 
-/** The hits a search result carries, from its rows or from its report's blocks. */
-export function hitsOf(result) {
+/**
+ * What one search answer carries.
+ *
+ * - `established`: the hits the answer's own structure shows are results — the
+ *   rows of an array, or the first block of a report, which comes before any
+ *   message text.
+ * - `candidates`: every further block's hit. Its block may be a section a
+ *   message's text forged, so it is a hit only once the page establishes it.
+ * - `blocks`: how many result markers the report holds, forged ones included.
+ */
+export function pageOf(result) {
   const payload = resultPayload(result)
   const rows = [payload.messages, payload.results, payload.hits].find(Array.isArray) ?? []
   const fromRows = dedupe(rows.map(hitOfRow).filter(Boolean))
-  if (fromRows.length > 0) return fromRows
-  const blocks = [payload.results, payload.messages, payload.hits, ...textOf(result?.content)]
-    .filter((value) => typeof value === "string")
-    .flatMap(resultBlocks)
-  return dedupe(blocks.map(hitOfBlock).filter(Boolean))
+  if (fromRows.length > 0) return { established: fromRows, candidates: [], blocks: fromRows.length }
+  const fields = [payload.results, payload.messages, payload.hits].filter((value) => typeof value === "string")
+  const reports = fields.length > 0 ? fields : textOf(result?.content)
+  const blocks = reports.flatMap(resultBlocks)
+  const [first, ...rest] = blocks.map(hitOfBlock)
+  const established = first ? [first] : []
+  const known = new Set(established.map((hit) => hit.permalink))
+  const candidates = dedupe(rest.filter(Boolean)).filter((hit) => !known.has(hit.permalink))
+  return { established, candidates, blocks: blocks.length }
 }
 
 /** The next page's cursor: a `next_cursor` field, or the backticked token a pagination line carries. */
@@ -274,6 +280,11 @@ function toolErrorText(result) {
  * page. Returns the hits, whether the scan ended early because Slack rate
  * limited it or refused the credential, why it failed when the transport, the
  * protocol or the tool itself failed, and the last answer's shape.
+ *
+ * `isSeen` says whether an earlier poll already recorded a permalink. A page
+ * with a candidate the poll has not seen is searched again one result at a
+ * time (see the top of this file), and only the candidates that walk reaches
+ * are returned as hits.
  */
 export async function searchFlagged({
   fetch,
@@ -282,6 +293,7 @@ export async function searchFlagged({
   emoji,
   limit = PAGE_LIMIT,
   timeoutMs = REQUEST_TIMEOUT_MS,
+  isSeen = () => false,
 }) {
   const empty = () => ({ fields: [], results: 0 })
   const opened = await post({
@@ -311,13 +323,9 @@ export async function searchFlagged({
     body: { jsonrpc: "2.0", method: "notifications/initialized" },
   })
 
-  const hits = []
-  let shape = empty()
-  let cursor
   let id = 2
-  for (;;) {
-    const args = { [SEARCH_FILTER_ARGUMENT]: searchFilter(emoji), sort: SORT_BY, sort_dir: "desc", limit }
-    if (cursor) args.cursor = cursor
+  /** One search call: the answer's result, or why the scan must stop. */
+  async function search(args) {
     const call = await post({
       fetch,
       url,
@@ -326,21 +334,64 @@ export async function searchFlagged({
       timeoutMs,
       body: { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: SEARCH_TOOL, arguments: args } },
     })
-    if (call.status === 401) return { unauthorized: true, hits, shape }
-    if (call.status === 429) return { rateLimited: true, hits, shape }
+    if (call.status === 401) return { stop: { unauthorized: true } }
+    if (call.status === 429) return { stop: { rateLimited: true } }
     const result = call.payload?.result
     // A transport, protocol or tool failure is not an empty search: the
     // workspace reports it, so a broken scan never reads as healthy.
     if (call.status < 200 || call.status >= 300 || !result) {
-      return { error: `Slack search failed: ${answerFailure(call)}`, hits, shape }
+      return { stop: { error: `Slack search failed: ${answerFailure(call)}` } }
     }
-    if (rateLimited(result)) return { rateLimited: true, hits, shape }
-    if (result.isError === true) return { error: `Slack search failed: ${toolErrorText(result)}`, hits, shape }
+    if (rateLimited(result)) return { stop: { rateLimited: true } }
+    if (result.isError === true) return { stop: { error: `Slack search failed: ${toolErrorText(result)}` } }
+    return { result }
+  }
+
+  const argsFor = (cursor, size) => {
+    const args = { [SEARCH_FILTER_ARGUMENT]: searchFilter(emoji), sort: SORT_BY, sort_dir: "desc", limit: size }
+    if (cursor) args.cursor = cursor
+    return args
+  }
+
+  /**
+   * The page that starts at `cursor`, one result per call: the first block of
+   * each answer is the tool's own, so every hit this returns is one of the
+   * user's flagged messages whatever the messages' text says.
+   */
+  async function walk(cursor, steps) {
+    const found = []
+    let at = cursor
+    for (let step = 0; step < steps; step += 1) {
+      const answered = await search(argsFor(at, 1))
+      if (answered.stop) return { stop: answered.stop, found }
+      found.push(...pageOf(answered.result).established)
+      const next = cursorOf(answered.result)
+      if (!next || next === at) break
+      at = next
+    }
+    return { found }
+  }
+
+  const hits = []
+  let shape = empty()
+  let cursor
+  for (;;) {
+    const answered = await search(argsFor(cursor, limit))
+    if (answered.stop) return { ...answered.stop, hits: dedupe(hits), shape }
+    const { result } = answered
     shape = shapeOf(result)
-    hits.push(...hitsOf(result))
+    const page = pageOf(result)
+    hits.push(...page.established)
+    if (page.candidates.some((candidate) => !isSeen(candidate.permalink))) {
+      const walked = await walk(cursor, Math.min(page.blocks, limit))
+      hits.push(...walked.found)
+      if (walked.stop) return { ...walked.stop, hits: dedupe(hits), shape }
+    } else {
+      hits.push(...page.candidates)
+    }
     const next = cursorOf(result)
     if (!next || next === cursor) break
     cursor = next
   }
-  return { hits, shape }
+  return { hits: dedupe(hits), shape }
 }

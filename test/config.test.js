@@ -164,10 +164,20 @@ test("a change to the poll interval takes effect at the next poll, with no resta
     const reader = createConfigReader({ env: fx.env })
     writeFileSync(fx.path, JSON.stringify({ ...REQUIRED, poll_seconds: 60, work_hours: WINDOW }))
     const { watcher, clock } = watcherOver(reader)
-    assert.equal((await watcher.poll()).pollSeconds, 60)
+    const first = await watcher.poll()
+    assert.equal(first.pollSeconds, 60)
+    assert.equal(first.status.lastPoll, new Date(clock.ms).toISOString(), "the first poll ran")
     clock.ms += 60_000
-    writeFileSync(fx.path, JSON.stringify({ ...REQUIRED, poll_seconds: 5, work_hours: WINDOW }))
-    assert.equal((await watcher.poll()).pollSeconds, 5, "the new interval is read without a restart")
+    writeFileSync(fx.path, JSON.stringify({ ...REQUIRED, poll_seconds: 15, work_hours: WINDOW }))
+    const second = await watcher.poll()
+    assert.equal(second.pollSeconds, 15, "the new interval is read without a restart")
+    assert.equal(second.status.lastPoll, new Date(clock.ms).toISOString(), "the tick that read the new interval ran")
+    // The next tick comes one new interval later, not one old lease later: the
+    // instance's own lease from the poll just run must not skip it.
+    clock.ms += 15_000
+    const third = await watcher.poll()
+    assert.equal(third.pollSeconds, 15)
+    assert.equal(third.status.lastPoll, new Date(clock.ms).toISOString(), "the next tick at the shorter interval ran")
   } finally {
     fx.clean()
   }

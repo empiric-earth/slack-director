@@ -28,9 +28,10 @@ import { inWorkHours } from "./work-hours.js"
 export const REFRESH_AGENT = "slack-director-refresh"
 
 /**
- * How long one instance's lease keeps another from polling. It is shorter than
- * the default poll interval, so a tick is never blocked by the previous tick's
- * lease.
+ * How long one instance's lease keeps another from polling. An instance's own
+ * lease never blocks it, so a tick is never skipped by the lease the tick
+ * before it left; a lease that outlives a configured interval still spares a
+ * second instance the same tick.
  */
 export const LEASE_MS = 30_000
 
@@ -399,7 +400,13 @@ export function createWatcher({
       return { pollSeconds: config.poll_seconds, status: previous }
     }
     const lease = await storage.get(KEYS.lease)
-    if (!force && lease && typeof lease.expires === "number" && lease.expires > now()) {
+    if (
+      !force &&
+      lease &&
+      lease.owner !== owner &&
+      typeof lease.expires === "number" &&
+      lease.expires > now()
+    ) {
       // Another instance polls; the claim and commit files still hold.
       return { pollSeconds: config.poll_seconds, status: previous }
     }

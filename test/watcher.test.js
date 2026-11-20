@@ -522,6 +522,41 @@ test("two instances that both find the lease absent still give one hit one promp
   }
 })
 
+test("an instance is never blocked by its own lease, so a shorter configured interval is honoured", async () => {
+  const ts = message(60)
+  const h = harness({ pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    h.config.poll_seconds = 15
+    await h.watcher.poll()
+    const first = h.status().lastPoll
+    const searches = h.toolCalls().length
+    // One new interval later: well inside the lease this instance just took.
+    h.clock.ms += 15_000
+    await h.watcher.poll()
+    assert.equal(h.status().lastPoll, new Date(h.now()).toISOString(), "the next tick at the configured interval ran")
+    assert.notEqual(h.status().lastPoll, first)
+    assert.equal(h.toolCalls().length, searches + 2, "it searched both Slack workspaces, as a poll does")
+  } finally {
+    h.clean()
+  }
+})
+
+test("another instance's unexpired lease still spares a duplicate poll", async () => {
+  const ts = message(60)
+  const h = harness({ pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const searches = h.toolCalls().length
+    // The other instance's lease is still valid one interval later.
+    h.clock.ms += 15_000
+    const blocked = await h.newWatcher().poll()
+    assert.equal(h.toolCalls().length, searches, "the second instance made no Slack call")
+    assert.equal(blocked.status.lastPoll, new Date(NOW).toISOString(), "the second instance answered the last status unchanged")
+  } finally {
+    h.clean()
+  }
+})
+
 test("a lease that expires mid-poll lets a second instance take over, and still one hit gets one session", async () => {
   const ts = message(60)
   const h = harness({ pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })

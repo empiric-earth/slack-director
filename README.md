@@ -53,8 +53,10 @@ stays.
 - Removing the flag from a message you have handled keeps the scan short: the
   watcher searches for the messages you have flagged, so a cleared flag leaves
   the search.
-- One permalink gets one item session. A second flag in the same thread finds
-  the issue that permalink already has, so no second issue appears.
+- One permalink gets one item session and one intake issue. Flagging the same
+  message again, or sending the first prompt for it again, finds the issue that
+  permalink already has, so no second issue appears. A second message in the
+  same thread is a different permalink, so it gets its own issue.
 - A flagged message the scope rules leave out — customer or production data, a
   Slack Connect or external channel, or one the session cannot classify — gets
   no issue and no comment. The session's reply says so instead of naming an

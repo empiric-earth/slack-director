@@ -23,7 +23,7 @@ install:
 	cp agents/slack-director-triage.md "$(TRIAGE_AGENT)"
 	cp agents/slack-director-refresh.md "$(REFRESH_AGENT)"
 	rm -rf "$(STALE_SKILL_DIR)"
-	@echo "Installed. Run 'opencode reload' to load the slack-director agent, its skill, its command and the flag watcher."
+	@echo "Installed. Run 'opencode reload' to load the slack-director agents, the skill and the flag watcher."
 
 uninstall:
 	rm -rf "$(PLUGIN_DIR)"

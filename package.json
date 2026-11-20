@@ -1,7 +1,7 @@
 {
   "name": "opencode-slack-director",
   "version": "0.1.0",
-  "description": "OpenCode package that delivers the Slack Director: its skill, its /slack-director-intake command, and the watcher that gives each flagged Slack message a session.",
+  "description": "OpenCode package that delivers the Slack Director: its skill, and the watcher that gives each flagged Slack message a session.",
   "type": "module",
   "exports": { ".": "./index.js", "./tui": "./tui.js", "./rpc": "./rpc.js" },
   "scripts": { "test": "node --test --test-reporter=tap test/*.test.js" },

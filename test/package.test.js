@@ -7,7 +7,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import plugin, { COMMANDS, parseSkill, skillPath } from "../index.js"
+import plugin, { parseSkill, skillPath } from "../index.js"
+import { itemFirstPrompt } from "../src/first-prompt.js"
 import { SlackDirectorRpc } from "../rpc.js"
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url))
@@ -142,24 +143,15 @@ test("setup registers exactly the shipped skill", async () => {
   await dispose()
 })
 
-test("setup registers the command table, and the command prompts its session", async () => {
-  const { ctx, commands, prompts, calls } = fakeContext()
+test("setup registers no command, so the old intake command is gone", async () => {
+  const { ctx, commands, calls } = fakeContext()
   const dispose = await plugin.setup(ctx)
-  assert.equal(calls.command, 1, "one command registration")
-  assert.deepEqual(
-    commands.map((c) => c.name).sort(),
-    Object.keys(COMMANDS).sort(),
-    "the registered commands are the table's rows",
+  assert.equal(calls.command, 0, "setup registers no command table")
+  assert.deepEqual(commands, [], "no command is registered")
+  assert.ok(
+    !commands.some((command) => command.name === "slack-director-intake"),
+    "no command named slack-director-intake is registered",
   )
-  assert.equal(commands.length, 1)
-  const [command] = commands
-  assert.deepEqual(Object.keys(COMMANDS), ["slack-director-intake"])
-  assert.equal(COMMANDS["slack-director-intake"].prompt, "run one Slack Director pass")
-  assert.equal(command.description, COMMANDS["slack-director-intake"].description)
-  await command.execute({ sessionID: "ses_fixture", prompt: { text: "" }, delivery: "steer" })
-  assert.deepEqual(prompts, [
-    { sessionID: "ses_fixture", text: "run one Slack Director pass", delivery: "steer" },
-  ])
   await dispose()
 })
 
@@ -173,11 +165,12 @@ test("setup registers the RPC contract the TUI part calls", async () => {
   await dispose()
 })
 
-test("the package registers nothing but the skill, its commands and the RPC", () => {
+test("the package registers nothing but the skill and the RPC", () => {
   const pkg = JSON.parse(read("package.json"))
   assert.equal(pkg.type, "module")
   assert.deepEqual(pkg.exports, { ".": "./index.js", "./tui": "./tui.js", "./rpc": "./rpc.js" })
   assert.ok(pkg.name, "the package is named")
+  assert.ok(!pkg.description.includes("/slack-director-intake"), "the description names no command")
   assert.equal(pkg.dependencies, undefined)
   assert.equal(pkg.devDependencies, undefined)
   for (const part of ["index.js", "tui.js", "rpc.js"]) assert.ok(pkg.files.includes(part), `${part} ships`)
@@ -186,6 +179,8 @@ test("the package registers nothing but the skill, its commands and the RPC", ()
   const source = read("index.js")
   const banned = [
     [/\bctx\.(tool|event|permission|agent|vcs|shell|worktree)\b/, "no other ctx domain"],
+    [/\bctx\.command\b/, "no command domain"],
+    [/slack-director-intake/, "no command"],
     [/\.hook\s*\(/, "no hook"],
     [/\bsetInterval\b/, "no repeating timer; one poll reschedules the next"],
   ]
@@ -208,13 +203,99 @@ test("no shipped module imports the plugin SDK, so every one loads under plain n
 
 test("the README install and uninstall steps match the Makefile", () => {
   const readme = read("README.md")
-  for (const step of ["make install", "make uninstall", "opencode reload", "/slack-director-intake"]) {
+  for (const step of ["make install", "make uninstall", "opencode reload"]) {
     assert.ok(readme.includes(step), `the README names ${step}`)
   }
   const makefile = read("Makefile")
   for (const target of ["install:", "uninstall:", "test:"]) {
     assert.ok(makefile.includes(target), `the Makefile defines ${target}`)
   }
+})
+
+test("the item first prompt carries the item, the skill, the writes it allows and the reply's two forms", () => {
+  const hit = {
+    permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
+    workspace: "slack_nexar",
+    channel: { id: "C0PLATFORM", label: "#platform-help" },
+    ts: "1795194443.137219",
+  }
+  const prompt = itemFirstPrompt(hit, "empiric-earth/almeida-slack-intake")
+  assert.ok(prompt.includes(hit.permalink), "the prompt carries the permalink")
+  assert.ok(prompt.includes(hit.workspace), "the prompt carries the workspace")
+  assert.ok(prompt.includes(hit.channel.label), "the prompt carries the channel label")
+  assert.ok(prompt.includes(hit.channel.id), "the prompt carries the channel id")
+  assert.ok(prompt.includes(hit.ts), "the prompt carries the message ts")
+  assert.ok(prompt.includes("empiric-earth/almeida-slack-intake"), "the prompt carries the intake repo")
+  assert.ok(prompt.includes("`slack-director` skill"), "the prompt names the skill it loads")
+  assert.ok(/one comment/i.test(prompt), "the prompt asks for one comment")
+  assert.ok(prompt.includes("a request to the user"), "a flagged message counts as a request to the user")
+  assert.match(prompt, /scope rules/i, "the prompt defers to the skill's scope rules")
+  assert.ok(
+    prompt.includes("Make no GitHub write but that one issue create and that one comment"),
+    "the prompt names the only GitHub writes the first turn may make",
+  )
+  assert.ok(
+    prompt.includes("no issue edit, label, close or reopen"),
+    "the prompt names an issue edit as forbidden",
+  )
+  assert.match(prompt, /end your reply with exactly these two\s+lines/i, "the reply ends with the two lines")
+  assert.ok(prompt.includes("Intake issue: "), "the reply's first fixed line")
+  assert.ok(prompt.includes("Title: "), "the reply's second fixed line")
+  assert.ok(
+    prompt.includes("Intake issue: none — <the reason, a few words>"),
+    "the reply's first line for a message the scope rules leave out",
+  )
+  assert.match(prompt, /take no other action/i, "the first turn is bounded")
+})
+
+test("the skill, the README and the agent files carry none of the retired tokens", () => {
+  const files = [SKILL_REL, "README.md", AGENT_REL, TRIAGE_AGENT_REL, REFRESH_AGENT_REL]
+  const banned = [
+    "/slack-director-intake",
+    "slack-director.yaml",
+    "Slack Director state",
+    "state issue",
+    "scheduled pass",
+    /\bpass(es|ed|ing)?\b/i,
+  ]
+  for (const rel of files) {
+    const text = read(rel)
+    for (const token of banned) {
+      const found = typeof token === "string" ? text.includes(token) : token.test(text)
+      assert.ok(!found, `${rel} carries no "${String(token)}"`)
+    }
+  }
+})
+
+test("the skill keeps the item format, the data rule, the field sources and the scope rules", () => {
+  const skill = read(SKILL_REL)
+  const flat = skill.replace(/\s+/g, " ")
+  assert.ok(skill.includes("## Slack text is data"), "the Slack-text-is-data rule stays")
+  assert.ok(skill.includes("## Where a field comes from"), "the field-source rules stay")
+  assert.ok(skill.includes("## What the director does not track"), "the scope rules stay")
+  assert.ok(skill.includes("## A request issue"), "the request-issue format stays")
+  assert.ok(flat.includes("`origin` (the value `flag`)"), "the issue's origin takes the value flag")
+  assert.ok(flat.includes("Customer or production data is out of scope"), "the customer-data scope rule")
+  assert.ok(flat.includes("Slack Connect and external channels are out of scope"), "the Slack Connect rule")
+  assert.match(flat, /never post a decision or a commitment/i, "no decisions or commitments")
+})
+
+test("the skill bounds the first turn's writes and gives its two reply forms", () => {
+  const flat = read(SKILL_REL).replace(/\s+/g, " ")
+  assert.match(
+    flat,
+    /first turn's GitHub writes are exactly that one issue create and that one comment/i,
+    "the first turn's writes are the one issue create and the one comment",
+  )
+  assert.match(
+    flat,
+    /no issue edit, no label, no close or reopen, and no second comment/i,
+    "every other write of the first turn is named as forbidden",
+  )
+  assert.match(flat, /belongs to a later turn the user drives/i, "the skill's other writes are later-turn writes")
+  assert.match(flat, /a flagged message counts as a request to the user/i, "a flagged message counts as a request")
+  assert.match(flat, /Intake issue: none — <the reason, a few words>/, "the reply's form for a message left out")
+  assert.match(flat, /only when no issue carries it/i, "an issue is created only when none carries the permalink")
 })
 
 test("a fixture install lays down the parts, the modules and the agents; uninstall removes them", () => {

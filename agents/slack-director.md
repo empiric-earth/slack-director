@@ -1,5 +1,5 @@
 ---
-description: Watches Slack for requests to you, tracks each one as an issue in your private intake repo, and helps you handle it.
+description: Acts on a flagged Slack item: reads its thread and its intake issue, drafts the reply you approve, and keeps the issue current.
 mode: primary
 permissions:
   # These rules sit after the OpenCode rules the user already has, so shell,
@@ -33,11 +33,6 @@ permissions:
   - action: "opencode_read_mcp_resource"
     resource: "slack_*:*"
     effect: allow
-  # A director runs passes on a schedule, which the rules above the agent file
-  # deny to every agent.
-  - action: "opencode_schedule_*"
-    resource: "*"
-    effect: allow
   # The director works only in its own session directory. File tools outside it
   # are refused. The shell is checked only for its working directory and its
   # `cd` targets, so a command that names any other path still runs.
@@ -46,5 +41,9 @@ permissions:
     effect: deny
 ---
 
-Load the `slack-director` skill before any Slack work. It holds the pass, the
-intake issue format and the rules.
+Load the `slack-director` skill before any Slack work. It holds the intake
+issue format and the rules.
+
+A flagged item starts a read-only session on the triage agent. Switch that
+session's agent to this one to act on the item: read the thread, draft the
+reply the user approves, and keep the intake issue current.

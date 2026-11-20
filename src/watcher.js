@@ -10,7 +10,7 @@
 import { randomUUID } from "node:crypto"
 import { permalinkHash, STALE_MS } from "./claims.js"
 import { DEFAULT_POLL_SECONDS } from "./config.js"
-import { refreshPrompt, skeletonFirstPrompt } from "./first-prompt.js"
+import { itemFirstPrompt, refreshPrompt } from "./first-prompt.js"
 import { REQUEST_TIMEOUT_MS, searchFlagged, SLACK_MCP_URL } from "./slack-mcp.js"
 import { KEYS } from "./state.js"
 
@@ -184,7 +184,7 @@ export function createWatcher({
     }
     await recordItem(record)
     try {
-      await session.prompt({ sessionID: created.id, text: skeletonFirstPrompt(hit) })
+      await session.prompt({ sessionID: created.id, text: itemFirstPrompt(hit, config.intake_repo) })
     } catch (error) {
       log(`first prompt failed for ${hit.permalink}: ${messageOf(error)}`)
     }

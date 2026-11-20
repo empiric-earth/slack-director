@@ -8,7 +8,7 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 /** The namespace every storage key and every claims file sits under. */
-export const NAMESPACE = "skeleton"
+export const NAMESPACE = "item"
 
 const key = (name) => `${NAMESPACE}/${name}`
 

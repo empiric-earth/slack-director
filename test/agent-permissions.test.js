@@ -124,13 +124,23 @@ test("Slack reads, searches, listings, reactions and drafts need no prompt", () 
 })
 
 test("the director inherits the baseline and adds its own rules on top", () => {
-  assert.equal(effect("opencode_schedule_run"), "allow", "a scheduled pass is allowed, over the baseline's deny")
   assert.equal(effect("external_directory"), "deny", "work outside the session directory is refused")
   assert.equal(effect("shell", "rm -rf build"), "deny", "the baseline's destructive-shell rule still decides")
   assert.equal(effect("read", "certificate.env"), "ask", "a secret file still asks")
   assert.equal(effect("skill", "slack-minion"), "allow", "the user's Slack skills are loadable")
   assert.equal(effect("sparta_exec"), "allow", "GitHub through sparta is allowed")
   assert.equal(effect("skill", "browser"), "deny", "OpenCode's browser skill stays denied")
+})
+
+test("the director agent allows no schedule", () => {
+  for (const action of [
+    "opencode_schedule_run",
+    "opencode_schedule_list",
+    "opencode_schedule_create",
+    "opencode_schedule_delete",
+  ]) {
+    assert.equal(effect(action), "deny", `${action} is refused, over the baseline's deny`)
+  }
 })
 
 // The two agents the watcher runs sessions on. Each file starts from the same
@@ -158,7 +168,7 @@ test("the triage agent reads, searches and lists Slack, and reads files", () => 
   }
 })
 
-test("the triage agent denies every Slack write, the skill tool and the broker", () => {
+test("the triage agent denies every Slack write", () => {
   const writes = [
     "send_message",
     "schedule_message",
@@ -174,8 +184,14 @@ test("the triage agent denies every Slack write, the skill tool and the broker",
       assert.equal(effectUnder(TRIAGE, `${server}_slack_${tool}`), "deny", `${server}_slack_${tool} is refused`)
     }
   }
-  assert.equal(effectUnder(TRIAGE, "skill", "slack-director"), "deny", "the skill tool is refused")
-  assert.equal(effectUnder(TRIAGE, "sparta_exec"), "deny", "the broker tool is refused")
+})
+
+test("the triage agent loads only the slack-director skill, and holds the broker", () => {
+  assert.equal(effectUnder(TRIAGE, "skill", "slack-director"), "allow", "the slack-director skill is allowed")
+  for (const other of ["slack-minion", "almeida-slack-style", "browser", "my-slack-director"]) {
+    assert.equal(effectUnder(TRIAGE, "skill", other), "deny", `the ${other} skill id is refused`)
+  }
+  assert.equal(effectUnder(TRIAGE, "sparta_exec"), "allow", "the credential broker is allowed")
 })
 
 test("the triage agent denies edits, writes, the shell, schedules, subagents and outside directories", () => {

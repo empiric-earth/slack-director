@@ -1,11 +1,11 @@
-// opencode-slack-director: delivers the Slack Director's skill and its
-// on-demand command to OpenCode, and polls Slack for the messages the user
-// flagged so each new one gets a session.
+// opencode-slack-director: delivers the Slack Director's skill to OpenCode,
+// and polls Slack for the messages the user flagged so each new one gets a
+// session.
 //
-// The server part is the plugin's only host adapter: the skill and command
-// registrations, the RPC contract and the watcher's timer are wired here, and
-// every piece of behaviour lives in the modules under src/, so the whole watcher
-// replays in the node suite with a fake context and a fake HTTP layer.
+// The server part is the plugin's only host adapter: the skill registration,
+// the RPC contract and the watcher's timer are wired here, and every piece of
+// behaviour lives in the modules under src/, so the whole watcher replays in
+// the node suite with a fake context and a fake HTTP layer.
 import { randomUUID } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
@@ -17,18 +17,6 @@ import { createWatcher } from "./src/watcher.js"
 
 /** The skill this package ships. */
 export const SKILL = "slack-director"
-
-/**
- * The commands this package registers, by name: each row carries the command's
- * description and the prompt it sends to the session it was invoked in. Adding
- * a command is one row here.
- */
-export const COMMANDS = {
-  "slack-director-intake": {
-    description: "Run one Slack Director pass in this session",
-    prompt: "run one Slack Director pass",
-  },
-}
 
 /** Split a SKILL.md into its frontmatter fields and its body. */
 export function parseSkill(text) {
@@ -86,20 +74,6 @@ export default {
         content: skill.body,
       })
     })
-    const commandRegistration = await ctx.command.transform((editor) => {
-      for (const [name, row] of Object.entries(COMMANDS)) {
-        editor.add({
-          name,
-          description: row.description,
-          execute: (invocation) =>
-            ctx.session.prompt({
-              sessionID: invocation.sessionID,
-              text: row.prompt,
-              delivery: invocation.delivery,
-            }),
-        })
-      }
-    })
 
     const watcher = createWatcher({
       storage: ctx.storage,
@@ -139,7 +113,6 @@ export default {
     return async () => {
       clearTimeout(timer)
       await rpcRegistration.dispose()
-      await commandRegistration.dispose()
       await skillRegistration.dispose()
     }
   },

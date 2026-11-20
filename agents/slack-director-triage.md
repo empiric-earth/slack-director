@@ -1,10 +1,10 @@
 ---
-description: Reads one flagged Slack message and its thread, then replies with a short paraphrase and the permalink. Read-only.
+description: Works one flagged Slack message: finds or creates its intake issue, reads the thread, and posts the findings and proposed next steps. Read-only on Slack.
 mode: primary
 permissions:
-  # A triage session reads and reports; it changes nothing. The catch-all deny
-  # is the whole of "everything else", and the allows below it are the entire
-  # list of what it may do. Last match wins.
+  # An item session reads, investigates and reports; it changes nothing in
+  # Slack. The catch-all deny is the whole of "everything else", and the allows
+  # below it are the entire list of what it may do. Last match wins.
   - action: "*"
     resource: "*"
     effect: deny
@@ -29,8 +29,17 @@ permissions:
   - action: "slack_*_slack_list_*"
     resource: "*"
     effect: allow
+  # The one skill this session follows. Every other skill id falls to the
+  # catch-all deny above.
+  - action: "skill"
+    resource: "slack-director"
+    effect: allow
+  # The credential broker, for the intake issue and its one comment. The broker
+  # judges each request against this session's task.
+  - action: "sparta_exec"
+    resource: "*"
+    effect: allow
 ---
 
-Read the flagged message and its thread with the Slack read tools, then reply
-with a short paraphrase of the request and the permalink. That reply is the
-whole of the work.
+Load the `slack-director` skill and follow it. It holds the first turn, the
+intake issue format and the rules.

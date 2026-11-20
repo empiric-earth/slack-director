@@ -5,12 +5,11 @@
 // poll's files and storage hold. No dependencies; run with `node --test`.
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs"
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createClaims, permalinkHash, STALE_MS } from "../src/claims.js"
 import { DEFAULT_TRIAGE_AGENT } from "../src/config.js"
-import { SKELETON_LIMITS } from "../src/first-prompt.js"
 import { SEARCH_TOOL, SLACK_MCP_URL } from "../src/slack-mcp.js"
 import { claimsDir, KEYS, NAMESPACE } from "../src/state.js"
 import { createWatcher, LEASE_MS, REFRESH_AGENT, SUSPENDED_ERROR } from "../src/watcher.js"
@@ -385,17 +384,65 @@ test("a new hit gets exactly one session on the triage agent, and the same hit o
   }
 })
 
-test("the skeleton first prompt names no skill and asks for no issue, comment or other write", async () => {
+test("a new hit's session gets the full first prompt of an item session", async () => {
   const ts = message(60)
   const h = harness({ pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
   try {
     await h.watcher.poll()
     const prompt = h.prompts[0].text
-    assert.ok(!prompt.includes("slack-director"), "the prompt names no skill")
-    assert.ok(!/\bissue\b/i.test(prompt), "the prompt asks for no issue")
-    assert.ok(!/\bcomment\b/i.test(prompt), "the prompt asks for no comment")
-    assert.ok(prompt.includes(SKELETON_LIMITS), "the prompt states the read-only limits")
-    assert.ok(/read that message's thread/i.test(prompt), "the prompt asks for the thread read")
+    assert.ok(prompt.includes("`slack-director` skill"), "the prompt loads the slack-director skill")
+    assert.ok(prompt.includes(h.config.intake_repo), "the prompt carries the intake repo")
+    assert.ok(/one comment/i.test(prompt), "the prompt asks for one comment on the issue")
+    assert.ok(prompt.includes("Intake issue: "), "the reply's first fixed line")
+    assert.ok(prompt.includes("Title: "), "the reply's second fixed line")
+    assert.match(prompt, /take no other action/i, "the first turn is bounded")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a permalink the earlier build already saw gets one item session with the full first prompt", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    // The earlier build kept its state under the `skeleton` namespace: a seen
+    // entry, an item record, a claim file and a commit file. The item build
+    // reads none of it, so the permalink is new again.
+    const hash = permalinkHash(link)
+    const record = {
+      permalink: link,
+      workspace: "slack_nexar",
+      channel: "#platform-help",
+      channelID: "C0PLATFORM",
+      ts,
+      flaggedAt: new Date(h.now()).toISOString(),
+      sessionID: "ses_skeleton",
+      firstTurnFailed: true,
+      firstTurnEndedAt: null,
+    }
+    h.storage.map.set("skeleton/seen", [link])
+    h.storage.map.set("skeleton/items", { [link]: record })
+    const skeletonDir = join(h.root, "state", "opencode", "slack-director", "claims", "skeleton")
+    mkdirSync(skeletonDir, { recursive: true })
+    writeFileSync(join(skeletonDir, `${hash}.claim.0`), String(h.now()))
+    writeFileSync(
+      join(skeletonDir, `${hash}.session`),
+      JSON.stringify({ sessionID: "ses_skeleton", committedAt: new Date(h.now()).toISOString(), ...record }),
+    )
+
+    await h.watcher.poll()
+    assert.equal(h.created.length, 1, "the skeleton-seen permalink gets one item session")
+    assert.equal(h.created[0].agent, DEFAULT_TRIAGE_AGENT, "on the triage agent")
+    const prompt = h.prompts[0].text
+    assert.ok(prompt.includes(link), "the full first prompt carries the permalink")
+    assert.ok(prompt.includes("`slack-director` skill"), "and the skill it loads")
+    assert.ok(prompt.includes(h.config.intake_repo), "and the intake repo")
+
+    h.clock.ms += h.config.poll_seconds * 1000
+    await h.watcher.poll()
+    assert.equal(h.created.length, 1, "the next poll creates no second session")
+    assert.equal(h.prompts.length, 1)
   } finally {
     h.clean()
   }
@@ -680,7 +727,7 @@ test("a prompt call that throws leaves the record as waiting and retries nothing
   }
 })
 
-test("every storage key and every claims file sits under the skeleton namespace", async () => {
+test("every storage key and every claims file sits under the item namespace", async () => {
   const ts = message(60)
   const h = harness({ pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
   try {

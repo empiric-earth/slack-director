@@ -77,7 +77,7 @@ test("the command calls status and shows the answer as a toast", async () => {
   await layers[0].commands[0].run()
   assert.deepEqual(rpcCalls, ["slack-director", {}], "the command calls status through the contract")
   assert.equal(toasts.length, 1, "one toast")
-  assert.ok(toasts[0].message.includes("last poll 14:32"), "the toast names the last poll")
+  assert.match(toasts[0].message, /last poll \d\d:\d\d/, "the toast names the last poll")
   assert.ok(toasts[0].message.includes("ok"), "the toast names the outcome")
   assert.ok(toasts[0].message.includes("slack_nexar ✓"), "the toast names each workspace")
   assert.ok(toasts[0].message.includes("sign-in expired — run /mcps"), "the toast names a failing workspace")
@@ -94,4 +94,25 @@ test("a rejected status call becomes a toast rather than a crash", async () => {
 test("the toast line reports a poll that never ran", () => {
   const line = formatStatus({ lastPoll: null, outcome: "never polled", workspaces: [], configError: null, today: {} })
   assert.equal(line, "Slack Director: last poll never · never polled")
+})
+
+test("the toast shows the last poll on the local clock, not on the UTC clock", () => {
+  const lastPoll = "2026-11-20T14:32:00.000Z"
+  const previous = process.env.TZ
+  const shown = (zone) => {
+    process.env.TZ = zone
+    return formatStatus({ ...STATUS, lastPoll })
+  }
+  try {
+    assert.match(shown("America/Los_Angeles"), /^Slack Director: last poll 06:32 · /, "eight hours behind UTC")
+    assert.match(shown("Asia/Tokyo"), /^Slack Director: last poll 23:32 · /, "nine hours ahead of UTC")
+    assert.match(shown("UTC"), /^Slack Director: last poll 14:32 · /, "UTC")
+  } finally {
+    if (previous === undefined) delete process.env.TZ
+    else process.env.TZ = previous
+  }
+})
+
+test("a last poll that is not a time reads as never", () => {
+  assert.equal(formatStatus({ lastPoll: "not a time", outcome: "ok", workspaces: [] }).startsWith("Slack Director: last poll never"), true)
 })

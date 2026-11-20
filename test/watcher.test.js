@@ -94,12 +94,26 @@ async function waitFor(condition, label) {
   throw new Error(`timed out waiting for ${label}`)
 }
 
+/** Let every pending microtask and macrotask of the other work run. */
+async function yieldTimes(times) {
+  for (let i = 0; i < times; i += 1) await new Promise((resolve) => setImmediate(resolve))
+}
+
 /**
  * A fake context: one shared storage and claims directory, a fake HTTP layer
  * that answers MCP over HTTP from `pages`, and a fake session API that records
  * every call.
  */
-function harness({ pages = {}, statuses = {}, servers = [NEXAR, NAUTO], emoji = "oc", credentials } = {}) {
+function harness({
+  pages = {},
+  statuses = {},
+  servers = [NEXAR, NAUTO],
+  emoji = "oc",
+  credentials,
+  stall = [],
+  serverError,
+  requestTimeoutMs,
+} = {}) {
   const root = mkdtempSync(join(tmpdir(), "slack-director-watcher-"))
   const stateHome = join(root, "state")
   const dir = claimsDir({ XDG_STATE_HOME: stateHome })
@@ -108,6 +122,7 @@ function harness({ pages = {}, statuses = {}, servers = [NEXAR, NAUTO], emoji = 
   const now = () => clock.ms
   const calls = []
   const logs = []
+  const searches = new Map()
   const consoleOutput = []
   const realWarn = console.warn
   const realLog = console.log
@@ -143,6 +158,7 @@ function harness({ pages = {}, statuses = {}, servers = [NEXAR, NAUTO], emoji = 
       name: body.params?.name,
       args: body.params?.arguments,
     })
+    if (stall.includes(token)) return new Promise(() => {})
     const override = statuses[token]
     if (override) return respond(override.status, override.text ?? "")
     if (body.method === "initialize") {
@@ -152,10 +168,12 @@ function harness({ pages = {}, statuses = {}, servers = [NEXAR, NAUTO], emoji = 
     }
     if (body.method === "notifications/initialized") return respond(202, "")
     if (body.method === "tools/call") {
-      const list = pages[token] ?? []
+      const raw = pages[token] ?? []
       const cursor = body.params?.arguments?.cursor
       const index = cursor === undefined ? 0 : Number(cursor)
-      const current = list[index] ?? page([], null)
+      const search = searches.get(token) ?? 0
+      searches.set(token, search + 1)
+      const current = typeof raw === "function" ? raw(index, search) : (raw[index] ?? page([], null))
       return respond(
         200,
         JSON.stringify({
@@ -199,10 +217,14 @@ function harness({ pages = {}, statuses = {}, servers = [NEXAR, NAUTO], emoji = 
       now,
       fetch,
       readConfig: () => ({ config }),
-      mcpServers: async () => servers,
+      mcpServers: async () => {
+        if (serverError) throw serverError
+        return servers
+      },
       resolveCredential: async (name) => tokens[name],
       session,
       log: (message) => logs.push(message),
+      ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
     })
 
   return {
@@ -788,6 +810,140 @@ test("a missing config field polls nothing and names the field in the status", a
     assert.equal(h.status().configError, "config field missing: intake_repo")
     assert.equal(h.calls.length, 0, "nothing is called")
     assert.equal(h.created.length, 0)
+  } finally {
+    h.clean()
+  }
+})
+
+test("two polls that win different hits at the same time keep both item records and both seen entries", async () => {
+  const tsA = message(60)
+  const tsB = message(120)
+  const h = harness({
+    servers: [NEXAR],
+    pages: {
+      "tok-nexar": (index, search) =>
+        search % 2 === 0
+          ? page([hitRow("C0AAAAAAAA", tsA, "#a")], null)
+          : page([hitRow("C0BBBBBBBB", tsB, "#b")], null),
+    },
+  })
+  try {
+    const realGet = h.storage.get.bind(h.storage)
+    let itemsReads = 0
+    h.storage.get = async (key) => {
+      const value = await realGet(key)
+      if (key !== KEYS.items) return value
+      itemsReads += 1
+      // Hold the first read-modify-write of the item map open. Without one
+      // writer at a time the other poll reads this same stale map inside the
+      // window and one of the two records is lost.
+      if (itemsReads === 1) await yieldTimes(20)
+      return value
+    }
+    await Promise.all([h.watcher.poll(), h.newWatcher().poll()])
+    assert.equal(h.prompts.length, 2, "both hits got a prompted session")
+    const stored = Object.keys(h.items()).sort()
+    assert.equal(stored.length, 2, "both item records survive")
+    assert.deepEqual(h.seen().sort(), stored, "and both seen entries")
+  } finally {
+    h.clean()
+  }
+})
+
+test("two concurrent polls of one instance keep both item records and both seen entries", async () => {
+  const tsA = message(60)
+  const tsB = message(120)
+  const h = harness({
+    servers: [NEXAR],
+    pages: {
+      "tok-nexar": (index, search) =>
+        search % 2 === 0
+          ? page([hitRow("C0AAAAAAAA", tsA, "#a")], null)
+          : page([hitRow("C0BBBBBBBB", tsB, "#b")], null),
+    },
+  })
+  try {
+    const realGet = h.storage.get.bind(h.storage)
+    let itemsReads = 0
+    h.storage.get = async (key) => {
+      const value = await realGet(key)
+      if (key !== KEYS.items) return value
+      itemsReads += 1
+      if (itemsReads === 1) await yieldTimes(20)
+      return value
+    }
+    await Promise.all([h.watcher.poll(), h.watcher.poll()])
+    assert.equal(h.prompts.length, 2, "both hits got a prompted session")
+    const stored = Object.keys(h.items()).sort()
+    assert.equal(stored.length, 2, "both item records survive")
+    assert.deepEqual(h.seen().sort(), stored, "and both seen entries")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a workspace whose scan fails is reported, and the other workspace still runs", async () => {
+  const h = harness({
+    servers: [NEXAR, NAUTO],
+    statuses: { "tok-nexar": { status: 503 } },
+    pages: { "tok-nauto": [page([], null)] },
+  })
+  try {
+    await h.watcher.poll()
+    const status = h.status()
+    const failed = status.workspaces.find((workspace) => workspace.name === "slack_nexar")
+    assert.equal(failed.ok, false, "the failed workspace is not ok")
+    assert.match(failed.error, /HTTP 503/, "the failure is named")
+    assert.notEqual(status.outcome, "ok", "the poll's outcome is not a healthy empty scan")
+    assert.equal(
+      status.workspaces.find((workspace) => workspace.name === "slack_nauto").ok,
+      true,
+      "the other workspace ran",
+    )
+  } finally {
+    h.clean()
+  }
+})
+
+test("a failed MCP discovery is reported instead of an empty healthy scan", async () => {
+  const h = harness({ servers: [NEXAR], serverError: new Error("discovery unavailable") })
+  try {
+    await h.watcher.poll()
+    assert.match(h.status().outcome, /discovery unavailable/, "the status names the discovery failure")
+    assert.notEqual(h.status().outcome, "ok")
+    assert.equal(h.created.length, 0)
+  } finally {
+    h.clean()
+  }
+})
+
+test("a workspace whose answer never arrives fails without stopping future polls", async () => {
+  const h = harness({
+    servers: [NEXAR, NAUTO],
+    stall: ["tok-nexar"],
+    requestTimeoutMs: 20,
+    pages: { "tok-nauto": [page([], null)] },
+  })
+  try {
+    await h.watcher.poll()
+    const status = h.status()
+    assert.match(
+      status.workspaces.find((workspace) => workspace.name === "slack_nexar").error,
+      /timed out/,
+      "the stalled workspace fails on its deadline",
+    )
+    assert.equal(
+      status.workspaces.find((workspace) => workspace.name === "slack_nauto").ok,
+      true,
+      "the next workspace still ran in the same poll",
+    )
+    h.clock.ms += h.config.poll_seconds * 1000
+    await h.watcher.poll()
+    assert.equal(
+      h.toolCalls().filter((call) => call.token === "tok-nauto").length,
+      2,
+      "the next poll ran too",
+    )
   } finally {
     h.clean()
   }

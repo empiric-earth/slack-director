@@ -1,9 +1,8 @@
 // The fixed prompts the server part sends.
 //
-// This build's triage agent allows the Slack read tools and the file read tools
-// and nothing else, so the skeleton prompt asks for a read and a paraphrase and
-// no other change. The full first turn arrives with the skill, the intake issue
-// and the next steps.
+// The triage agent allows the Slack read tools and the file read tools and
+// nothing else, so the first prompt asks for a read and a paraphrase and no
+// other change.
 export const SKELETON_LIMITS = "Load no skill, create nothing and write nothing."
 
 /** The first prompt of a skeleton item session. */

@@ -9,6 +9,14 @@
 // page's cursor in a `pagination_info` line, and a result's permalink may sit
 // on an Enterprise Grid host, so a hit's channel and timestamp are read out of
 // the permalink itself.
+//
+// A hit is read from the result's own field lines only, never from a message's
+// text or its context, and never past the number of results the report's own
+// header names: a message body is untrusted text and may contain a permalink or
+// a whole result-looking section of its own.
+//
+// Every request is bounded by a deadline, so one answer that never arrives
+// fails its own workspace instead of stopping the poll.
 export const SLACK_MCP_URL = "https://mcp.slack.com/mcp"
 
 /** The only Slack tool this plugin calls. */
@@ -26,11 +34,18 @@ export const PAGE_LIMIT = 20
 const PROTOCOL_VERSION = "2025-06-18"
 const CLIENT = { name: "slack-director", version: "0.1.0" }
 
+/** How long one MCP request, its body read included, may take. */
+export const REQUEST_TIMEOUT_MS = 30_000
+
 // A Slack message permalink, on a workspace host or an Enterprise Grid host:
 // https://nexar.slack.com/... and https://grid-nauto.enterprise.slack.com/...
 const PERMALINK = /https:\/\/[a-z0-9][a-z0-9.-]*\.slack\.com\/archives\/[A-Z0-9]+\/p\d{10,}(\?[^\s)"'<]*)?/g
 const ARCHIVE = /^https:\/\/[a-z0-9][a-z0-9.-]*\.slack\.com\/archives\/([A-Z0-9]+)\/p(\d{10,})(\?.*)?$/
 const RESULT_MARKER = /^#{2,3}[ \t]*Result[ \t]+\d+/gm
+const RESULT_MARKER_LINE = /^#{2,3}[ \t]*Result[ \t]+\d+/m
+const RESULT_COUNT = /^#{1,4}[ \t]*Messages[ \t]*\([ \t]*(\d+)[ \t]+results?[ \t]*\)/m
+const PERMALINK_FIELD = /^Permalink:[ \t]*(.*)$/m
+const TEXT_FIELD = /^Text:/
 const CHANNEL_LINE = /^Channel:[ \t]*(.*)$/m
 const CURSOR_LINE = /cursor[^`\n]*`([^`]+)`/i
 
@@ -96,10 +111,30 @@ function textOf(content) {
   return content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text)
 }
 
-/** One block per `### Result` marker in a report, else the whole report. */
+/**
+ * The result blocks of one report, bounded by the count the report's own header
+ * names. A marker inside a message body would otherwise become a block of its
+ * own, so the count the tool writes is what tells the real blocks from the text.
+ */
 function resultBlocks(text) {
   const parts = text.split(RESULT_MARKER)
-  return parts.length > 1 ? parts.slice(1) : [text]
+  if (parts.length <= 1) return [text]
+  const blocks = parts.slice(1)
+  const first = text.search(RESULT_MARKER_LINE)
+  const head = first === -1 ? text : text.slice(0, first)
+  const named = RESULT_COUNT.exec(head)
+  return named ? blocks.slice(0, Number(named[1])) : blocks
+}
+
+/**
+ * The trusted metadata lines of a result block: every line up to its `Text:`
+ * field. Everything from there on is the message and its context — untrusted
+ * text that may hold a permalink of its own.
+ */
+function blockFields(block) {
+  const lines = block.split(/\r?\n/)
+  const end = lines.findIndex((line) => TEXT_FIELD.test(line))
+  return (end === -1 ? lines : lines.slice(0, end)).join("\n")
 }
 
 function hitOfRow(row) {
@@ -114,9 +149,12 @@ function hitOfRow(row) {
 }
 
 function hitOfBlock(block) {
-  const hit = parsePermalink(permalinksIn(block)[0])
+  const fields = blockFields(block)
+  const field = PERMALINK_FIELD.exec(fields)
+  if (!field) return undefined
+  const hit = parsePermalink(permalinksIn(field[1])[0])
   if (!hit) return undefined
-  const line = CHANNEL_LINE.exec(block)
+  const line = CHANNEL_LINE.exec(fields)
   if (line) {
     const name = /^(?:#|@)?([^\s(]+)/.exec(line[1].trim())
     if (name && name[1] !== "") hit.channel.label = line[1].trim().startsWith("#") ? `#${name[1]}` : name[1]
@@ -172,32 +210,85 @@ function rateLimited(result) {
   return /rate.?limit/i.test(textOf(result.content).join("\n"))
 }
 
-async function post({ fetch, url, token, sessionID, body }) {
+/** A rejection that a caller can cancel, for `Promise.race` against a deadline. */
+function deadline(ms, onExpire) {
+  let timer
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      if (onExpire) onExpire()
+      reject(new Error(`Slack request timed out after ${ms} ms`))
+    }, ms)
+  })
+  return { expired, cancel: () => clearTimeout(timer) }
+}
+
+/**
+ * One MCP request. The deadline covers the whole operation — the request and
+ * the read of its body — and aborts the request too when the fetch honours the
+ * signal, so one answer that never arrives cannot hold the poll.
+ */
+async function post({ fetch, url, token, sessionID, body, timeoutMs = REQUEST_TIMEOUT_MS }) {
   const headers = {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
   }
   if (token) headers.authorization = `Bearer ${token}`
   if (sessionID) headers["mcp-session-id"] = sessionID
-  const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) })
-  const text = await response.text()
-  return {
-    status: response.status,
-    sessionID: response.headers.get("mcp-session-id") || sessionID,
-    payload: payloadOf(text),
+  const controller = new AbortController()
+  const { expired, cancel } = deadline(timeoutMs, () => controller.abort())
+  try {
+    const response = await Promise.race([
+      fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal }),
+      expired,
+    ])
+    const text = await Promise.race([response.text(), expired])
+    return {
+      status: response.status,
+      sessionID: response.headers.get("mcp-session-id") || sessionID,
+      payload: payloadOf(text),
+    }
+  } finally {
+    cancel()
   }
+}
+
+/** Why a JSON-RPC answer failed, in one line that carries no message text. */
+function answerFailure(answer) {
+  if (answer.status < 200 || answer.status >= 300) return `HTTP ${answer.status}`
+  const message = answer.payload?.error?.message
+  if (typeof message === "string" && message.trim() !== "") return message.trim()
+  return "the answer carried no result"
+}
+
+/** The one-line message an error tool result carries. */
+function toolErrorText(result) {
+  const text = textOf(result?.content)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim()
+  return text === "" ? "the tool call failed" : text.slice(0, 200)
 }
 
 /**
  * Search one workspace for the messages the user flagged, paging to the last
  * page. Returns the hits, whether the scan ended early because Slack rate
- * limited it or refused the credential, and the last answer's shape.
+ * limited it or refused the credential, why it failed when the transport, the
+ * protocol or the tool itself failed, and the last answer's shape.
  */
-export async function searchFlagged({ fetch, url = SLACK_MCP_URL, token, emoji, limit = PAGE_LIMIT }) {
+export async function searchFlagged({
+  fetch,
+  url = SLACK_MCP_URL,
+  token,
+  emoji,
+  limit = PAGE_LIMIT,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+}) {
+  const empty = () => ({ fields: [], results: 0 })
   const opened = await post({
     fetch,
     url,
     token,
+    timeoutMs,
     body: {
       jsonrpc: "2.0",
       id: 1,
@@ -205,19 +296,23 @@ export async function searchFlagged({ fetch, url = SLACK_MCP_URL, token, emoji, 
       params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT },
     },
   })
-  if (opened.status === 401) return { unauthorized: true, hits: [], shape: { fields: [], results: 0 } }
-  if (opened.status === 429) return { rateLimited: true, hits: [], shape: { fields: [], results: 0 } }
+  if (opened.status === 401) return { unauthorized: true, hits: [], shape: empty() }
+  if (opened.status === 429) return { rateLimited: true, hits: [], shape: empty() }
+  if (opened.status < 200 || opened.status >= 300 || !opened.payload?.result) {
+    return { error: `Slack initialize failed: ${answerFailure(opened)}`, hits: [], shape: empty() }
+  }
   const sessionID = opened.sessionID
   await post({
     fetch,
     url,
     token,
     sessionID,
+    timeoutMs,
     body: { jsonrpc: "2.0", method: "notifications/initialized" },
   })
 
   const hits = []
-  let shape = { fields: [], results: 0 }
+  let shape = empty()
   let cursor
   let id = 2
   for (;;) {
@@ -228,14 +323,19 @@ export async function searchFlagged({ fetch, url = SLACK_MCP_URL, token, emoji, 
       url,
       token,
       sessionID,
+      timeoutMs,
       body: { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: SEARCH_TOOL, arguments: args } },
     })
     if (call.status === 401) return { unauthorized: true, hits, shape }
     if (call.status === 429) return { rateLimited: true, hits, shape }
     const result = call.payload?.result
-    // Any other answer ends this workspace's scan for this poll.
-    if (!result) return { hits, shape }
+    // A transport, protocol or tool failure is not an empty search: the
+    // workspace reports it, so a broken scan never reads as healthy.
+    if (call.status < 200 || call.status >= 300 || !result) {
+      return { error: `Slack search failed: ${answerFailure(call)}`, hits, shape }
+    }
     if (rateLimited(result)) return { rateLimited: true, hits, shape }
+    if (result.isError === true) return { error: `Slack search failed: ${toolErrorText(result)}`, hits, shape }
     shape = shapeOf(result)
     hits.push(...hitsOf(result))
     const next = cursorOf(result)

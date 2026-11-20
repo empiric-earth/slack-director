@@ -6,9 +6,8 @@
 // validating only that no error name is reserved — so this file imports nothing
 // and the package's tests load it with plain Node.
 //
-// This build serves `status` alone: the last poll, its outcome and each
-// workspace's state. The item map, the config and the poll-now call arrive with
-// the full watcher.
+// This file serves `status` alone: the last poll, its outcome and each
+// workspace's state.
 
 const emptyObject = { type: "object", properties: {}, additionalProperties: false }
 

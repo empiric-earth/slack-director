@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto"
 import { permalinkHash, STALE_MS } from "./claims.js"
 import { DEFAULT_POLL_SECONDS } from "./config.js"
 import { refreshPrompt, skeletonFirstPrompt } from "./first-prompt.js"
-import { searchFlagged, SLACK_MCP_URL } from "./slack-mcp.js"
+import { REQUEST_TIMEOUT_MS, searchFlagged, SLACK_MCP_URL } from "./slack-mcp.js"
 import { KEYS } from "./state.js"
 
 /** The agent a refresh session runs on. */
@@ -31,6 +31,28 @@ const messageOf = (error) => (error instanceof Error ? error.message : String(er
 
 const emptyToday = () => ({ flagged: 0, nextStepsPosted: 0, skipped: 0 })
 
+/**
+ * One writer at a time per storage. Plugin storage offers get and set and no
+ * compare-and-set, so two polls that both read the item map or the seen-set and
+ * then write it back lose the first writer's change. The queue is keyed by the
+ * storage itself, so every writer that reaches this module and shares that
+ * storage takes its turn, not only one watcher's.
+ */
+const writeQueues = new WeakMap()
+
+function serializedWrite(storage, work) {
+  const queue = writeQueues.get(storage) ?? Promise.resolve()
+  const run = queue.then(work, work)
+  writeQueues.set(
+    storage,
+    run.then(
+      () => {},
+      () => {},
+    ),
+  )
+  return run
+}
+
 export function createWatcher({
   storage,
   claims,
@@ -43,6 +65,7 @@ export function createWatcher({
   log = () => {},
   leaseMs = LEASE_MS,
   staleMs = STALE_MS,
+  requestTimeoutMs = REQUEST_TIMEOUT_MS,
 }) {
   const owner = randomUUID()
 
@@ -81,11 +104,21 @@ export function createWatcher({
     }
   }
 
-  /** Write the item record and the seen-set entry for one permalink. */
-  async function recordItem(record, seen) {
+  /**
+   * Write the item record and the seen-set entry for one permalink, one writer
+   * at a time, so each read sees the change the writer before it made. Both
+   * records survive: the map key holds every permalink, and the seen-set holds
+   * every recorded one.
+   */
+  function recordItem(record) {
+    return serializedWrite(storage, () => writeRecord(record))
+  }
+
+  async function writeRecord(record) {
     const items = (await storage.get(KEYS.items)) ?? {}
     items[record.permalink] = record
     await storage.set(KEYS.items, items)
+    const seen = new Set((await storage.get(KEYS.seen)) ?? [])
     seen.add(record.permalink)
     await storage.set(KEYS.seen, [...seen])
   }
@@ -109,13 +142,13 @@ export function createWatcher({
       if (now() - entry.mtimeMs <= staleMs) continue
       const record = entry.record
       if (!record || typeof record.permalink !== "string" || seen.has(record.permalink)) continue
-      await recordItem({ ...record, firstTurnFailed: true, firstTurnEndedAt: null }, seen)
+      await recordItem({ ...record, firstTurnFailed: true, firstTurnEndedAt: null })
     }
     claims.removeStaleTemporaries()
   }
 
   /** One new hit: claim it, create one session, commit it, then record and prompt it. */
-  async function handleHit(hit, config, seen) {
+  async function handleHit(hit, config) {
     const hash = permalinkHash(hit.permalink)
     const generation = claims.claim(hash)
     if (generation === null) return
@@ -153,7 +186,7 @@ export function createWatcher({
       await removeSession(created.id)
       return
     }
-    await recordItem(record, seen)
+    await recordItem(record)
     try {
       await session.prompt({ sessionID: created.id, text: skeletonFirstPrompt(hit) })
     } catch (error) {
@@ -206,11 +239,23 @@ export function createWatcher({
       refreshed = true
       credential = (await refresh(name, config)) ?? credential
     }
-    let search = await searchFlagged({ fetch, url: server.url, token: credential.access, emoji: config.flag_emoji })
+    let search = await searchFlagged({
+      fetch,
+      url: server.url,
+      token: credential.access,
+      emoji: config.flag_emoji,
+      timeoutMs: requestTimeoutMs,
+    })
     if (search.unauthorized && !refreshed) {
       refreshed = true
       credential = (await refresh(name, config)) ?? credential
-      search = await searchFlagged({ fetch, url: server.url, token: credential.access, emoji: config.flag_emoji })
+      search = await searchFlagged({
+        fetch,
+        url: server.url,
+        token: credential.access,
+        emoji: config.flag_emoji,
+        timeoutMs: requestTimeoutMs,
+      })
     }
     if (search.unauthorized) {
       await suspend(name, credential)
@@ -228,8 +273,10 @@ export function createWatcher({
         skipped += 1
         continue
       }
-      await handleHit({ ...hit, workspace: name }, config, seen)
+      await handleHit({ ...hit, workspace: name }, config)
     }
+    // A failed scan is not an empty one: the workspace reports it.
+    if (search.error) return { ok: false, error: search.error }
     if (search.rateLimited) return { ok: false, error: "rate limited" }
     return { ok: true, error: null, skipped }
   }
@@ -261,12 +308,15 @@ export function createWatcher({
     const seen = new Set((await storage.get(KEYS.seen)) ?? [])
     const workspaces = []
     let skipped = 0
+    let discoveryError = null
     let servers
     try {
       servers = (await mcpServers()).filter((server) => server.url === SLACK_MCP_URL)
     } catch (error) {
+      // A failed discovery is not "no Slack servers": the poll reports it.
+      discoveryError = `MCP servers were not read: ${messageOf(error)}`
+      log(discoveryError)
       servers = []
-      log(`MCP servers were not read: ${messageOf(error)}`)
     }
     for (const server of servers) {
       let outcome
@@ -282,7 +332,7 @@ export function createWatcher({
     const failed = workspaces.find((workspace) => !workspace.ok)
     const status = {
       lastPoll: new Date(now()).toISOString(),
-      outcome: failed ? failed.error : "ok",
+      outcome: discoveryError ?? failed?.error ?? "ok",
       workspaces,
       configError: null,
       today: await today({ skipped }),

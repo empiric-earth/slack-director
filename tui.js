@@ -1,21 +1,30 @@
 // The TUI part: the `/slack-director` command and its palette entry.
 //
 // It asks the server part for the last poll through the RPC contract and shows
-// the answer as a toast. This build registers no page and no sidebar line; the
-// overview arrives with the full watcher.
+// the answer as a toast.
 import { SlackDirectorRpc } from "./rpc.js"
 
 /** The keymap command that carries the slash name and the palette entry. */
 export const COMMAND_ID = "slack-director.status"
 
+/** The last poll's time on the local clock, so it reads against the user's own. */
+function pollClock(lastPoll) {
+  if (typeof lastPoll !== "string") return "never"
+  const at = new Date(lastPoll)
+  if (Number.isNaN(at.getTime())) return "never"
+  return [at.getHours(), at.getMinutes()].map((value) => String(value).padStart(2, "0")).join(":")
+}
+
 /** One line for the toast: the last poll, its outcome and each workspace. */
 export function formatStatus(status) {
-  const when =
-    typeof status?.lastPoll === "string" && status.lastPoll.length >= 16 ? status.lastPoll.slice(11, 16) : "never"
   const workspaces = (status?.workspaces ?? []).map(
     (workspace) => `${workspace.name} ${workspace.ok ? "✓" : "✗"}${workspace.error ? ` ${workspace.error}` : ""}`,
   )
-  return [`Slack Director: last poll ${when}`, status?.outcome ?? "unknown", ...workspaces].join(" · ")
+  return [
+    `Slack Director: last poll ${pollClock(status?.lastPoll)}`,
+    status?.outcome ?? "unknown",
+    ...workspaces,
+  ].join(" · ")
 }
 
 export default {

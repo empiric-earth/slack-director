@@ -15,15 +15,17 @@ function pollClock(lastPoll) {
   return [at.getHours(), at.getMinutes()].map((value) => String(value).padStart(2, "0")).join(":")
 }
 
-/** One line for the toast: the last poll, its outcome and each workspace. */
+/** One line for the toast: the last poll, its outcome, each workspace and today's counts. */
 export function formatStatus(status) {
   const workspaces = (status?.workspaces ?? []).map(
     (workspace) => `${workspace.name} ${workspace.ok ? "✓" : "✗"}${workspace.error ? ` ${workspace.error}` : ""}`,
   )
+  const today = status?.today ?? {}
   return [
     `Slack Director: last poll ${pollClock(status?.lastPoll)}`,
     status?.outcome ?? "unknown",
     ...workspaces,
+    `Today: ${today.flagged ?? 0} flagged · ${today.nextStepsPosted ?? 0} next steps posted · ${today.skipped ?? 0} skipped`,
   ].join(" · ")
 }
 

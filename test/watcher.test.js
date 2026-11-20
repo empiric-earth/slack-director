@@ -5,27 +5,34 @@
 // poll's files and storage hold. No dependencies; run with `node --test`.
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import * as nodeFs from "node:fs"
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createClaims, permalinkHash, STALE_MS } from "../src/claims.js"
-import { DEFAULT_TRIAGE_AGENT } from "../src/config.js"
+import { DEFAULT_TRIAGE_AGENT, fieldProblem } from "../src/config.js"
 import { SEARCH_TOOL, SLACK_MCP_URL } from "../src/slack-mcp.js"
 import { claimsDir, KEYS, NAMESPACE } from "../src/state.js"
-import { createWatcher, LEASE_MS, REFRESH_AGENT, SUSPENDED_ERROR } from "../src/watcher.js"
+import { createWatcher, LEASE_MS, REFRESH_AGENT, SESSION_EVENT_TYPES, SUSPENDED_ERROR } from "../src/watcher.js"
+import { SlackDirectorRpc } from "../rpc.js"
+import { schemaProblem } from "./schema.js"
 
-const NOW = Date.now()
+// A fixed clock, at noon UTC on a Wednesday: the harness's window covers a
+// whole day, so every test that does not set its own window polls inside it.
+const NOW = Date.UTC(2026, 10, 18, 12, 0, 0)
+const ALL_DAY = { days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], start: "00:00", end: "23:59", time_zone: "UTC" }
 const NEXAR = { name: "slack_nexar", url: SLACK_MCP_URL }
 const NAUTO = { name: "slack_nauto", url: SLACK_MCP_URL }
 const TODOIST = { name: "todoist", url: "https://ai.todoist.net/mcp" }
 
 const permalinkOf = (channel, ts, host = "nexar") =>
   `https://${host}.slack.com/archives/${channel}/p${ts.replace(".", "")}`
-const hitRow = (channel, ts, channelName, host) => ({
+const hitRow = (channel, ts, channelName, host, asker) => ({
   channel,
   ts,
   channelName,
   permalink: permalinkOf(channel, ts, host),
+  ...(asker === undefined ? {} : { asker }),
 })
 
 /**
@@ -42,7 +49,7 @@ const page = (rows, next) => ({
     ...rows.flatMap((row, index) => [
       `### Result ${index + 1} of ${rows.length}`,
       `Channel: ${row.channelName} (${row.channel})`,
-      `From: Someone (U0000000000)`,
+      `From: ${row.asker ?? "Someone"} (U0000000000)`,
       `Time: 2026-11-19 10:00:00 UTC`,
       `Message_ts: ${row.ts}`,
       `Permalink: [link](${row.permalink})`,
@@ -99,6 +106,33 @@ async function yieldTimes(times) {
 }
 
 /**
+ * The claims files' timestamps follow the harness clock rather than the
+ * machine's, so a test that moves the clock makes a claim or a commit file
+ * exactly as stale as it says.
+ */
+function pinnedFs(now) {
+  const stamp = (file) => {
+    try {
+      const at = new Date(now())
+      utimesSync(file, at, at)
+    } catch {
+      // A path the call did not create needs no stamp.
+    }
+  }
+  return {
+    ...nodeFs,
+    writeFileSync(file, data, options) {
+      nodeFs.writeFileSync(file, data, options)
+      stamp(file)
+    },
+    linkSync(from, to) {
+      nodeFs.linkSync(from, to)
+      stamp(to)
+    },
+  }
+}
+
+/**
  * A fake context: one shared storage and claims directory, a fake HTTP layer
  * that answers MCP over HTTP from `pages`, and a fake session API that records
  * every call.
@@ -112,6 +146,7 @@ function harness({
   stall = [],
   serverError,
   requestTimeoutMs,
+  workHours = ALL_DAY,
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "slack-director-watcher-"))
   const stateHome = join(root, "state")
@@ -137,12 +172,17 @@ function harness({
   const prompts = []
   const removed = []
   const waited = []
+  const retitles = []
+  const contexts = new Map()
+  const changes = []
+  const configWrites = []
   const tokens = credentials ?? { slack_nexar: { access: "tok-nexar", expires: 0 }, slack_nauto: { access: "tok-nauto", expires: 0 } }
   const config = {
     flag_emoji: emoji,
     intake_repo: "empiric-earth/almeida-slack-intake",
     session_directory: join(root, "session-directory"),
     poll_seconds: 60,
+    work_hours: structuredClone(workHours),
     triage_agent: DEFAULT_TRIAGE_AGENT,
   }
 
@@ -205,9 +245,15 @@ function harness({
     async wait({ sessionID }) {
       waited.push(sessionID)
     },
+    async context({ sessionID }) {
+      return structuredClone(contexts.get(sessionID) ?? [])
+    },
+    async update({ sessionID, title }) {
+      retitles.push({ sessionID, title })
+    },
   }
 
-  const claims = createClaims({ dir, now })
+  const claims = createClaims({ dir, now, fs: pinnedFs(now) })
 
   /**
    * A storage object of its own over the same plugin namespace, as every host
@@ -226,6 +272,14 @@ function harness({
       now,
       fetch,
       readConfig: () => ({ config }),
+      writeConfig: (field, value) => {
+        const problem = fieldProblem(field, value)
+        if (problem) return { error: { field, message: problem } }
+        configWrites.push({ field, value })
+        config[field] = value
+        return { config }
+      },
+      onChange: () => changes.push(now()),
       mcpServers: async () => {
         if (serverError) throw serverError
         return servers
@@ -249,6 +303,10 @@ function harness({
     prompts,
     removed,
     waited,
+    retitles,
+    contexts,
+    changes,
+    configWrites,
     tokens,
     config,
     session,
@@ -1068,6 +1126,319 @@ test("a flagged message that quotes a result-looking section never starts a sess
     await h.watcher.poll()
     assert.equal(h.created.length, 2, "the next poll creates no session")
     assert.ok(!h.items()[unflagged])
+  } finally {
+    h.clean()
+  }
+})
+
+test("no Slack call is made outside the window, and the first poll inside it runs", async () => {
+  const h = harness({
+    servers: [NEXAR],
+    pages: { "tok-nexar": [page([], null)] },
+    workHours: { days: ["Wed"], start: "09:00", end: "17:00", time_zone: "UTC" },
+  })
+  try {
+    // 2026-11-18 is a Wednesday.
+    h.clock.ms = Date.UTC(2026, 10, 18, 8, 30)
+    await h.watcher.poll()
+    assert.equal(h.calls.length, 0, "no call at all before the window opens")
+    assert.deepEqual(h.status(), {}, "and no status is written")
+
+    h.clock.ms = Date.UTC(2026, 10, 18, 16, 59)
+    await h.watcher.poll()
+    assert.equal(h.toolCalls().length, 1, "one search inside the window")
+    assert.equal(h.status().outcome, "ok")
+
+    h.clock.ms = Date.UTC(2026, 10, 18, 17, 0)
+    await h.watcher.poll()
+    assert.equal(h.toolCalls().length, 1, "the end of the window is already outside it")
+
+    h.clock.ms = Date.UTC(2026, 10, 21, 12, 0)
+    await h.watcher.poll()
+    assert.equal(h.toolCalls().length, 1, "a Saturday is outside a Monday-to-Friday window")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a flag made while the plugin was stopped gets its session at the first poll of the next instance", async () => {
+  const ts = message(7 * 24 * 60 * 60)
+  const h = harness({
+    servers: [NEXAR],
+    pages: {
+      "tok-nexar": (index, search) => (search === 0 ? page([], null) : page([hitRow("C0PLATFORM", ts, "#platform-help")], null)),
+    },
+  })
+  try {
+    await h.watcher.poll()
+    assert.equal(h.created.length, 0, "the first instance finds nothing flagged")
+
+    // The plugin stops, the message is flagged, and OpenCode starts again: the
+    // scan has no time window, so the older message is found by the next start.
+    h.clock.ms += 2 * 60_000
+    const restarted = h.newWatcher()
+    await restarted.start()
+    await restarted.poll()
+    assert.equal(h.created.length, 1, "the next instance creates its session")
+    assert.equal(h.prompts.length, 1)
+    assert.ok(h.prompts[0].text.includes("`slack-director` skill"), "with the full first prompt")
+  } finally {
+    h.clean()
+  }
+})
+
+test("an instance started outside the window creates the session at the first poll once the window opens", async () => {
+  const ts = message(120)
+  const h = harness({
+    servers: [NEXAR],
+    pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] },
+    workHours: { days: ["Wed"], start: "09:00", end: "17:00", time_zone: "UTC" },
+  })
+  try {
+    h.clock.ms = Date.UTC(2026, 10, 18, 7, 0)
+    const started = h.newWatcher()
+    await started.start()
+    await started.poll()
+    assert.equal(h.created.length, 0, "nothing is created outside the window")
+
+    h.clock.ms = Date.UTC(2026, 10, 18, 9, 1)
+    await started.poll()
+    assert.equal(h.created.length, 1, "the first poll inside the window creates it")
+    assert.equal(h.prompts.length, 1)
+  } finally {
+    h.clean()
+  }
+})
+
+test("a reply with the two fixed lines fills the item record and retitles the session", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const issue = "https://github.com/empiric-earth/almeida-slack-intake/issues/41"
+  const h = harness({
+    servers: [NEXAR],
+    pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help", undefined, "Maria Costa")], null)] },
+  })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    assert.equal(h.created[0].title, "Flagged message in #platform-help — Maria Costa", "the neutral label")
+    const fresh = h.items()[link]
+    assert.equal(fresh.asker, "Maria Costa")
+    assert.equal(fresh.title, "Flagged message in #platform-help — Maria Costa")
+    assert.equal(fresh.firstTurnFailed, true)
+    assert.equal(fresh.firstTurnEndedAt, null)
+    assert.equal(fresh.issueNumber, null)
+    assert.equal(fresh.issueUrl, null)
+    assert.equal(fresh.permissionPending, false)
+    assert.equal(fresh.openedAt, null)
+
+    h.changes.length = 0
+    h.contexts.set(sessionID, [
+      { type: "user", text: "A Slack message was flagged for triage." },
+      {
+        type: "assistant",
+        content: [
+          { type: "reasoning", text: "Thinking about the thread." },
+          { type: "text", text: `Findings and proposed next steps.\n\nIntake issue: ${issue}\nTitle: Access to the staging dashboards` },
+        ],
+      },
+    ])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+
+    const stored = h.items()[link]
+    assert.equal(stored.issueUrl, issue)
+    assert.equal(stored.issueNumber, 41)
+    assert.equal(stored.title, "Access to the staging dashboards")
+    assert.equal(stored.firstTurnFailed, false)
+    assert.equal(typeof stored.firstTurnEndedAt, "string")
+    assert.deepEqual(h.retitles, [{ sessionID, title: "Access to the staging dashboards" }], "the session is retitled")
+    assert.ok(h.changes.length > 0, "the change notice fired for the item change")
+
+    const projected = (await h.watcher.items()).items
+    assert.equal(projected.length, 1)
+    assert.equal(
+      schemaProblem(SlackDirectorRpc.methods.items.output.properties.items.items, projected[0]),
+      undefined,
+      "the record is what the contract serves",
+    )
+
+    h.clock.ms += h.config.poll_seconds * 1000
+    await h.watcher.poll()
+    assert.equal(h.status().today.nextStepsPosted, 1, "today's count includes it")
+    assert.equal(h.status().today.flagged, 1)
+    assert.equal(h.status().today.skipped, 1)
+  } finally {
+    h.clean()
+  }
+})
+
+test("a reply that leaves the message out records no issue, keeps the title and posts no next steps", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    h.contexts.set(sessionID, [
+      {
+        type: "assistant",
+        content: [{ type: "text", text: "Intake issue: none — customer data\nTitle: A customer's export question" }],
+      },
+    ])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+
+    const stored = h.items()[link]
+    assert.equal(stored.issueUrl, null, "no issue URL is recorded")
+    assert.equal(stored.issueNumber, null, "and no issue number")
+    assert.equal(stored.title, "A customer's export question", "the title still comes from the reply")
+    assert.equal(stored.firstTurnFailed, false)
+    assert.deepEqual(h.retitles, [{ sessionID, title: "A customer's export question" }])
+
+    h.clock.ms += h.config.poll_seconds * 1000
+    await h.watcher.poll()
+    assert.equal(h.status().today.nextStepsPosted, 0, "a message left out is not a next-steps post")
+    assert.equal(h.status().today.flagged, 1)
+  } finally {
+    h.clean()
+  }
+})
+
+test("a first turn that ends in error leaves the item waiting", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    h.contexts.set(sessionID, [
+      { type: "assistant", content: [{ type: "text", text: "Intake issue: https://github.com/x/y/issues/1\nTitle: Half a reply" }] },
+    ])
+    for (const type of ["session.execution.failed", "session.execution.interrupted"]) {
+      await h.watcher.observe({ type, data: { sessionID } })
+      assert.equal(h.items()[link].firstTurnFailed, true, `${type} leaves the item waiting`)
+      assert.equal(h.items()[link].firstTurnEndedAt, null, `${type} records no end`)
+    }
+    assert.deepEqual(h.retitles, [], "no session is retitled")
+    assert.equal(h.items()[link].issueUrl, null, "no issue is read off a failed turn")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a first turn no instance saw end stays waiting after a restart, and nothing is prompted or created", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    assert.equal(h.items()[link].firstTurnFailed, true, "the record is written pessimistic")
+
+    // The process stops while the first turn runs, and OpenCode starts again on
+    // the same storage: the new instance never saw that turn end.
+    h.clock.ms += 5 * 60_000
+    const restarted = h.newWatcher()
+    await restarted.start()
+    await restarted.poll()
+
+    assert.equal(h.items()[link].firstTurnFailed, true, "the interrupted turn keeps reading as waiting")
+    assert.equal(h.items()[link].firstTurnEndedAt, null)
+    assert.equal(h.items()[link].sessionID, sessionID, "the record keeps the committed session")
+    assert.equal(h.created.length, 1, "no session is created")
+    assert.equal(h.prompts.length, 1, "no session is prompted")
+
+    h.contexts.set(sessionID, [
+      { type: "assistant", content: [{ type: "text", text: "Intake issue: none — unreadable\nTitle: Never paraphrased" }] },
+    ])
+    await restarted.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.equal(h.items()[link].firstTurnFailed, false, "the end it did see clears the flag")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a pending permission request is recorded on the item, and its reply clears it", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    await h.watcher.observe({ type: "permission.asked", data: { id: "per_1", sessionID, action: "sparta_exec" } })
+    assert.equal(h.items()[link].permissionPending, true)
+    await h.watcher.observe({ type: "permission.replied", data: { sessionID, requestID: "per_1", reply: "once" } })
+    assert.equal(h.items()[link].permissionPending, false)
+
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID: "ses_not_ours" } })
+    await h.watcher.observe({ type: "permission.asked", data: { id: "per_2" } })
+    assert.equal(h.items()[link].permissionPending, false, "another session's events change nothing")
+  } finally {
+    h.clean()
+  }
+})
+
+test("the item map can be marked as opened", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    assert.deepEqual(await h.watcher.markOpened({ sessionID }), {}, "the call answers with an empty object")
+    assert.equal(h.items()[link].openedAt, new Date(h.now()).toISOString())
+    assert.deepEqual(await h.watcher.markOpened({ sessionID: "ses_not_ours" }), {})
+  } finally {
+    h.clean()
+  }
+})
+
+test("no item record, status value or config field holds the token or a message's text", async () => {  const secret = "xoxb-secret-token-1234"
+  const ts = message(60)
+  const h = harness({
+    servers: [NEXAR],
+    pages: { [secret]: [page([hitRow("C0PLATFORM", ts, "#platform-help", undefined, "Maria Costa")], null)] },
+    credentials: { slack_nexar: { access: secret, expires: 0 } },
+  })
+  try {
+    await h.watcher.poll()
+    const produced = [
+      JSON.stringify(h.items()),
+      JSON.stringify(h.status()),
+      JSON.stringify(await h.watcher.items()),
+      JSON.stringify(await h.watcher.getConfig()),
+      JSON.stringify(h.config),
+    ]
+    for (const text of produced) {
+      assert.ok(!text.includes(secret), `the token is not in: ${text.slice(0, 160)}`)
+      assert.ok(!text.includes("A message the user flagged."), "no message text is stored")
+      assert.ok(!text.includes("An earlier message in the same channel."), "no context text is stored")
+    }
+    assert.ok(JSON.stringify(h.items()).includes("Maria Costa"), "the asker's own display name is kept")
+  } finally {
+    h.clean()
+  }
+})
+
+test("the watcher acts on the turn-end and permission events, and on no other", async () => {
+  const ts = message(60)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    assert.deepEqual(SESSION_EVENT_TYPES, [
+      "session.execution.succeeded",
+      "session.execution.failed",
+      "session.execution.interrupted",
+      "permission.asked",
+      "permission.replied",
+    ])
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    const before = JSON.stringify(h.items())
+    // `session.idle` is in the schema but is never published, and the rest of
+    // the stream says nothing about a turn's end.
+    for (const type of ["session.idle", "session.status", "session.text.delta", "session.step.ended", "session.step.failed"]) {
+      await h.watcher.observe({ type, data: { sessionID } })
+    }
+    assert.equal(JSON.stringify(h.items()), before, "no other event type changes an item")
   } finally {
     h.clean()
   }

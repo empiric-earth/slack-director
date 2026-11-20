@@ -1,10 +1,14 @@
 // The config file: one JSON object in the user's OpenCode config directory.
 //
-// This module reads it and reports what is missing; the server part polls
-// nothing while a required field is absent.
-import { readFileSync } from "node:fs"
+// The server part is its only writer. It reads the file when it starts and
+// again whenever the file changes, so a hand edit takes effect at the next
+// poll; an unreadable file, or a field it cannot use, is named in the status
+// and the values it last read stay in use, so a typo never stops a working
+// watcher.
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
+import { defaultWorkHours, normalizeWorkHours, validateWorkHours } from "./work-hours.js"
 
 export const DEFAULT_FLAG_EMOJI = "oc"
 export const DEFAULT_POLL_SECONDS = 60
@@ -12,6 +16,16 @@ export const DEFAULT_TRIAGE_AGENT = "slack-director-triage"
 
 /** The fields a poll cannot run without. */
 export const REQUIRED_FIELDS = ["intake_repo", "session_directory"]
+
+/** Every field the file may carry, in the order the settings dialog shows them. */
+export const FIELD_NAMES = [
+  "flag_emoji",
+  "intake_repo",
+  "session_directory",
+  "poll_seconds",
+  "work_hours",
+  "triage_agent",
+]
 
 /** The config file's path. */
 export function configPath(env = process.env) {
@@ -21,35 +35,149 @@ export function configPath(env = process.env) {
 
 const filled = (value) => typeof value === "string" && value.trim() !== ""
 
-/**
- * Read the config file. Returns `{ config }` when it holds every required
- * field, else `{ error }` naming what is missing or unreadable.
- */
-export function readConfig({ read = readFileSync, env = process.env } = {}) {
-  const path = configPath(env)
-  let text
-  try {
-    text = read(path, "utf8")
-  } catch {
-    return { error: `config file not readable: ${path}` }
+/** Every field's default, with an empty value where the field has none. */
+export function defaultConfig() {
+  return {
+    flag_emoji: DEFAULT_FLAG_EMOJI,
+    intake_repo: "",
+    session_directory: "",
+    poll_seconds: DEFAULT_POLL_SECONDS,
+    work_hours: defaultWorkHours(),
+    triage_agent: DEFAULT_TRIAGE_AGENT,
   }
+}
+
+/** Why a value is not usable for a field, or undefined. The message names the field. */
+export function fieldProblem(field, value) {
+  switch (field) {
+    case "flag_emoji":
+      return /^[A-Za-z0-9_+-]+$/.test(typeof value === "string" ? value : "")
+        ? undefined
+        : "config field invalid: flag_emoji"
+    case "intake_repo":
+      return /^[^/\s]+\/[^/\s]+$/.test(typeof value === "string" ? value.trim() : "")
+        ? undefined
+        : "config field invalid: intake_repo"
+    case "session_directory":
+      return typeof value === "string" && value.trim().startsWith("/")
+        ? undefined
+        : "config field invalid: session_directory"
+    case "poll_seconds":
+      return Number.isInteger(value) && value > 0 ? undefined : "config field invalid: poll_seconds"
+    case "work_hours":
+      return validateWorkHours(value)
+    case "triage_agent":
+      return filled(value) ? undefined : "config field invalid: triage_agent"
+    default:
+      return `no config field named ${String(field)}`
+  }
+}
+
+/** A field's value as the config holds it, once it has passed `fieldProblem`. */
+function normalized(field, value) {
+  if (field === "work_hours") return normalizeWorkHours(value)
+  return typeof value === "string" ? value.trim() : value
+}
+
+/**
+ * Read a config file's text. Returns `{ config }` with every field filled —
+ * an absent field takes its default — or `{ error }` naming the first field the
+ * file gets wrong.
+ */
+export function parseConfig(text) {
   let raw
   try {
     raw = JSON.parse(text)
   } catch {
-    return { error: `config file is not JSON: ${path}` }
+    return { error: "config file is not JSON" }
   }
-  if (raw === null || typeof raw !== "object") return { error: `config file is not a JSON object: ${path}` }
-  const missing = REQUIRED_FIELDS.filter((field) => !filled(raw[field]))
-  if (missing.length > 0) return { error: `config field missing: ${missing.join(", ")}` }
-  return {
-    config: {
-      flag_emoji: filled(raw.flag_emoji) ? raw.flag_emoji.trim() : DEFAULT_FLAG_EMOJI,
-      intake_repo: raw.intake_repo.trim(),
-      session_directory: raw.session_directory.trim(),
-      poll_seconds:
-        Number.isInteger(raw.poll_seconds) && raw.poll_seconds > 0 ? raw.poll_seconds : DEFAULT_POLL_SECONDS,
-      triage_agent: filled(raw.triage_agent) ? raw.triage_agent.trim() : DEFAULT_TRIAGE_AGENT,
-    },
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return { error: "config file is not a JSON object" }
   }
+  const config = defaultConfig()
+  for (const field of REQUIRED_FIELDS) {
+    if (!filled(raw[field])) return { error: `config field missing: ${field}` }
+  }
+  for (const field of FIELD_NAMES) {
+    if (!Object.hasOwn(raw, field)) continue
+    const problem = fieldProblem(field, raw[field])
+    if (problem) return { error: problem }
+    config[field] = normalized(field, raw[field])
+  }
+  return { config }
+}
+
+/** The key that says whether the file changed since the last read. */
+function stampOf(stat, path) {
+  try {
+    const info = stat(path)
+    return `${info.mtimeMs}:${info.size}`
+  } catch {
+    return "absent"
+  }
+}
+
+/**
+ * The config file over time. `read` re-reads it only when its stamp changed and
+ * always answers with a whole config: the last good one while the file is
+ * wrong. `write` is the server part's only way to change it, and it validates
+ * the one field before it touches the file.
+ */
+export function createConfigReader({
+  env = process.env,
+  read = readFileSync,
+  stat = statSync,
+  write = writeFileSync,
+  mkdir = mkdirSync,
+} = {}) {
+  const path = configPath(env)
+  let cached = { stamp: null, config: undefined, error: undefined }
+
+  function load() {
+    const stamp = stampOf(stat, path)
+    if (cached.stamp === stamp) return { config: cached.config, error: cached.error }
+    let parsed
+    try {
+      parsed = parseConfig(read(path, "utf8"))
+    } catch {
+      parsed = { error: `config file not readable: ${path}` }
+    }
+    const config = parsed.error ? (cached.config ?? defaultConfig()) : parsed.config
+    cached = { stamp, config, error: parsed.error }
+    return { config, error: parsed.error }
+  }
+
+  function writeField(field, value) {
+    if (!FIELD_NAMES.includes(field)) return { error: { field: null, message: `no config field named ${String(field)}` } }
+    const problem = fieldProblem(field, value)
+    if (problem) return { error: { field, message: problem } }
+    let raw = {}
+    let text
+    try {
+      text = read(path, "utf8")
+    } catch {
+      text = undefined
+    }
+    if (text !== undefined) {
+      try {
+        raw = JSON.parse(text)
+      } catch {
+        return { error: { field: null, message: `config file is not JSON: ${path}` } }
+      }
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+        return { error: { field: null, message: `config file is not a JSON object: ${path}` } }
+      }
+    }
+    const next = { ...raw, [field]: normalized(field, value) }
+    mkdir(dirname(path), { recursive: true })
+    write(path, `${JSON.stringify(next, null, 2)}\n`)
+    // The file just changed under the reader's feet: read it back rather than
+    // trust the stamp, which a same-millisecond rewrite can leave unchanged.
+    cached = { stamp: null, config: cached.config, error: cached.error }
+    const loaded = load()
+    if (loaded.error) return { error: { field, message: loaded.error } }
+    return { config: loaded.config }
+  }
+
+  return { path, read: load, write: writeField }
 }

@@ -1,18 +1,28 @@
 // The watcher: one poll finds the messages the user flagged and gives each new
-// one a session.
+// one a session, and the item map holds what the overview and the settings
+// dialog show.
 //
-// A poll resolves each Slack MCP server's own OAuth credential, searches that
+// A poll reads the config again, does nothing outside the configured work
+// hours, resolves each Slack MCP server's own OAuth credential, searches that
 // workspace through MCP over HTTP, and claims every new permalink with the
 // exclusive-create files in src/claims.js before it starts a session and sends
 // the first prompt. The lease in plugin storage only spares two instances the
 // same poll; the claim and commit files are what keep one flagged message to
 // one prompted session.
+//
+// A session's first turn ends as an event, so the watcher follows the event
+// stream for its own item sessions: it writes the item map and the session
+// title from the reply's two fixed lines, and records a pending permission
+// request. OpenCode declares `session.idle` but never publishes it, so a turn's
+// end arrives as `session.execution.succeeded`, `.failed` or `.interrupted`.
 import { randomUUID } from "node:crypto"
 import { permalinkHash, STALE_MS } from "./claims.js"
 import { DEFAULT_POLL_SECONDS } from "./config.js"
 import { itemFirstPrompt, refreshPrompt } from "./first-prompt.js"
+import { parseReply, replyText } from "./reply.js"
 import { REQUEST_TIMEOUT_MS, searchFlagged, SLACK_MCP_URL } from "./slack-mcp.js"
 import { KEYS } from "./state.js"
+import { inWorkHours } from "./work-hours.js"
 
 /** The agent a refresh session runs on. */
 export const REFRESH_AGENT = "slack-director-refresh"
@@ -26,6 +36,22 @@ export const LEASE_MS = 30_000
 
 /** The status of a workspace whose credential cannot be renewed. */
 export const SUSPENDED_ERROR = "sign-in expired — run /mcps"
+
+/** The events an item session's progress arrives in. */
+export const SESSION_EVENT_TYPES = [
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+  "permission.asked",
+  "permission.replied",
+]
+
+/** The execution events that end a turn, and whether each one failed. */
+const TURN_ENDED = {
+  "session.execution.succeeded": false,
+  "session.execution.failed": true,
+  "session.execution.interrupted": true,
+}
 
 const messageOf = (error) => (error instanceof Error ? error.message : String(error))
 
@@ -49,12 +75,39 @@ function serializedWrite(work) {
   return run
 }
 
+/** The neutral title of an item before its first turn paraphrases it. */
+export function neutralTitle(hit) {
+  const named = typeof hit.asker === "string" && hit.asker.trim() !== "" ? hit.asker.trim() : hit.ts
+  return `Flagged message in ${hit.channel.label} — ${named}`
+}
+
+/** One item record as the RPC contract serves it. */
+export function itemOfRecord(record) {
+  return {
+    permalink: record.permalink,
+    workspace: record.workspace,
+    channel: record.channel,
+    asker: record.asker ?? "",
+    flaggedAt: record.flaggedAt,
+    sessionID: record.sessionID,
+    title: record.title,
+    issueNumber: record.issueNumber ?? null,
+    issueUrl: record.issueUrl ?? null,
+    firstTurnEndedAt: record.firstTurnEndedAt ?? null,
+    firstTurnFailed: record.firstTurnFailed === true,
+    permissionPending: record.permissionPending === true,
+    openedAt: record.openedAt ?? null,
+  }
+}
+
 export function createWatcher({
   storage,
   claims,
   now = Date.now,
   fetch,
   readConfig,
+  writeConfig = () => ({ error: { field: null, message: "the config file is not writable" } }),
+  onChange = () => {},
   mcpServers,
   resolveCredential,
   session,
@@ -62,14 +115,24 @@ export function createWatcher({
   leaseMs = LEASE_MS,
   staleMs = STALE_MS,
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
+  inHours = inWorkHours,
 }) {
   const owner = randomUUID()
 
   const isExpired = (credential) =>
     credential?.expires !== 0 && credential?.expires !== undefined && credential.expires <= now()
 
+  const changed = () => {
+    try {
+      onChange()
+    } catch (error) {
+      log(`the change notice failed: ${messageOf(error)}`)
+    }
+  }
+
   async function writeStatus(status) {
     await storage.set(KEYS.status, status)
+    changed()
   }
 
   async function readStatus() {
@@ -84,20 +147,27 @@ export function createWatcher({
     )
   }
 
+  async function readItems() {
+    return (await storage.get(KEYS.items)) ?? {}
+  }
+
   async function today({ skipped = 0 } = {}) {
     const day = new Date(now()).toISOString().slice(0, 10)
-    const stored = (await storage.get(KEYS.today)) ?? { day, skipped: 0 }
-    const counted = stored?.day === day ? stored : { day, skipped: 0 }
-    const items = (await storage.get(KEYS.items)) ?? {}
-    const records = Object.values(items)
-    const onDay = (value) => typeof value === "string" && value.slice(0, 10) === day
-    const next = { day, skipped: (counted.skipped ?? 0) + skipped }
-    await storage.set(KEYS.today, next)
-    return {
-      flagged: records.filter((record) => onDay(record?.flaggedAt)).length,
-      nextStepsPosted: records.filter((record) => onDay(record?.firstTurnEndedAt)).length,
-      skipped: next.skipped,
-    }
+    return serializedWrite(async () => {
+      const stored = (await storage.get(KEYS.today)) ?? { day, skipped: 0 }
+      const counted = stored?.day === day ? stored : { day, skipped: 0 }
+      const records = Object.values(await readItems())
+      const onDay = (value) => typeof value === "string" && value.slice(0, 10) === day
+      const next = { day, skipped: (counted.skipped ?? 0) + skipped }
+      await storage.set(KEYS.today, next)
+      return {
+        flagged: records.filter((record) => onDay(record?.flaggedAt)).length,
+        // A message the scope rules leave out posted no next steps: its record
+        // has a first turn that ended and no issue.
+        nextStepsPosted: records.filter((record) => onDay(record?.firstTurnEndedAt) && record?.issueUrl).length,
+        skipped: next.skipped,
+      }
+    })
   }
 
   /**
@@ -111,12 +181,29 @@ export function createWatcher({
   }
 
   async function writeRecord(record) {
-    const items = (await storage.get(KEYS.items)) ?? {}
+    const items = await readItems()
     items[record.permalink] = record
     await storage.set(KEYS.items, items)
     const seen = new Set((await storage.get(KEYS.seen)) ?? [])
     seen.add(record.permalink)
     await storage.set(KEYS.seen, [...seen])
+    changed()
+  }
+
+  /** Replace one item record, one writer at a time. */
+  async function updateItem(record) {
+    await serializedWrite(async () => {
+      const items = await readItems()
+      items[record.permalink] = record
+      await storage.set(KEYS.items, items)
+    })
+    changed()
+  }
+
+  /** The item record one session belongs to, if it is one of ours. */
+  async function itemOf(sessionID) {
+    const records = Object.values(await readItems())
+    return records.find((record) => record?.sessionID === sessionID)
   }
 
   async function removeSession(sessionID) {
@@ -148,10 +235,11 @@ export function createWatcher({
     const hash = permalinkHash(hit.permalink)
     const generation = claims.claim(hash)
     if (generation === null) return
+    const title = neutralTitle(hit)
     let created
     try {
       created = await session.create({
-        title: sessionTitle(hit),
+        title,
         agent: config.triage_agent,
         location: { directory: config.session_directory },
       })
@@ -166,11 +254,16 @@ export function createWatcher({
       channel: hit.channel.label,
       channelID: hit.channel.id,
       ts: hit.ts,
+      asker: hit.asker ?? "",
       flaggedAt: new Date(now()).toISOString(),
-      title: sessionTitle(hit),
+      title,
       sessionID: created.id,
-      firstTurnFailed: true,
+      issueNumber: null,
+      issueUrl: null,
       firstTurnEndedAt: null,
+      firstTurnFailed: true,
+      permissionPending: false,
+      openedAt: null,
     }
     const committed = await claims.commit(hash, {
       sessionID: created.id,
@@ -280,20 +373,30 @@ export function createWatcher({
     return { ok: true, error: null, skipped }
   }
 
+  /** Whether a config can run a poll at all. */
+  const usable = (config) =>
+    Boolean(config) && config.intake_repo !== "" && config.session_directory !== ""
+
   /** One poll. Returns the config's poll interval and the status it wrote. */
   async function poll({ force = false } = {}) {
     const previous = await readStatus()
     const { config, error } = readConfig()
-    if (error) {
+    if (error && !usable(config)) {
       const status = {
         lastPoll: previous.lastPoll ?? null,
-        outcome: `config error: ${error}`,
+        outcome: error,
         workspaces: [],
         configError: error,
         today: await today(),
       }
       await writeStatus(status)
       return { pollSeconds: DEFAULT_POLL_SECONDS, status }
+    }
+    const configError = error ?? null
+    // Outside the window nothing is polled at all: no credential is resolved
+    // and no Slack call is made.
+    if (!force && !inHours(config.work_hours, now())) {
+      return { pollSeconds: config.poll_seconds, status: previous }
     }
     const lease = await storage.get(KEYS.lease)
     if (!force && lease && typeof lease.expires === "number" && lease.expires > now()) {
@@ -331,16 +434,16 @@ export function createWatcher({
     const failed = workspaces.find((workspace) => !workspace.ok)
     const status = {
       lastPoll: new Date(now()).toISOString(),
-      outcome: discoveryError ?? failed?.error ?? "ok",
+      outcome: configError ?? discoveryError ?? failed?.error ?? "ok",
       workspaces,
-      configError: null,
+      configError,
       today: await today({ skipped }),
     }
     await writeStatus(status)
     return { pollSeconds: config.poll_seconds, status }
   }
 
-  /** A poll the user asked for: it clears every suspension and ignores the lease. */
+  /** A poll the user asked for: it clears every suspension and ignores the lease and the window. */
   async function pollNow() {
     await storage.set(KEYS.suspended, {})
     return poll({ force: true })
@@ -351,17 +454,98 @@ export function createWatcher({
     return readStatus()
   }
 
+  /** Every item record, as the RPC contract serves them. */
+  async function items() {
+    return { items: Object.values(await readItems()).map(itemOfRecord) }
+  }
+
+  /** The config as the RPC contract serves it. */
+  async function getConfig() {
+    return { config: readConfig().config }
+  }
+
+  /** One field's new value, validated before the file is touched. */
+  async function setConfig(input = {}) {
+    return writeConfig(input.field, input.value)
+  }
+
+  /** The user opened one item's session. */
+  async function markOpened(input = {}) {
+    const sessionID = input.sessionID
+    if (typeof sessionID !== "string") return {}
+    const record = await itemOf(sessionID)
+    if (!record) return {}
+    await updateItem({ ...record, openedAt: new Date(now()).toISOString() })
+    return {}
+  }
+
+  /** The text the session's own reply ends with, or undefined. */
+  async function readReply(sessionID) {
+    try {
+      return replyText(await session.context({ sessionID }))
+    } catch (error) {
+      log(`the reply of session ${sessionID} was not read: ${messageOf(error)}`)
+      return undefined
+    }
+  }
+
+  async function renameSession(sessionID, title) {
+    try {
+      await session.update({ sessionID, title })
+    } catch (error) {
+      log(`session ${sessionID} was not retitled: ${messageOf(error)}`)
+    }
+  }
+
   /**
-   * Clear the suspensions at load: the task's one other way out of a suspension
-   * besides a changed credential and pollNow is a restart of OpenCode.
+   * The first turn of one item session ended. Only a turn seen to end without
+   * error clears the pessimistic flag the record was written with; a turn that
+   * ended in error, or one whose end no instance saw, leaves the item waiting.
+   */
+  async function firstTurnEnded(sessionID, failed) {
+    const record = await itemOf(sessionID)
+    if (!record || record.firstTurnFailed !== true) return
+    if (failed) return
+    const text = await readReply(sessionID)
+    const reply = text === undefined ? undefined : parseReply(text)
+    const next = { ...record, firstTurnEndedAt: new Date(now()).toISOString(), firstTurnFailed: false }
+    if (reply) {
+      next.title = reply.title
+      next.issueUrl = reply.issueUrl
+      next.issueNumber = reply.issueNumber
+    }
+    await updateItem(next)
+    if (reply) await renameSession(sessionID, reply.title)
+  }
+
+  async function permissionChanged(sessionID, pending) {
+    const record = await itemOf(sessionID)
+    if (!record || record.permissionPending === pending) return
+    await updateItem({ ...record, permissionPending: pending })
+  }
+
+  /** One event of the server's stream, for the sessions this plugin started. */
+  async function observe(event) {
+    const type = event?.type
+    const sessionID = event?.data?.sessionID
+    if (typeof sessionID !== "string" || sessionID === "") return
+    if (Object.hasOwn(TURN_ENDED, type)) {
+      await firstTurnEnded(sessionID, TURN_ENDED[type])
+      return
+    }
+    if (type === "permission.asked") await permissionChanged(sessionID, true)
+    if (type === "permission.replied") await permissionChanged(sessionID, false)
+  }
+
+  /**
+   * Clear the suspensions at load: the one other way out of a suspension
+   * besides a changed credential and pollNow is a restart of OpenCode. No item
+   * record is touched here, so a first turn whose end this instance never saw
+   * keeps reading as waiting.
    */
   async function start() {
     await storage.set(KEYS.suspended, {})
   }
 
-  return { poll, pollNow, status, start }
-}
-
-function sessionTitle(hit) {
-  return `Flagged message in ${hit.channel.label} — ${hit.ts}`
+  return { poll, pollNow, status, items, getConfig, setConfig, markOpened, observe, start }
 }

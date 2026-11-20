@@ -99,6 +99,7 @@ test("the first block of a report is established, and its context blocks are not
     permalink: GRID,
     channel: { id: "D03KHBF103X", label: "#platform-help" },
     ts: "1795008741.837299",
+    asker: "Someone",
   })
   assert.deepEqual(page.candidates, [])
 })

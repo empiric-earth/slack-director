@@ -3,17 +3,18 @@
 // session.
 //
 // The server part is the plugin's only host adapter: the skill registration,
-// the RPC contract and the watcher's timer are wired here, and every piece of
-// behaviour lives in the modules under src/, so the whole watcher replays in
-// the node suite with a fake context and a fake HTTP layer.
+// the RPC contract, the session-progress subscription and the watcher's timer
+// are wired here, and every piece of behaviour lives in the modules under src/,
+// so the whole watcher replays in the node suite with a fake context and a fake
+// HTTP layer.
 import { randomUUID } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { SlackDirectorRpc } from "./rpc.js"
 import { createClaims } from "./src/claims.js"
-import { DEFAULT_POLL_SECONDS, readConfig } from "./src/config.js"
+import { createConfigReader, DEFAULT_POLL_SECONDS } from "./src/config.js"
 import { claimsDir } from "./src/state.js"
-import { createWatcher } from "./src/watcher.js"
+import { createWatcher, SESSION_EVENT_TYPES } from "./src/watcher.js"
 
 /** The skill this package ships. */
 export const SKILL = "slack-director"
@@ -59,6 +60,8 @@ async function resolveCredential(ctx, name) {
   return { access: credential.access, expires: credential.expires }
 }
 
+const messageOf = (error) => (error instanceof Error ? error.message : String(error))
+
 export default {
   id: "slack-director",
   async setup(ctx) {
@@ -75,12 +78,18 @@ export default {
       })
     })
 
+    const config = createConfigReader()
+    // The watcher's change notice goes out through the RPC registration, which
+    // is created after it: the holder is filled in as soon as that returns.
+    let emitUpdated = () => {}
     const watcher = createWatcher({
       storage: ctx.storage,
       claims: createClaims({ dir: claimsDir(), randomID: () => randomUUID() }),
       now: () => Date.now(),
       fetch: (url, init) => fetch(url, init),
-      readConfig: () => readConfig(),
+      readConfig: () => config.read(),
+      writeConfig: (field, value) => config.write(field, value),
+      onChange: () => emitUpdated(),
       mcpServers: () => mcpServers(ctx),
       resolveCredential: (name) => resolveCredential(ctx, name),
       session: ctx.session,
@@ -88,20 +97,58 @@ export default {
     })
     const rpcRegistration = await ctx.rpc.register(SlackDirectorRpc, {
       status: () => watcher.status(),
+      items: () => watcher.items(),
+      getConfig: () => watcher.getConfig(),
+      setConfig: async (input, context) => {
+        const result = await watcher.setConfig(input)
+        if (result.error) return context.error("invalid", result.error.message, { field: result.error.field })
+        return result
+      },
+      // A poll can take a whole workspace's deadline, so the call starts one and
+      // answers at once: the `updated` event tells the caller when it finished.
+      pollNow: () => {
+        void watcher.pollNow().catch((error) => log(`poll now failed: ${messageOf(error)}`))
+        return {}
+      },
+      markOpened: (input) => watcher.markOpened(input),
     })
+    emitUpdated = () => {
+      rpcRegistration.events.emit("updated", {}).catch((error) => log(`the update notice failed: ${messageOf(error)}`))
+    }
     await watcher.start()
+
+    // The item map follows its own sessions: a turn that ends and a permission
+    // request that arrives are events, not polls.
+    const controller = new AbortController()
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ types: SESSION_EVENT_TYPES, signal: controller.signal })) {
+          try {
+            await watcher.observe(event)
+          } catch (error) {
+            log(`a session event was not handled: ${messageOf(error)}`)
+          }
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) log(`the event stream ended: ${messageOf(error)}`)
+      }
+    })()
 
     // One poll, then the next one after the config's interval: a changed
     // interval takes effect on the next tick rather than at the next restart.
     let timer
+    let stopped = false
     const tick = async () => {
       let seconds = DEFAULT_POLL_SECONDS
       try {
         const result = await watcher.poll()
         seconds = result?.pollSeconds ?? seconds
       } catch (error) {
-        log(`poll failed: ${error instanceof Error ? error.message : String(error)}`)
+        log(`poll failed: ${messageOf(error)}`)
       }
+      // A tick that was already running when the plugin unloaded must not
+      // schedule the next one.
+      if (stopped) return
       timer = setTimeout(() => {
         void tick()
       }, seconds * 1000)
@@ -111,7 +158,9 @@ export default {
     }, 0)
 
     return async () => {
+      stopped = true
       clearTimeout(timer)
+      controller.abort()
       await rpcRegistration.dispose()
       await skillRegistration.dispose()
     }

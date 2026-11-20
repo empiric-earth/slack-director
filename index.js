@@ -1,7 +1,19 @@
 // opencode-slack-director: delivers the Slack Director's skill and its
-// on-demand command to OpenCode. No tools, no hooks, no timer, no dependencies.
+// on-demand command to OpenCode, and polls Slack for the messages the user
+// flagged so each new one gets a session.
+//
+// The server part is the plugin's only host adapter: the skill and command
+// registrations, the RPC contract and the watcher's timer are wired here, and
+// every piece of behaviour lives in the modules under src/, so the whole watcher
+// replays in the node suite with a fake context and a fake HTTP layer.
+import { randomUUID } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
+import { SlackDirectorRpc } from "./rpc.js"
+import { createClaims } from "./src/claims.js"
+import { DEFAULT_POLL_SECONDS, readConfig } from "./src/config.js"
+import { claimsDir } from "./src/state.js"
+import { createWatcher } from "./src/watcher.js"
 
 /** The skill this package ships. */
 export const SKILL = "slack-director"
@@ -35,9 +47,34 @@ export function skillPath(name) {
   return fileURLToPath(new URL(`./skills/${name}/SKILL.md`, import.meta.url))
 }
 
+/** Every configured MCP server, with the URL a remote one is reached at. */
+async function mcpServers(ctx) {
+  let servers = []
+  await ctx.mcp.transform((editor) => {
+    servers = editor.list().map(([name, config]) => ({
+      name,
+      url: config && config.type === "remote" ? config.url : undefined,
+    }))
+  })
+  return servers
+}
+
+/** The OAuth credential a Slack MCP server is signed in with, if it is signed in. */
+async function resolveCredential(ctx, name) {
+  const listed = await ctx.mcp.list()
+  const server = (listed?.data ?? []).find((candidate) => candidate.name === name)
+  if (!server?.integrationID) return undefined
+  const connection = await ctx.integration.connection.active(server.integrationID)
+  if (!connection) return undefined
+  const credential = await ctx.integration.connection.resolve(connection)
+  if (credential?.type !== "oauth") return undefined
+  return { access: credential.access, expires: credential.expires }
+}
+
 export default {
   id: "slack-director",
   async setup(ctx) {
+    const log = (message) => console.warn(`slack-director: ${message}`)
     const skillRegistration = await ctx.skill.transform((editor) => {
       const path = skillPath(SKILL)
       const skill = parseSkill(readFileSync(path, "utf8"))
@@ -63,7 +100,45 @@ export default {
         })
       }
     })
+
+    const watcher = createWatcher({
+      storage: ctx.storage,
+      claims: createClaims({ dir: claimsDir(), randomID: () => randomUUID() }),
+      now: () => Date.now(),
+      fetch: (url, init) => fetch(url, init),
+      readConfig: () => readConfig(),
+      mcpServers: () => mcpServers(ctx),
+      resolveCredential: (name) => resolveCredential(ctx, name),
+      session: ctx.session,
+      log,
+    })
+    const rpcRegistration = await ctx.rpc.register(SlackDirectorRpc, {
+      status: () => watcher.status(),
+    })
+    await watcher.start()
+
+    // One poll, then the next one after the config's interval: a changed
+    // interval takes effect on the next tick rather than at the next restart.
+    let timer
+    const tick = async () => {
+      let seconds = DEFAULT_POLL_SECONDS
+      try {
+        const result = await watcher.poll()
+        seconds = result?.pollSeconds ?? seconds
+      } catch (error) {
+        log(`poll failed: ${error instanceof Error ? error.message : String(error)}`)
+      }
+      timer = setTimeout(() => {
+        void tick()
+      }, seconds * 1000)
+    }
+    timer = setTimeout(() => {
+      void tick()
+    }, 0)
+
     return async () => {
+      clearTimeout(timer)
+      await rpcRegistration.dispose()
       await commandRegistration.dispose()
       await skillRegistration.dispose()
     }

@@ -28,8 +28,11 @@ const SOURCE_MODULES = [
   "first-prompt.js",
   "reply.js",
   "watcher.js",
+  "page.js",
 ]
 const PARTS = ["index.js", "tui.js", "rpc.js", "package.json"]
+// The modules only a running TUI serves, reached by a runtime import.
+const RENDERER_MODULES = ["@opentui/solid", "solid-js"]
 
 /**
  * A fake plugin context that records what the plugin registers, and rejects any
@@ -248,7 +251,30 @@ test("no shipped module imports the plugin SDK, so every one loads under plain n
         `${rel} imports only node builtins and its own modules, not ${match[1]}`,
       )
     }
+    // A runtime import loads only where the host serves it, so the file itself
+    // still loads under plain node.
+    for (const match of text.matchAll(/import\s*\(\s*"([^"]+)"/g)) {
+      assert.ok(
+        RENDERER_MODULES.includes(match[1]),
+        `${rel} reaches only the TUI host's renderer modules by a runtime import, not ${match[1]}`,
+      )
+    }
   }
+})
+
+test("the TUI part reaches the TUI host's renderer modules by a runtime import alone", async () => {
+  const source = read("tui.js")
+  const runtimeImports = [...source.matchAll(/import\s*\(\s*"([^"]+)"/g)].map((match) => match[1])
+  assert.deepEqual(runtimeImports.sort(), ["@opentui/solid", "solid-js"])
+  for (const specifier of runtimeImports) {
+    assert.ok(!new RegExp(`from\\s+"${specifier}"`).test(source), `${specifier} is not a static import`)
+  }
+  const { loadRenderer } = await import("../tui.js")
+  assert.equal(
+    await loadRenderer(),
+    undefined,
+    "outside a TUI the renderer is absent, and the part still loads",
+  )
 })
 
 test("the README install and uninstall steps match the Makefile", () => {
@@ -406,6 +432,23 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
   } finally {
     rmSync(fixture, { recursive: true, force: true })
   }
+})
+
+test("the two plugin-only agents are hidden and the director agent stays listed", () => {
+  const field = (rel, name) => {
+    const block = /^---\r?\n([\s\S]*?)\r?\n---/.exec(read(rel))
+    assert.ok(block, `${rel} carries frontmatter`)
+    const line = block[1]
+      .split(/\r?\n/)
+      .map((raw) => raw.trim())
+      .find((raw) => raw.startsWith(`${name}:`))
+    return line === undefined ? undefined : line.slice(line.indexOf(":") + 1).trim()
+  }
+  for (const rel of [TRIAGE_AGENT_REL, REFRESH_AGENT_REL]) {
+    assert.equal(field(rel, "hidden"), "true", `${rel} is hidden from the agent list`)
+    assert.equal(field(rel, "mode"), "primary", `${rel} stays an agent a session can run on`)
+  }
+  assert.equal(field(AGENT_REL, "hidden"), undefined, `${AGENT_REL} stays in the agent list`)
 })
 
 test("the skill path helper points at the shipped skill", () => {

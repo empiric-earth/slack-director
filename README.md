@@ -12,6 +12,45 @@ It never sends a Slack message on its own: OpenCode asks you to approve every
 send. It writes to the intake repo only, and always as a paraphrase plus the
 Slack permalink — never the message text.
 
+## The overview page
+
+Everything the watcher has flagged sits on one page. Open it with
+`/slack-director`, or with the `Slack Director` entry in the command palette:
+
+- the header names the last poll, its outcome and each workspace — a workspace
+  that failed carries `✗` and the reason;
+- the counts line counts the items by state;
+- the table lists one row per item: its state, its asker, its title, its intake
+  issue, its channel and how long ago it was flagged;
+- the today line carries the day's counts;
+- the help line names the keys.
+
+The page carries no Slack message text: a row's title is the item session's
+own title.
+
+An item's state is its session's live state: `working` while the session runs,
+`waiting` while it waits on a permission request or until you have opened it
+from the page, and `idle` once you have opened it and it is quiet. Waiting comes
+first, then working, then idle; the newest flag comes first inside each.
+
+Keys: `enter` opens the item's session, `i` opens its intake issue in your
+browser, `s` opens the Slack message, `r` polls now, `,` opens the settings
+dialog and `esc` goes back. `↑` and `↓` move the selection.
+
+While you are in a session, the sidebar carries one line:
+`Slack Director  2 waiting · 1 working`.
+
+The settings dialog — `,`, or the `Slack Director: settings` entry in the
+palette — lists the config fields with their current values. `enter` on a row
+asks for that one value and writes it through the watcher, which refuses a value
+it cannot use and leaves the file as it was.
+
+Only `slack-director` is in the agent list and in the shift+tab cycle. The two
+agents the watcher starts sessions on — `slack-director-triage` and
+`slack-director-refresh` — are hidden: they are for the sessions the plugin
+starts, and a flagged item still starts on the triage agent. To act on an item,
+open its session and switch the agent to `slack-director`.
+
 ## Install
 
 1. Create a private repo `empiric-earth/<you>-slack-intake`, and give your

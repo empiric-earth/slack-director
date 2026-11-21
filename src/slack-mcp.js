@@ -49,6 +49,7 @@ const RESULT_MARKER = /^#{2,3}[ \t]*Result[ \t]+\d+/gm
 const PERMALINK_FIELD = /^Permalink:[ \t]*(.*)$/m
 const TEXT_FIELD = /^Text:/
 const CHANNEL_LINE = /^Channel:[ \t]*(.*)$/m
+const FROM_LINE = /^From:[ \t]*(.*)$/m
 const CURSOR_LINE = /cursor[^`\n]*`([^`]+)`/i
 
 /** The flag filter: the messages the user reacted to with the flag emoji. */
@@ -130,6 +131,13 @@ function blockFields(block) {
   return (end === -1 ? lines : lines.slice(0, end)).join("\n")
 }
 
+/** The display name a `From:` line carries, without the user id beside it. */
+function askerOf(line) {
+  const text = typeof line === "string" ? line.trim() : ""
+  if (text === "") return ""
+  return (text.replace(/\s*\([^)]*\)\s*$/, "") || text).trim()
+}
+
 function hitOfRow(row) {
   if (row === null || typeof row !== "object") return undefined
   const permalink =
@@ -138,6 +146,8 @@ function hitOfRow(row) {
   if (!hit) return undefined
   const label = row.channel_name ?? row.channel ?? row.channel_id
   if (typeof label === "string" && label.trim() !== "") hit.channel.label = label.trim()
+  const asker = row.user_name ?? row.username ?? row.author
+  hit.asker = typeof asker === "string" ? asker.trim() : ""
   return hit
 }
 
@@ -152,6 +162,8 @@ function hitOfBlock(block) {
     const name = /^(?:#|@)?([^\s(]+)/.exec(line[1].trim())
     if (name && name[1] !== "") hit.channel.label = line[1].trim().startsWith("#") ? `#${name[1]}` : name[1]
   }
+  const from = FROM_LINE.exec(fields)
+  hit.asker = from ? askerOf(from[1]) : ""
   return hit
 }
 

@@ -5,11 +5,12 @@ import assert from "node:assert/strict"
 import { execFileSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import plugin, { parseSkill, skillPath } from "../index.js"
 import { itemFirstPrompt } from "../src/first-prompt.js"
 import { SlackDirectorRpc } from "../rpc.js"
+import { schemaProblem } from "./schema.js"
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url))
 const read = (rel) => readFileSync(join(ROOT, rel), "utf8")
@@ -18,7 +19,16 @@ const SKILL_REL = `skills/${SKILL_ID}/SKILL.md`
 const AGENT_REL = "agents/slack-director.md"
 const TRIAGE_AGENT_REL = "agents/slack-director-triage.md"
 const REFRESH_AGENT_REL = "agents/slack-director-refresh.md"
-const SOURCE_MODULES = ["config.js", "claims.js", "state.js", "slack-mcp.js", "first-prompt.js", "watcher.js"]
+const SOURCE_MODULES = [
+  "config.js",
+  "work-hours.js",
+  "claims.js",
+  "state.js",
+  "slack-mcp.js",
+  "first-prompt.js",
+  "reply.js",
+  "watcher.js",
+]
 const PARTS = ["index.js", "tui.js", "rpc.js", "package.json"]
 
 /**
@@ -96,6 +106,18 @@ function fakeContext() {
       },
       async remove() {},
       async wait() {},
+      async context() {
+        return []
+      },
+      async update() {},
+    },
+    event: {
+      // A stream that never yields: the plugin's loop stays parked until dispose.
+      subscribe() {
+        return {
+          [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }),
+        }
+      },
     },
   }
   const ctx = new Proxy(domains, {
@@ -126,46 +148,73 @@ function tree(dir) {
   return out
 }
 
+/**
+ * Run `body` with the plugin's config home pointed at a fresh directory, so a
+ * setup never reads or writes the config of the machine the suite runs on. The
+ * body receives the config file's path in that fixture.
+ */
+async function withConfigHome(body) {
+  const home = mkdtempSync(join(tmpdir(), "slack-director-config-"))
+  const configHome = join(home, "config")
+  const previous = process.env.XDG_CONFIG_HOME
+  process.env.XDG_CONFIG_HOME = configHome
+  try {
+    return await body(join(configHome, "opencode", "slack-director", "config.json"))
+  } finally {
+    if (previous === undefined) delete process.env.XDG_CONFIG_HOME
+    else process.env.XDG_CONFIG_HOME = previous
+    rmSync(home, { recursive: true, force: true })
+  }
+}
+
 test("setup registers exactly the shipped skill", async () => {
-  const { ctx, skills, calls } = fakeContext()
-  const dispose = await plugin.setup(ctx)
-  assert.equal(plugin.id, "slack-director")
-  assert.equal(typeof dispose, "function", "setup returns a cleanup")
-  assert.equal(calls.skill, 1, "one skill registration")
-  assert.equal(skills.length, 1, "exactly one skill is registered")
-  const [skill] = skills
-  const parsed = parseSkill(read(SKILL_REL))
-  assert.equal(skill.id, SKILL_ID)
-  assert.equal(skill.name, SKILL_ID)
-  assert.equal(skill.description, parsed.description)
-  assert.equal(skill.path, join(ROOT, SKILL_REL))
-  assert.equal(skill.content, parsed.body)
-  await dispose()
+  await withConfigHome(async () => {
+    const { ctx, skills, calls } = fakeContext()
+    const dispose = await plugin.setup(ctx)
+    assert.equal(plugin.id, "slack-director")
+    assert.equal(typeof dispose, "function", "setup returns a cleanup")
+    assert.equal(calls.skill, 1, "one skill registration")
+    assert.equal(skills.length, 1, "exactly one skill is registered")
+    const [skill] = skills
+    const parsed = parseSkill(read(SKILL_REL))
+    assert.equal(skill.id, SKILL_ID)
+    assert.equal(skill.name, SKILL_ID)
+    assert.equal(skill.description, parsed.description)
+    assert.equal(skill.path, join(ROOT, SKILL_REL))
+    assert.equal(skill.content, parsed.body)
+    await dispose()
+  })
 })
 
 test("setup registers no command, so the old intake command is gone", async () => {
-  const { ctx, commands, calls } = fakeContext()
-  const dispose = await plugin.setup(ctx)
-  assert.equal(calls.command, 0, "setup registers no command table")
-  assert.deepEqual(commands, [], "no command is registered")
-  assert.ok(
-    !commands.some((command) => command.name === "slack-director-intake"),
-    "no command named slack-director-intake is registered",
-  )
-  await dispose()
+  await withConfigHome(async () => {
+    const { ctx, commands, calls } = fakeContext()
+    const dispose = await plugin.setup(ctx)
+    assert.equal(calls.command, 0, "setup registers no command table")
+    assert.deepEqual(commands, [], "no command is registered")
+    assert.ok(
+      !commands.some((command) => command.name === "slack-director-intake"),
+      "no command named slack-director-intake is registered",
+    )
+    await dispose()
+  })
 })
 
-test("setup registers the RPC contract the TUI part calls", async () => {
-  const { ctx, rpcRegistrations, calls } = fakeContext()
-  const dispose = await plugin.setup(ctx)
-  assert.equal(calls.rpc, 1, "one RPC registration")
-  assert.equal(rpcRegistrations.length, 1)
-  assert.equal(rpcRegistrations[0].definition, SlackDirectorRpc, "the one contract file is registered")
-  assert.equal(typeof rpcRegistrations[0].handlers.status, "function", "the contract's one method is handled")
-  await dispose()
+test("setup registers the RPC contract the TUI part calls, with every method handled", async () => {
+  await withConfigHome(async () => {
+    const { ctx, rpcRegistrations, calls } = fakeContext()
+    const dispose = await plugin.setup(ctx)
+    assert.equal(calls.rpc, 1, "one RPC registration")
+    assert.equal(rpcRegistrations.length, 1)
+    assert.equal(rpcRegistrations[0].definition, SlackDirectorRpc, "the one contract file is registered")
+    for (const method of Object.keys(SlackDirectorRpc.methods)) {
+      assert.equal(typeof rpcRegistrations[0].handlers[method], "function", `the contract's ${method} is handled`)
+    }
+    await dispose()
+  })
 })
 
-test("the package registers nothing but the skill and the RPC", () => {
+test("the package registers nothing but the skill, the RPC and the event subscription", () => {
   const pkg = JSON.parse(read("package.json"))
   assert.equal(pkg.type, "module")
   assert.deepEqual(pkg.exports, { ".": "./index.js", "./tui": "./tui.js", "./rpc": "./rpc.js" })
@@ -178,13 +227,14 @@ test("the package registers nothing but the skill and the RPC", () => {
 
   const source = read("index.js")
   const banned = [
-    [/\bctx\.(tool|event|permission|agent|vcs|shell|worktree)\b/, "no other ctx domain"],
+    [/\bctx\.(tool|permission|agent|vcs|shell|worktree)\b/, "no other ctx domain"],
     [/\bctx\.command\b/, "no command domain"],
     [/slack-director-intake/, "no command"],
     [/\.hook\s*\(/, "no hook"],
     [/\bsetInterval\b/, "no repeating timer; one poll reschedules the next"],
   ]
   for (const [pattern, why] of banned) assert.ok(!pattern.test(source), why)
+  assert.match(source, /ctx\.event\.subscribe\(/, "the item map follows the server's session events")
 })
 
 test("no shipped module imports the plugin SDK, so every one loads under plain node", () => {
@@ -360,4 +410,48 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
 
 test("the skill path helper points at the shipped skill", () => {
   assert.equal(skillPath(SKILL_ID), join(ROOT, SKILL_REL))
+})
+
+test("every RPC handler answers what the contract's own schema for it describes", async () => {
+  await withConfigHome(async (configFile) => {
+    mkdirSync(dirname(configFile), { recursive: true })
+    writeFileSync(
+      configFile,
+      JSON.stringify({
+        flag_emoji: "magic_wand",
+        intake_repo: "empiric-earth/almeida-slack-intake",
+        session_directory: "/home/someone/notes",
+        poll_seconds: 60,
+        work_hours: { days: ["Mon", "Fri"], start: "09:00", end: "18:00", time_zone: "UTC" },
+        triage_agent: "slack-director-triage",
+      }),
+    )
+    const { ctx, rpcRegistrations } = fakeContext()
+    const dispose = await plugin.setup(ctx)
+    const { definition, handlers } = rpcRegistrations[0]
+    const context = { error: (name, message, data) => ({ error: { name, message, data } }) }
+    const inputs = {
+      status: {},
+      items: {},
+      getConfig: {},
+      setConfig: { field: "poll_seconds", value: 90 },
+      pollNow: {},
+      markOpened: { sessionID: "ses_fixture" },
+    }
+    for (const [name, method] of Object.entries(definition.methods)) {
+      const output = await handlers[name](inputs[name], context)
+      assert.equal(schemaProblem(method.output, output), undefined, `${name} answers its output schema`)
+    }
+    assert.equal(JSON.parse(readFileSync(configFile, "utf8")).poll_seconds, 90, "setConfig wrote the field")
+
+    const refused = await handlers.setConfig({ field: "poll_seconds", value: "soon" }, context)
+    assert.equal(refused.error.name, "invalid", "a wrong type is the contract's declared error")
+    assert.equal(schemaProblem(definition.methods.setConfig.errors.invalid, refused.error.data), undefined)
+    assert.equal(refused.error.data.field, "poll_seconds", "the error names the field")
+    assert.equal(JSON.parse(readFileSync(configFile, "utf8")).poll_seconds, 90, "the refused write left the file alone")
+    const unknown = await handlers.setConfig({ field: "not_a_field", value: 1 }, context)
+    assert.equal(unknown.error.name, "invalid")
+    assert.equal(unknown.error.data.field, null, "a field that does not exist has no name to carry")
+    await dispose()
+  })
 })

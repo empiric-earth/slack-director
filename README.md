@@ -31,12 +31,16 @@ Slack permalink — never the message text.
    - `session_directory` — the absolute path an item session runs in; required.
    - `poll_seconds` — the interval between scans; default `60`.
    - `work_hours` — `days` (a list of `Mon` … `Sun`), `start` and `end`
-     (`HH:MM`), and `time_zone` (an IANA name).
+     (`HH:MM`) and `time_zone` (an IANA name); default Monday to Friday, 09:00
+     to 18:00, in this machine's time zone. Nothing is polled outside it.
    - `triage_agent` — the agent an item session runs on; default
      `slack-director-triage`.
 
-   While `intake_repo` or `session_directory` is missing, the watcher polls
-   nothing and its status names the missing field.
+   The watcher reads the file when it starts and again whenever the file
+   changes, so a change takes effect at the next poll with no restart. While
+   `intake_repo` or `session_directory` is missing, the watcher polls nothing
+   and its status names the missing field. A field it cannot use is named in
+   the status too, and the watcher keeps polling with the values it last read.
 5. Start OpenCode in the session directory. When you want to act on an item,
    open its session and switch the agent to `slack-director` (shift+tab).
 
@@ -50,6 +54,8 @@ stays.
 - The watcher polls every connected Slack MCP server whose URL is
   `https://mcp.slack.com/mcp`, and gives each flagged message one item session.
   It writes nothing to Slack.
+- A session is titled after the flagged message's channel and its author until
+  its first turn ends, and after the intake issue's paraphrase from then on.
 - Removing the flag from a message you have handled keeps the scan short: the
   watcher searches for the messages you have flagged, so a cleared flag leaves
   the search.

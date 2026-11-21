@@ -2,13 +2,19 @@
 //
 // The contract's schemas are checked against every answer the contract
 // describes, with a validator written here so the suite needs no dependency,
-// and the TUI part is driven with a fake context that records the keymap layer
-// it registers and the toast it shows. No dependencies; run with `node --test`.
+// and the TUI part is driven with a fake context that records the keymap layers
+// it registers, the route and the sidebar claim, the dialogs it opens and the
+// toasts it shows. The page's own element tree is drawn with a stub renderer:
+// the real renderer modules exist only inside a running TUI.
+// No dependencies; run with `node --test`.
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import { SlackDirectorRpc } from "../rpc.js"
 import { schemaProblem } from "./schema.js"
-import tui, { COMMAND_ID, formatStatus } from "../tui.js"
+import { KEY_HELP, countsText, headerText, pageRows, rowText, sidebarText, tableHeaderText } from "../src/page.js"
+import tui, { COMMAND_ID, PAGE_NAME, SETTINGS_COMMAND_ID, pageView } from "../tui.js"
+
+const NOW = Date.parse("2026-11-19T14:32:00.000Z")
 
 const STATUS = {
   lastPoll: "2026-11-19T14:32:00.000Z",
@@ -46,31 +52,117 @@ const ITEM = {
   openedAt: null,
 }
 
-function fakeTuiContext({ status = STATUS, rejection } = {}) {
+function fakeTuiContext({
+  status = STATUS,
+  items = [ITEM],
+  config = CONFIG,
+  rejection,
+  setRejection,
+  selectAnswer,
+  promptAnswer,
+} = {}) {
   const layers = []
   const toasts = []
-  const rpcCalls = []
+  const routes = []
+  const slots = []
+  const navigations = []
+  const rpcIds = []
+  const calls = []
+  const eventHandlers = []
+  const opened = []
+  const selections = []
+  const prompts = []
   const context = {
-    keymap: {
-      layer(factory) {
-        layers.push(factory())
+    keymap: { layer: (factory) => layers.push(factory()) },
+    ui: {
+      toast: { show: (options) => toasts.push(options) },
+      router: {
+        register: (page) => {
+          routes.push(page)
+          return () => {}
+        },
+        navigate: (destination) => navigations.push(destination),
+      },
+      slot: (claim) => {
+        slots.push(claim)
+        return () => {}
+      },
+      dialog: {
+        select: async (options) => {
+          selections.push(options)
+          return selectAnswer
+        },
+        prompt: async (options) => {
+          prompts.push(options)
+          return promptAnswer
+        },
       },
     },
-    ui: { toast: { show: (options) => toasts.push(options) } },
     client: {
       rpc(definition) {
-        rpcCalls.push(definition.id)
+        rpcIds.push(definition.id)
         return {
-          async status(input) {
-            rpcCalls.push(input)
+          async status() {
+            calls.push("status")
             if (rejection) throw rejection
             return status
+          },
+          async items() {
+            calls.push("items")
+            if (rejection) throw rejection
+            return { items }
+          },
+          async getConfig() {
+            calls.push("getConfig")
+            if (rejection) throw rejection
+            return { config }
+          },
+          async setConfig(input) {
+            calls.push("setConfig")
+            if (setRejection) throw setRejection
+            return { config: { ...config, [input.field]: input.value } }
+          },
+          async pollNow() {
+            calls.push("pollNow")
+            return {}
+          },
+          async markOpened(input) {
+            calls.push("markOpened")
+            opened.push(input)
+            return {}
+          },
+          events: {
+            on: (name, handler) => {
+              eventHandlers.push([name, handler])
+              return () => {}
+            },
           },
         }
       },
     },
+    data: {
+      session: {
+        status: () => "idle",
+        permission: { list: () => [] },
+      },
+    },
   }
-  return { context, layers, toasts, rpcCalls }
+  return { context, layers, toasts, routes, slots, navigations, rpcIds, calls, eventHandlers, opened, selections, prompts }
+}
+
+/** The page's own element tree, with the host's factory replaced by a recorder. */
+function stubRenderer() {
+  return {
+    createElement: (type) => ({ type, props: {} }),
+    spread: (node, props) => {
+      node.props = { ...node.props, ...props }
+    },
+  }
+}
+
+/** The lines the page draws, in order. */
+function drawnLines(view) {
+  return view.props.children.map((child) => (child.type === "box" ? undefined : child.props.content))
 }
 
 test("the RPC contract defines every method and the updated event with an input and an output schema", () => {
@@ -128,63 +220,163 @@ test("the contract's schemas describe the answers it names, and reject a value t
   assert.equal(schemaProblem(SlackDirectorRpc.methods.pollNow.output, {}), undefined, "an empty answer fits")
 })
 
-test("the TUI part registers the /slack-director slash command and its palette entry", async () => {
-  const { context, layers } = fakeTuiContext()
+test("the TUI part registers the overview page, its two palette entries and the sidebar line", async () => {
+  const { context, layers, routes, slots } = fakeTuiContext()
   await tui.setup(context)
   assert.equal(tui.id, "slack-director.tui")
-  assert.equal(layers.length, 1, "one keymap layer")
+
+  assert.equal(routes.length, 1, "one route")
+  assert.equal(routes[0].name, PAGE_NAME, "the page's name is the route's")
+  assert.equal(typeof routes[0].render, "function")
+
+  assert.equal(layers.length, 1, "one keymap layer for the commands")
   assert.equal(layers[0].mode, "global")
-  const commands = layers[0].commands
-  assert.equal(commands.length, 1)
-  const [command] = commands
-  assert.equal(command.id, COMMAND_ID)
-  assert.deepEqual(command.slash, { name: "slack-director" }, "the slash command is /slack-director")
-  assert.equal(command.palette, true, "the command is in the palette")
+  const [page, settings] = layers[0].commands
+  assert.equal(page.id, COMMAND_ID)
+  assert.equal(page.title, "Slack Director", "the palette entry is the page's title")
+  assert.equal(page.palette, true)
+  assert.deepEqual(page.slash, { name: "slack-director" }, "the slash command is /slack-director")
+  assert.equal(settings.id, SETTINGS_COMMAND_ID)
+  assert.equal(settings.title, "Slack Director: settings")
+  assert.equal(settings.palette, true)
+
+  assert.equal(slots.length, 1, "one slot claim")
+  assert.equal(slots[0].append, "sidebar.content", "the sidebar line sits in the session sidebar")
+  assert.equal(typeof slots[0].render, "function")
 })
 
-test("the command calls status and shows the answer, today's counts included, as a toast", async () => {
-  const { context, layers, toasts, rpcCalls } = fakeTuiContext()
+test("the page's keymap answers the layout's keys", async () => {
+  const { context, layers, routes } = fakeTuiContext()
   await tui.setup(context)
-  await layers[0].commands[0].run()
-  assert.deepEqual(rpcCalls, ["slack-director", {}], "the command calls status through the contract")
-  assert.equal(toasts.length, 1, "one toast")
-  assert.match(toasts[0].message, /last poll \d\d:\d\d/, "the toast names the last poll")
-  assert.ok(toasts[0].message.includes("ok"), "the toast names the outcome")
-  assert.ok(toasts[0].message.includes("slack_nexar ✓"), "the toast names each workspace")
-  assert.ok(toasts[0].message.includes("sign-in expired — run /mcps"), "the toast names a failing workspace")
-  assert.ok(toasts[0].message.includes("Today: 2 flagged · 1 next steps posted · 1 skipped"), "the toast names today's counts")
+  routes[0].render()
+  const pageLayer = layers.at(-1)
+  assert.deepEqual(
+    pageLayer.commands.map((command) => [command.bind, command.id]),
+    [
+      ["return", `${COMMAND_ID}.open`],
+      ["i", `${COMMAND_ID}.issue`],
+      ["s", `${COMMAND_ID}.slack`],
+      ["r", `${COMMAND_ID}.poll`],
+      ["comma", `${COMMAND_ID}.settings`],
+      ["escape", `${COMMAND_ID}.back`],
+      ["up", `${COMMAND_ID}.up`],
+      ["down", `${COMMAND_ID}.down`],
+    ],
+  )
+  for (const command of pageLayer.commands) {
+    assert.ok(
+      !command.bind.includes(","),
+      `${command.id} names its key rather than a comma, which a binding string reads as a separator`,
+    )
+  }
 })
 
-test("a rejected status call becomes a toast rather than a crash", async () => {
-  const { context, layers, toasts } = fakeTuiContext({ rejection: new Error("RPC is unavailable: slack-director") })
+test("the Slack Director command refreshes the item map and opens the page", async () => {
+  const { context, layers, navigations, rpcIds, calls, routes } = fakeTuiContext()
   await tui.setup(context)
   await layers[0].commands[0].run()
+  assert.deepEqual([...new Set(rpcIds)], ["slack-director"], "every call goes through the one contract")
+  assert.deepEqual(calls.slice(-2), ["items", "status"], "the command reads the item map and the status")
+  assert.deepEqual(navigations, [{ type: "plugin", name: PAGE_NAME }], "the command opens the page")
+  assert.equal(routes[0].name, PAGE_NAME)
+})
+
+test("the item map follows the contract's updated event", async () => {
+  const { context, eventHandlers, calls } = fakeTuiContext()
+  await tui.setup(context)
+  assert.deepEqual(eventHandlers.map(([name]) => name), ["updated"])
+  const before = calls.length
+  eventHandlers[0][1]()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(calls.length, before + 2, "the page reads the item map and the status again")
+})
+
+test("a rejected call becomes a toast rather than a crash", async () => {
+  const { context, toasts, layers } = fakeTuiContext({ rejection: new Error("RPC is unavailable: slack-director") })
+  await tui.setup(context)
+  await new Promise((resolve) => setImmediate(resolve))
   assert.equal(toasts.length, 1)
   assert.match(toasts[0].message, /RPC is unavailable/)
+  assert.equal(toasts[0].variant, "error")
+  await layers[0].commands[0].run()
+  assert.equal(toasts.length, 2, "opening the page reports the failure instead of throwing")
 })
 
-test("the toast line reports a poll that never ran", () => {
-  const line = formatStatus({ lastPoll: null, outcome: "never polled", workspaces: [], configError: null, today: {} })
-  assert.equal(line, "Slack Director: last poll never · never polled · Today: 0 flagged · 0 next steps posted · 0 skipped")
+test("the settings dialog shows a field's value, prompts for it and saves it through the contract", async () => {
+  const { context, layers, selections, prompts, toasts } = fakeTuiContext({
+    selectAnswer: "poll_seconds",
+    promptAnswer: "90",
+  })
+  await tui.setup(context)
+  await layers[0].commands[1].run()
+  assert.equal(selections.length, 1, "one select list")
+  assert.deepEqual(
+    selections[0].options.map((option) => option.title),
+    ["flag_emoji", "intake_repo", "session_directory", "poll_seconds", "work_hours", "triage_agent"],
+    "every config field is a row",
+  )
+  assert.equal(selections[0].options[3].description, "60", "the row shows the field's current value")
+  assert.equal(prompts.length, 1, "one prompt for the chosen field")
+  assert.equal(prompts[0].title, "Slack Director: poll_seconds")
+  assert.equal(prompts[0].value, "60")
+  assert.match(toasts.at(-1).message, /poll_seconds saved/)
+  assert.equal(toasts.at(-1).variant, "success")
 })
 
-test("the toast shows the last poll on the local clock, not on the UTC clock", () => {
-  const lastPoll = "2026-11-20T14:32:00.000Z"
-  const previous = process.env.TZ
-  const shown = (zone) => {
-    process.env.TZ = zone
-    return formatStatus({ ...STATUS, lastPoll })
+test("a rejected value shows the error and changes nothing", async () => {
+  const { context, layers, toasts } = fakeTuiContext({
+    selectAnswer: "intake_repo",
+    promptAnswer: "not a repo",
+    setRejection: new Error("config field invalid: intake_repo"),
+  })
+  await tui.setup(context)
+  await layers[0].commands[1].run()
+  assert.equal(toasts.at(-1).variant, "error")
+  assert.match(toasts.at(-1).message, /config field invalid: intake_repo/)
+})
+
+test("a settings dialog the user closes changes nothing", async () => {
+  const { context, layers, selections, prompts, toasts } = fakeTuiContext({ selectAnswer: undefined })
+  await tui.setup(context)
+  await layers[0].commands[1].run()
+  assert.equal(selections.length, 1)
+  assert.equal(prompts.length, 0, "no prompt without a chosen field")
+  assert.equal(toasts.length, 0)
+})
+
+test("the page draws the header, the counts line, the table, the rows, the today line and the help line", () => {
+  const renderer = stubRenderer()
+  const rows = pageRows([ITEM], () => ({ running: false, pending: 0 }))
+  const view = pageView({ renderer, rows, status: STATUS, selected: 0, now: NOW })
+  const lines = drawnLines(view)
+  const head = view.props.children[0]
+  assert.equal(head.type, "box")
+  assert.equal(head.props.justifyContent, "space-between", "the title and the poll line share one row")
+  assert.equal(head.props.children[0].props.content, "Slack Director")
+  assert.equal(head.props.children[1].props.content, headerText(STATUS))
+  assert.match(lines[1], /^1 flagged · 0 working · 1 waiting for you · 0 idle$/)
+  assert.equal(lines[3], tableHeaderText())
+  assert.equal(lines[4], rowText(rows[0].item, "waiting", { selected: true, now: NOW }))
+  assert.match(lines.at(-3), /^Today: flagged 2 · next steps posted 1 · 1 hit skipped$/)
+  assert.equal(lines.at(-1), KEY_HELP)
+})
+
+test("the sidebar line carries the counts", async () => {
+  const { context, slots } = fakeTuiContext()
+  await tui.setup(context)
+  const rows = pageRows([ITEM], () => ({ running: false, pending: 0 }))
+  assert.equal(sidebarText(rows), "Slack Director  1 waiting · 0 working")
+  assert.equal(countsText(rows), "1 flagged · 0 working · 1 waiting for you · 0 idle")
+  assert.equal(typeof slots[0].render, "function")
+})
+
+test("the page shows no Slack message text and no permalink", () => {
+  const renderer = stubRenderer()
+  const rows = pageRows([ITEM], () => ({ running: false, pending: 0 }))
+  const view = pageView({ renderer, rows, status: STATUS, selected: 0, now: NOW })
+  for (const line of drawnLines(view)) {
+    if (line === undefined) continue
+    assert.ok(!line.includes("slack.com"), `no permalink on the page: ${line}`)
+    assert.ok(!line.includes("archives"), `no Slack path on the page: ${line}`)
   }
-  try {
-    assert.match(shown("America/Los_Angeles"), /^Slack Director: last poll 06:32 · /, "eight hours behind UTC")
-    assert.match(shown("Asia/Tokyo"), /^Slack Director: last poll 23:32 · /, "nine hours ahead of UTC")
-    assert.match(shown("UTC"), /^Slack Director: last poll 14:32 · /, "UTC")
-  } finally {
-    if (previous === undefined) delete process.env.TZ
-    else process.env.TZ = previous
-  }
-})
-
-test("a last poll that is not a time reads as never", () => {
-  assert.equal(formatStatus({ lastPoll: "not a time", outcome: "ok", workspaces: [] }).startsWith("Slack Director: last poll never"), true)
 })

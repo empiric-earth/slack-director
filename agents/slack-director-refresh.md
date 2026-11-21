@@ -1,6 +1,8 @@
 ---
 description: Runs one Slack search on one workspace and stops, so the workspace's Slack sign-in is renewed.
 mode: primary
+# The plugin starts one of these for a single search; the user never picks it.
+hidden: true
 permissions:
   # A refresh session exists for one search call and nothing else. The
   # catch-all deny is the whole of "everything else". Last match wins.

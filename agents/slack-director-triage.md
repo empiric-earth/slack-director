@@ -1,6 +1,10 @@
 ---
 description: Works one flagged Slack message: finds or creates its intake issue, reads the thread, and posts the findings and proposed next steps. Read-only on Slack.
 mode: primary
+# Only the plugin starts sessions on this agent; the user picks `slack-director`
+# in an item session to act. Hiding it keeps it out of the agent picker and the
+# agent cycle without stopping a session the plugin starts on it.
+hidden: true
 permissions:
   # An item session reads, investigates and reports; it changes nothing in
   # Slack. The catch-all deny is the whole of "everything else", and the allows

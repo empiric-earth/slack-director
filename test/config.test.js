@@ -201,6 +201,36 @@ test("an invalid field keeps the poll running and names itself in the status", a
   }
 })
 
+test("an invalid field is named in the status even outside the work window", async () => {
+  const fx = fixture()
+  try {
+    const reader = createConfigReader({ env: fx.env })
+    writeFileSync(fx.path, JSON.stringify({ ...REQUIRED, poll_seconds: 60, work_hours: WINDOW }))
+    const { watcher, clock } = watcherOver(reader)
+    const good = await watcher.poll()
+    assert.equal(good.status.outcome, "ok")
+    assert.equal(good.status.configError, null)
+
+    // After hours no scan runs, but the file's own state still reaches the
+    // status: an unusable field is named there rather than hidden until the
+    // next working day.
+    clock.ms = Date.UTC(2026, 10, 18, 20, 0)
+    writeFileSync(fx.path, JSON.stringify({ ...REQUIRED, poll_seconds: "soon", work_hours: WINDOW }))
+    const bad = await watcher.poll()
+    assert.equal(bad.status.configError, "config field invalid: poll_seconds", "the bad field is named after hours")
+    assert.equal(bad.status.outcome, "config field invalid: poll_seconds")
+    assert.equal(bad.pollSeconds, 60, "the last good interval is still in use")
+
+    // Fixing the file clears the name, still with no scan.
+    writeFileSync(fx.path, JSON.stringify({ ...REQUIRED, poll_seconds: 60, work_hours: WINDOW }))
+    const fixed = await watcher.poll()
+    assert.equal(fixed.status.configError, null, "the fixed file clears the name")
+    assert.equal(fixed.status.outcome, "ok")
+  } finally {
+    fx.clean()
+  }
+})
+
 test("a config that cannot be read at all polls nothing and names it", async () => {
   const fx = fixture()
   try {

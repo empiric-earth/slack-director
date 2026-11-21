@@ -144,6 +144,7 @@ function harness({
   emoji = "oc",
   credentials,
   stall = [],
+  fetchHold,
   serverError,
   requestTimeoutMs,
   workHours = ALL_DAY,
@@ -197,6 +198,7 @@ function harness({
       name: body.params?.name,
       args: body.params?.arguments,
     })
+    if (fetchHold) await fetchHold
     if (stall.includes(token)) return new Promise(() => {})
     const override = statuses[token]
     if (override) return respond(override.status, override.text ?? "")
@@ -1028,33 +1030,18 @@ test("two polls on separate storage objects over one namespace that win differen
   }
 })
 
-test("two concurrent polls of one instance keep both item records and both seen entries", async () => {
-  const tsA = message(60)
-  const tsB = message(120)
-  const h = harness({
-    servers: [NEXAR],
-    pages: {
-      "tok-nexar": (index, search) =>
-        search % 2 === 0
-          ? page([hitRow("C0AAAAAAAA", tsA, "#a")], null)
-          : page([hitRow("C0BBBBBBBB", tsB, "#b")], null),
-    },
-  })
+test("two concurrent polls of one instance run one scan and keep the item record", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0AAAAAAAA", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0AAAAAAAA", ts, "#a")], null)] } })
   try {
-    const realGet = h.storage.get.bind(h.storage)
-    let itemsReads = 0
-    h.storage.get = async (key) => {
-      const value = await realGet(key)
-      if (key !== KEYS.items) return value
-      itemsReads += 1
-      if (itemsReads === 1) await yieldTimes(20)
-      return value
-    }
-    await Promise.all([h.watcher.poll(), h.watcher.poll()])
-    assert.equal(h.prompts.length, 2, "both hits got a prompted session")
-    const stored = Object.keys(h.items()).sort()
-    assert.equal(stored.length, 2, "both item records survive")
-    assert.deepEqual(h.seen().sort(), stored, "and both seen entries")
+    const [first, second] = await Promise.all([h.watcher.poll(), h.watcher.poll()])
+    assert.equal(h.toolCalls().length, 1, "the second poll joins the first's scan instead of searching again")
+    assert.equal(h.created.length, 1, "one hit gets one session")
+    assert.equal(h.prompts.length, 1)
+    assert.deepEqual(Object.keys(h.items()), [link], "the item record is kept")
+    assert.deepEqual(h.seen(), [link], "and the seen entry")
+    assert.equal(first.status.lastPoll, second.status.lastPoll, "both callers see the one scan's status")
   } finally {
     h.clean()
   }
@@ -1321,11 +1308,14 @@ test("a reply with the two fixed lines fills the item record and retitles the se
       "the record is what the contract serves",
     )
 
+    // The completion reaches the status at once, before any further scan.
+    const live = await h.watcher.status()
+    assert.equal(live.today.nextStepsPosted, 1, "today's count includes it with no further poll")
+    assert.equal(live.today.flagged, 1)
+
     h.clock.ms += h.config.poll_seconds * 1000
     await h.watcher.poll()
-    assert.equal(h.status().today.nextStepsPosted, 1, "today's count includes it")
-    assert.equal(h.status().today.flagged, 1)
-    assert.equal(h.status().today.skipped, 1)
+    assert.equal(h.status().today.skipped, 1, "the poll that met the seen hit counts one skip")
   } finally {
     h.clean()
   }
@@ -1345,6 +1335,69 @@ test("today's skipped count names each already-seen hit once, however many polls
     await h.watcher.poll()
     assert.equal(h.status().today.skipped, 1, "the same hit on a third poll does not raise the count")
     assert.deepEqual(Object.keys(h.items()), [link], "and the item map still holds the one item")
+  } finally {
+    h.clean()
+  }
+})
+
+test("the status reflects a completed first turn at once, with no poll", async () => {
+  const ts = message(60)
+  const issue = "https://github.com/empiric-earth/almeida-slack-intake/issues/41"
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    h.contexts.set(sessionID, [
+      { type: "assistant", content: [{ type: "text", text: `Findings.\n\nIntake issue: ${issue}\nTitle: Access to the staging dashboards` }] },
+    ])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+
+    // No scan runs between the completion and this read: the count is computed
+    // from the item map, not left at the last scan's snapshot.
+    const status = await h.watcher.status()
+    assert.equal(status.today.nextStepsPosted, 1, "the completion is counted at once")
+    assert.equal(status.today.flagged, 1)
+  } finally {
+    h.clean()
+  }
+})
+
+test("today's counts follow the calendar day, not the last scan", async () => {
+  const ts = message(60)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    assert.equal((await h.watcher.status()).today.flagged, 1, "the flag is today's")
+    // The next calendar day, with no scan: the previous day's flag is not
+    // today's, and the skipped set starts over.
+    h.clock.ms = Date.UTC(2026, 10, 19, 12, 0)
+    const next = await h.watcher.status()
+    assert.equal(next.today.flagged, 0, "yesterday's flag is not today's")
+    assert.equal(next.today.nextStepsPosted, 0)
+    assert.equal(next.today.skipped, 0, "the skipped set is the new day's")
+  } finally {
+    h.clean()
+  }
+})
+
+test("overlapping pollNow calls share one scan", async () => {
+  let release
+  const hold = new Promise((resolve) => {
+    release = resolve
+  })
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([], null)] }, fetchHold: hold })
+  try {
+    const pending = Array.from({ length: 10 }, () => h.watcher.pollNow())
+    await yieldTimes(100)
+    assert.equal(
+      h.calls.filter((call) => call.method === "initialize").length,
+      1,
+      "ten overlapping requests start one scan, not ten",
+    )
+    release()
+    await Promise.all(pending)
+    assert.equal(h.toolCalls().length, 1, "the one workspace is searched once")
+    assert.equal(h.created.length, 0)
   } finally {
     h.clean()
   }
@@ -1403,6 +1456,36 @@ test("a first turn that ends in error leaves the item waiting", async () => {
   }
 })
 
+test("a later turn does not complete the first turn", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const issue = "https://github.com/empiric-earth/almeida-slack-intake/issues/41"
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    const neutral = h.created[0].title
+    // The first turn ends in error: the item stays waiting.
+    await h.watcher.observe({ type: "session.execution.failed", data: { sessionID } })
+    assert.equal(h.items()[link].firstTurnFailed, true)
+
+    // A later turn in the same session ends well, with its own reply. It is not
+    // the first turn, so it neither clears the flag nor supplies the item's
+    // issue and title.
+    h.contexts.set(sessionID, [
+      { type: "assistant", content: [{ type: "text", text: `Later work.\n\nIntake issue: ${issue}\nTitle: Later turn` }] },
+    ])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.equal(h.items()[link].firstTurnFailed, true, "a later turn does not clear the pessimistic flag")
+    assert.equal(h.items()[link].firstTurnEndedAt, null, "and records no first-turn end")
+    assert.equal(h.items()[link].title, neutral, "the title stays the neutral label")
+    assert.equal(h.items()[link].issueUrl, null, "no later issue is recorded")
+    assert.deepEqual(h.retitles, [], "no session is retitled")
+  } finally {
+    h.clean()
+  }
+})
+
 test("a first turn no instance saw end stays waiting after a restart, and nothing is prompted or created", async () => {
   const ts = message(60)
   const link = permalinkOf("C0PLATFORM", ts)
@@ -1425,11 +1508,16 @@ test("a first turn no instance saw end stays waiting after a restart, and nothin
     assert.equal(h.created.length, 1, "no session is created")
     assert.equal(h.prompts.length, 1, "no session is prompted")
 
+    // The new instance never saw this session's first turn start, so a turn-end
+    // event it receives belongs to a later turn, not the first: the item stays
+    // waiting rather than let a later reply complete it.
     h.contexts.set(sessionID, [
       { type: "assistant", content: [{ type: "text", text: "Intake issue: none — unreadable\nTitle: Never paraphrased" }] },
     ])
     await restarted.observe({ type: "session.execution.succeeded", data: { sessionID } })
-    assert.equal(h.items()[link].firstTurnFailed, false, "the end it did see clears the flag")
+    assert.equal(h.items()[link].firstTurnFailed, true, "a new instance does not complete a first turn it did not start")
+    assert.equal(h.items()[link].firstTurnEndedAt, null)
+    assert.deepEqual(h.retitles, [], "no session is retitled")
   } finally {
     h.clean()
   }

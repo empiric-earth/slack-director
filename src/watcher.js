@@ -15,6 +15,14 @@
 // title from the reply's two fixed lines, and records a pending permission
 // request. OpenCode declares `session.idle` but never publishes it, so a turn's
 // end arrives as `session.execution.succeeded`, `.failed` or `.interrupted`.
+//
+// The completion binds to the first execution: only a turn of a session this
+// instance started may complete the item, and only the first one to end. A turn
+// that ended in error, a later turn, and a turn whose end no instance saw (a
+// restart) all leave the item in the pessimistic waiting state its record was
+// written with. The event carries no execution identity, so the binding is the
+// set of sessions this instance started, held for the instance's lifetime: a
+// new instance accepts no first turn it did not start.
 import { randomUUID } from "node:crypto"
 import { permalinkHash, STALE_MS } from "./claims.js"
 import { DEFAULT_POLL_SECONDS } from "./config.js"
@@ -119,6 +127,13 @@ export function createWatcher({
   inHours = inWorkHours,
 }) {
   const owner = randomUUID()
+  // The item sessions this instance started and whose first turn it is still
+  // waiting on. A turn-end event completes the item only for one of these, so a
+  // later turn, or a turn whose start this instance never saw, cannot.
+  const firstTurns = new Set()
+  // The one scan in flight, if any: a request that arrives while it runs joins
+  // it rather than starting a second.
+  let scanning = null
 
   const isExpired = (credential) =>
     credential?.expires !== 0 && credential?.expires !== undefined && credential.expires <= now()
@@ -284,10 +299,14 @@ export function createWatcher({
       await removeSession(created.id)
       return
     }
+    firstTurns.add(created.id)
     await recordItem(record)
     try {
       await session.prompt({ sessionID: created.id, text: itemFirstPrompt(hit, config.intake_repo) })
     } catch (error) {
+      // A failed prompt call leaves the item waiting: a turn the user runs later
+      // in that session is not this item's first turn.
+      firstTurns.delete(created.id)
       log(`first prompt failed for ${hit.permalink}: ${messageOf(error)}`)
     }
   }
@@ -386,38 +405,41 @@ export function createWatcher({
   const usable = (config) =>
     Boolean(config) && config.intake_repo !== "" && config.session_directory !== ""
 
-  /** One poll. Returns the config's poll interval and the status it wrote. */
-  async function poll({ force = false } = {}) {
-    const previous = await readStatus()
-    const { config, error } = readConfig()
-    if (error && !usable(config)) {
-      const status = {
-        lastPoll: previous.lastPoll ?? null,
-        outcome: error,
-        workspaces: [],
-        configError: error,
-        today: await today(),
-      }
-      await writeStatus(status)
-      return { pollSeconds: DEFAULT_POLL_SECONDS, status }
+  /**
+   * Outside the work window no scan runs, but the config's own state still
+   * reaches the status: an unusable field is named there, and fixing it clears
+   * the name, both with no Slack call. The status is written only when that
+   * state changed, so a quiet closed window keeps the last scan's status.
+   */
+  async function withoutScan(previous, configError) {
+    const cleared = configError === null && previous.configError != null
+    if (!configError && !cleared) return previous
+    const status = {
+      ...previous,
+      outcome: configError ?? (previous.outcome === previous.configError ? "ok" : previous.outcome),
+      configError,
+      today: await today(),
     }
-    const configError = error ?? null
-    // Outside the window nothing is polled at all: no credential is resolved
-    // and no Slack call is made.
-    if (!force && !inHours(config.work_hours, now())) {
-      return { pollSeconds: config.poll_seconds, status: previous }
-    }
-    const lease = await storage.get(KEYS.lease)
-    if (
-      !force &&
-      lease &&
-      lease.owner !== owner &&
-      typeof lease.expires === "number" &&
-      lease.expires > now()
-    ) {
-      // Another instance polls; the claim and commit files still hold.
-      return { pollSeconds: config.poll_seconds, status: previous }
-    }
+    await writeStatus(status)
+    return status
+  }
+
+  /**
+   * One scan, and at most one at a time. A request that arrives while a scan
+   * runs joins it instead of starting a second: the repeated refresh requests a
+   * slow Slack answer invites share the running scan rather than multiplying the
+   * HTTP traffic and the refresh sessions. A forced request is no exception —
+   * the scan already running is the current one.
+   */
+  function scan({ config, configError }) {
+    if (scanning) return scanning
+    scanning = runScan({ config, configError }).finally(() => {
+      scanning = null
+    })
+    return scanning
+  }
+
+  async function runScan({ config, configError }) {
     await storage.set(KEYS.lease, { owner, expires: now() + leaseMs })
 
     await reconcile()
@@ -458,15 +480,57 @@ export function createWatcher({
     return { pollSeconds: config.poll_seconds, status }
   }
 
+  /** One poll. Returns the config's poll interval and the status it wrote. */
+  async function poll({ force = false } = {}) {
+    const previous = await readStatus()
+    const { config, error } = readConfig()
+    if (error && !usable(config)) {
+      const status = {
+        lastPoll: previous.lastPoll ?? null,
+        outcome: error,
+        workspaces: [],
+        configError: error,
+        today: await today(),
+      }
+      await writeStatus(status)
+      return { pollSeconds: DEFAULT_POLL_SECONDS, status }
+    }
+    const configError = error ?? null
+    // Outside the window nothing is polled at all: no credential is resolved
+    // and no Slack call is made. The config is still validated, so an unusable
+    // field reaches the status even when no scan may run.
+    if (!force && !inHours(config.work_hours, now())) {
+      return { pollSeconds: config.poll_seconds, status: await withoutScan(previous, configError) }
+    }
+    const lease = await storage.get(KEYS.lease)
+    if (
+      !force &&
+      lease &&
+      lease.owner !== owner &&
+      typeof lease.expires === "number" &&
+      lease.expires > now()
+    ) {
+      // Another instance polls; the claim and commit files still hold.
+      return { pollSeconds: config.poll_seconds, status: previous }
+    }
+    return scan({ config, configError })
+  }
+
   /** A poll the user asked for: it clears every suspension and ignores the lease and the window. */
   async function pollNow() {
     await storage.set(KEYS.suspended, {})
     return poll({ force: true })
   }
 
-  /** The status the RPC contract serves. */
+  /**
+   * The status the RPC contract serves. Today's counts are computed from the
+   * item map now rather than left at the last scan's snapshot, so a first turn
+   * that ends between scans is counted at once and the counts follow the
+   * calendar day rather than a weekend's last scan.
+   */
   async function status() {
-    return readStatus()
+    const stored = await readStatus()
+    return { ...stored, today: await today() }
   }
 
   /** Every item record, as the RPC contract serves them. */
@@ -513,11 +577,16 @@ export function createWatcher({
   }
 
   /**
-   * The first turn of one item session ended. Only a turn seen to end without
-   * error clears the pessimistic flag the record was written with; a turn that
-   * ended in error, or one whose end no instance saw, leaves the item waiting.
+   * The first turn of one item session ended. Only the first turn of a session
+   * this instance started may complete the item, and only when it ends without
+   * error: a turn that ended in error, a later turn, and a turn whose start no
+   * instance saw (a restart) all leave the item waiting, the pessimistic state
+   * its record was written with. Once the first turn closes, whatever its
+   * outcome, no later turn changes the record.
    */
   async function firstTurnEnded(sessionID, failed) {
+    if (!firstTurns.has(sessionID)) return
+    firstTurns.delete(sessionID)
     const record = await itemOf(sessionID)
     if (!record || record.firstTurnFailed !== true) return
     if (failed) return

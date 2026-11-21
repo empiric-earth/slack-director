@@ -257,12 +257,18 @@ test("the page's keymap answers the layout's keys", async () => {
       ["i", `${COMMAND_ID}.issue`],
       ["s", `${COMMAND_ID}.slack`],
       ["r", `${COMMAND_ID}.poll`],
-      [",", `${COMMAND_ID}.settings`],
+      ["comma", `${COMMAND_ID}.settings`],
       ["escape", `${COMMAND_ID}.back`],
       ["up", `${COMMAND_ID}.up`],
       ["down", `${COMMAND_ID}.down`],
     ],
   )
+  for (const command of pageLayer.commands) {
+    assert.ok(
+      !command.bind.includes(","),
+      `${command.id} names its key rather than a comma, which a binding string reads as a separator`,
+    )
+  }
 })
 
 test("the Slack Director command refreshes the item map and opens the page", async () => {

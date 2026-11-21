@@ -245,9 +245,12 @@ export default {
               run: () => pollNow(),
             },
             {
+              // The keymap reads a comma inside a binding string as the
+              // separator between alternative bindings, so the comma key is
+              // named `comma`, which is the name its own key events carry.
               id: `${COMMAND_ID}.settings`,
               title: "Settings",
-              bind: ",",
+              bind: "comma",
               run: () => openSettings(),
             },
             {

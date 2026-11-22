@@ -142,6 +142,18 @@ test("rows of an array are established hits", () => {
   assert.deepEqual(page.candidates, [])
 })
 
+test("the asker is the display name, without the id or the address Slack writes beside it", () => {
+  const named = (from) =>
+    pageOf(answer({ results: report([block(GRID, "#platform-help (D03KHBF103X)", "1795008741.837299").replace("From: Someone (U0000000000)", `From: ${from}`)]) }))
+      .established[0].asker
+  assert.equal(named("Someone (U0000000000)"), "Someone", "an id in parentheses is not part of the name")
+  assert.equal(named("Maria Costa <U0000000000>"), "Maria Costa", "nor is an id in angle brackets")
+  assert.equal(named("André Almeida <aalmeida@empiricearth.com>"), "André Almeida", "nor is an address beside it")
+  assert.equal(named("Maria Costa"), "Maria Costa", "a name on its own is unchanged")
+  const rows = pageOf(answer({ messages: [{ permalink: GRID, user_name: "André Almeida <aalmeida@empiricearth.com>" }] }))
+  assert.equal(rows.established[0].asker, "André Almeida", "the row form carries the same name")
+})
+
 test("the next page's cursor is read from a field or from the pagination line", () => {
   assert.equal(cursorOf(answer({ next_cursor: "dGVhbTpDMDYxRkE1UEI=" })), "dGVhbTpDMDYxRkE1UEI=")
   assert.equal(cursorOf(answer({ cursor: "abc" })), "abc")

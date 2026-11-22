@@ -128,15 +128,33 @@ export function issueLabel(item) {
 }
 
 /**
- * The ITEM cell: the session's own title. A title the session still carries the
- * neutral label in repeats the asker, so a leading `<asker> — ` comes off and
- * ASKER is not shown twice.
+ * The name part of an asker. Slack reports the display name with an id or an
+ * address beside it — `Maria Costa (U123)`, `André Almeida <a@example.com>` —
+ * and the session writes the issue title from the name alone, so the two agree
+ * only on this part.
+ */
+export function askerName(asker) {
+  const text = typeof asker === "string" ? asker.trim() : ""
+  return text.replace(/\s*[<(][^>)]*[>)]\s*$/, "").trim()
+}
+
+/**
+ * The ITEM cell: the session's own title. The issue title is
+ * `<asker> — <paraphrase>`, so a leading `<asker> — ` comes off and ASKER is
+ * not shown twice. The asker the search reported may carry an id or an address
+ * the session left out of the title, so the name part comes off too.
  */
 export function itemTitle(item) {
   const title = typeof item?.title === "string" ? item.title : ""
-  const asker = typeof item?.asker === "string" ? item.asker : ""
-  const prefix = asker === "" ? "" : `${asker} — `
-  return prefix !== "" && title.startsWith(prefix) ? title.slice(prefix.length) : title
+  const asker = typeof item?.asker === "string" ? item.asker.trim() : ""
+  if (asker === "" || title === "") return title
+  const name = askerName(asker)
+  const forms = name !== "" && name !== asker ? [asker, name] : [asker]
+  for (const form of forms) {
+    const prefix = `${form} — `
+    if (title.startsWith(prefix)) return title.slice(prefix.length)
+  }
+  return title
 }
 
 /** The table's header line. */

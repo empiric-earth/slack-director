@@ -14,6 +14,7 @@ import {
   KEY_HELP,
   PAGE_TITLE,
   ageText,
+  askerName,
   colourRole,
   countsText,
   fieldValue,
@@ -209,6 +210,20 @@ test("the ITEM cell drops a leading asker, so ASKER is not shown twice", () => {
     "Someone — a paraphrase",
     "with no asker nothing is dropped",
   )
+})
+
+test("the ITEM cell drops the asker's name when the search reported an id or an address beside it", () => {
+  const withId = item({ asker: "Maria Costa (U0000000000)", title: "Maria Costa — Access to the staging dashboards" })
+  assert.equal(itemTitle(withId), "Access to the staging dashboards", "the id beside the name is not part of the title")
+  const withAddress = item({
+    asker: "André Almeida <aalmeida@empiricearth.com>",
+    title: "André Almeida — note-to-self to verify the dialog",
+  })
+  assert.equal(itemTitle(withAddress), "note-to-self to verify the dialog", "nor is an address beside it")
+  assert.equal(askerName("Maria Costa (U0000000000)"), "Maria Costa")
+  assert.equal(askerName("André Almeida <aalmeida@empiricearth.com>"), "André Almeida")
+  assert.equal(askerName("Maria Costa"), "Maria Costa", "a name on its own is unchanged")
+  assert.equal(askerName(""), "")
 })
 
 test("the selection move wraps at both ends, and the marker picks the row the keys act on", () => {

@@ -86,6 +86,7 @@ function fakeTuiContext({
   promptAnswer,
 } = {}) {
   const layers = []
+  const dropped = []
   const toasts = []
   const slots = []
   const navigations = []
@@ -102,8 +103,9 @@ function fakeTuiContext({
     theme: THEME,
     keymap: {
       layer: (factory) => {
-        layers.push(factory())
-        return () => {}
+        const entry = factory()
+        layers.push(entry)
+        return () => dropped.push(entry)
       },
     },
     ui: {
@@ -182,6 +184,7 @@ function fakeTuiContext({
   return {
     context,
     layers,
+    dropped,
     toasts,
     slots,
     navigations,
@@ -465,6 +468,34 @@ test("e on the dialog opens the settings dialog", async () => {
   assert.equal(prompts[0].value, "60")
   assert.match(toasts.at(-1).message, /poll_seconds saved/)
   assert.equal(toasts.at(-1).variant, "success")
+})
+
+test("e on the dialog drops the overview's own keys, so the settings dialog's keys reach it", async () => {
+  const { context, layers, dropped, selections } = fakeTuiContext({ selectAnswer: "poll_seconds", promptAnswer: "90" })
+  await tui.setup(context)
+  await layers[0].commands[0].run()
+  assert.equal(dropped.length, 0, "the overview's keys hold while its dialog is open")
+  modalLayer(layers).commands.find((command) => command.bind === "e").run()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(dropped.length, 1, "the overview's modal keys are dropped as the settings dialog opens")
+  assert.equal(selections.length, 1, "so the settings dialog is the one that answers the keys")
+
+  const closed = fakeTuiContext()
+  await tui.setup(closed.context)
+  await closed.layers[0].commands[0].run()
+  closed.dialogs.at(-1).onClose()
+  assert.equal(closed.dropped.length, 1, "the host's own close drops the overview's keys too")
+})
+
+test("a rejection that is not an Error still shows its message", async () => {
+  const { context, toasts } = fakeTuiContext({
+    rejection: { type: "error", message: "RPC is unavailable: slack-director" },
+  })
+  await tui.setup(context)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(toasts.length, 1)
+  assert.match(toasts[0].message, /RPC is unavailable/)
+  assert.equal(toasts[0].message.includes("[object Object]"), false, "an error object is not shown as its own string")
 })
 
 test("the item map follows the contract's updated event", async () => {

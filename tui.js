@@ -43,7 +43,17 @@ export const COMMAND_ID = "slack-director.page"
 /** The settings dialog's palette entry. */
 export const SETTINGS_COMMAND_ID = "slack-director.settings"
 
-const messageOf = (error) => (error instanceof Error ? error.message : String(error))
+/** A message for a toast or a log: an error's own text, whatever its shape. */
+const messageOf = (error) => {
+  if (error instanceof Error) return error.message
+  if (typeof error === "string") return error
+  if (error && typeof error.message === "string") return error.message
+  try {
+    return JSON.stringify(error)
+  } catch {
+    return String(error)
+  }
+}
 
 /**
  * The TUI host's own renderer, or undefined outside a TUI. The host serves
@@ -171,6 +181,19 @@ async function setup(context, spawnProcess) {
     const rows = () => pageRows(items(), live)
     const current = () => selectedItem(rows(), selected())
 
+    /** The overview's own key layer, while its dialog is open. */
+    let dropOverviewLayer = null
+
+    /**
+     * Drop the overview's key layer. The host pushes its `modal` mode for any
+     * dialog, so a layer left behind would answer the keys of the dialog that
+     * replaced it, and that dialog's own keys would never reach it.
+     */
+    function dropLayer() {
+      if (typeof dropOverviewLayer === "function") dropOverviewLayer()
+      dropOverviewLayer = null
+    }
+
     async function refresh() {
       try {
         const client = rpc()
@@ -263,7 +286,7 @@ async function setup(context, spawnProcess) {
 
     /** Open the overview as a floating dialog over the current screen. */
     function openOverview() {
-      const dropLayer = context.keymap.layer(() => ({
+      dropOverviewLayer = context.keymap.layer(() => ({
         mode: "modal",
         priority: 20,
         commands: [
@@ -308,19 +331,17 @@ async function setup(context, spawnProcess) {
           { id: `${COMMAND_ID}.down`, title: "Move down", bind: "down", run: () => move(1) },
         ],
       }))
-      const onClose = () => {
-        if (typeof dropLayer === "function") dropLayer()
-      }
       context.ui.dialog.show(
         () => dialogView({ renderer, rows, status, selected, now: Date.now, theme: theme() }),
-        onClose,
+        dropLayer,
       )
       context.ui.dialog.set({ size: DIALOG_SIZE, centered: true })
     }
 
-    /** Close the dialog the user is in. */
+    /** Close the dialog the user is in, and its own keys with it. */
     function closeDialog() {
       context.ui.dialog.clear()
+      dropLayer()
     }
 
     const unregisterSidebar = context.ui.slot({

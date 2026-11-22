@@ -1196,6 +1196,7 @@ const rowsPages = (rows) => (index, search, args) => {
       ...slice.flatMap((row, position) => [
         `### Result ${position + 1} of ${slice.length}`,
         `Channel: ${row.channelName} (${row.channel})`,
+        ...(row.asker === undefined ? [] : [`From: ${row.asker} (U0000000000)`]),
         `Message_ts: ${row.ts}`,
         `Permalink: [link](${row.permalink})`,
         `Text: ${row.text ?? "A message the user flagged."}`,
@@ -1690,7 +1691,7 @@ test("a poll reissues one still-flagged record an earlier build left with no iss
     pages: {
       "tok-nexar": rowsPages([
         hitRow("C0PLATFORM", tsC, "#platform-help"),
-        hitRow("C0PLATFORM", tsA, "#platform-help"),
+        hitRow("C0PLATFORM", tsA, "#platform-help", undefined, "Maria Costa"),
         hitRow("C0PLATFORM", tsD, "#platform-help"),
       ]),
     },
@@ -1698,7 +1699,8 @@ test("a poll reissues one still-flagged record an earlier build left with no iss
   try {
     const flaggedAt = new Date(h.now()).toISOString()
     const records = {
-      [linkA]: earlierRecord({ link: linkA, ts: tsA, sessionID: "ses_old_a", flaggedAt }),
+      // An earlier build's record carries no asker; the search result has it.
+      [linkA]: { ...earlierRecord({ link: linkA, ts: tsA, sessionID: "ses_old_a", flaggedAt }), asker: "" },
       [linkB]: earlierRecord({ link: linkB, ts: tsB, sessionID: "ses_old_b", flaggedAt }),
       [linkC]: earlierRecord({ link: linkC, ts: tsC, sessionID: "ses_old_c", flaggedAt, issueUrl: issue, issueNumber: 41 }),
       [linkD]: {
@@ -1739,6 +1741,7 @@ test("a poll reissues one still-flagged record an earlier build left with no iss
     assert.equal(stored.sessionID, created.id, "and takes the new session id")
     assert.equal(stored.firstTurnFailed, true, "and reads as waiting")
     assert.equal(stored.recordFormat, RECORD_FORMAT, "and takes this build's record form")
+    assert.equal(stored.asker, "Maria Costa", "and takes the asker the search reported, which the earlier record left out")
     assert.equal(stored.flaggedAt, records[linkA].flaggedAt, "every other field is kept")
     assert.equal(stored.title, records[linkA].title)
 

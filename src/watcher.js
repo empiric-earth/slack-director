@@ -378,6 +378,8 @@ export function createWatcher({
       ...record,
       sessionID: created.id,
       title,
+      // An earlier build's record carries no asker; the search result has it.
+      asker: record.asker || hit.asker || "",
       firstTurnEndedAt: null,
       firstTurnFailed: true,
       permissionPending: false,

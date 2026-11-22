@@ -517,30 +517,37 @@ test("every RPC handler answers what the contract's own schema for it describes"
     )
     const { ctx, rpcRegistrations } = fakeContext()
     const dispose = await plugin.setup(ctx)
-    const { definition, handlers } = rpcRegistrations[0]
-    const context = { error: (name, message, data) => ({ error: { name, message, data } }) }
-    const inputs = {
-      status: {},
-      items: {},
-      getConfig: {},
-      setConfig: { field: "poll_seconds", value: 90 },
-      pollNow: {},
-      markOpened: { sessionID: "ses_fixture" },
-    }
-    for (const [name, method] of Object.entries(definition.methods)) {
-      const output = await handlers[name](inputs[name], context)
-      assert.equal(schemaProblem(method.output, output), undefined, `${name} answers its output schema`)
-    }
-    assert.equal(JSON.parse(readFileSync(configFile, "utf8")).poll_seconds, 90, "setConfig wrote the field")
+    // The plugin schedules its next poll, so a failed assertion below must still
+    // unload it, or the suite waits on the timer for ever.
+    try {
+      const { definition, handlers } = rpcRegistrations[0]
+      const context = { error: (name, message, data) => ({ error: { name, message, data } }) }
+      const inputs = {
+        status: {},
+        items: {},
+        getConfig: {},
+        setConfig: { field: "poll_seconds", value: 90 },
+        pollNow: {},
+        markOpened: { sessionID: "ses_fixture" },
+      }
+      for (const [name, method] of Object.entries(definition.methods)) {
+        const answer = handlers[name](inputs[name], context)
+        assert.equal(typeof answer?.then, "function", `${name} answers a promise, which the RPC layer awaits`)
+        const output = await answer
+        assert.equal(schemaProblem(method.output, output), undefined, `${name} answers its output schema`)
+      }
+      assert.equal(JSON.parse(readFileSync(configFile, "utf8")).poll_seconds, 90, "setConfig wrote the field")
 
-    const refused = await handlers.setConfig({ field: "poll_seconds", value: "soon" }, context)
-    assert.equal(refused.error.name, "invalid", "a wrong type is the contract's declared error")
-    assert.equal(schemaProblem(definition.methods.setConfig.errors.invalid, refused.error.data), undefined)
-    assert.equal(refused.error.data.field, "poll_seconds", "the error names the field")
-    assert.equal(JSON.parse(readFileSync(configFile, "utf8")).poll_seconds, 90, "the refused write left the file alone")
-    const unknown = await handlers.setConfig({ field: "not_a_field", value: 1 }, context)
-    assert.equal(unknown.error.name, "invalid")
-    assert.equal(unknown.error.data.field, null, "a field that does not exist has no name to carry")
-    await dispose()
+      const refused = await handlers.setConfig({ field: "poll_seconds", value: "soon" }, context)
+      assert.equal(refused.error.name, "invalid", "a wrong type is the contract's declared error")
+      assert.equal(schemaProblem(definition.methods.setConfig.errors.invalid, refused.error.data), undefined)
+      assert.equal(refused.error.data.field, "poll_seconds", "the error names the field")
+      assert.equal(JSON.parse(readFileSync(configFile, "utf8")).poll_seconds, 90, "the refused write left the file alone")
+      const unknown = await handlers.setConfig({ field: "not_a_field", value: 1 }, context)
+      assert.equal(unknown.error.name, "invalid")
+      assert.equal(unknown.error.data.field, null, "a field that does not exist has no name to carry")
+    } finally {
+      await dispose()
+    }
   })
 })

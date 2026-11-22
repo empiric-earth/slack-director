@@ -341,6 +341,25 @@ test("the first prompt and the skill carry no issue-less path", () => {
   assert.match(prompt, /create one that holds the permalink fields and the category only/i, "the out-of-scope form")
 })
 
+test("the first prompt and the skill decide the category without reading, and read nothing for a message left out", () => {
+  const hit = {
+    permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
+    workspace: "slack_nexar",
+    channel: { id: "C0PLATFORM", label: "#platform-help" },
+    ts: "1795194443.137219",
+  }
+  const prompt = itemFirstPrompt(hit, "empiric-earth/almeida-slack-intake")
+  for (const [name, text] of [
+    ["the first prompt", prompt],
+    ["the skill", read(SKILL_REL)],
+  ]) {
+    const flat = text.replace(/\s+/g, " ")
+    assert.match(flat, /decide the category without reading anything/i, `${name} decides the category without a read`)
+    assert.match(flat, /read no thread and no channel/i, `${name} reads nothing for a message it leaves out`)
+    assert.match(flat, /not to look for a message Slack does not hold/i, `${name} covers a message Slack does not hold`)
+  }
+})
+
 test("the skill, the README and the agent files carry none of the retired tokens", () => {
   const files = [SKILL_REL, "README.md", AGENT_REL, REFRESH_AGENT_REL]
   const banned = [

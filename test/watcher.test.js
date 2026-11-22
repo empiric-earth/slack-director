@@ -10,10 +10,10 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createClaims, permalinkHash, STALE_MS } from "../src/claims.js"
-import { DEFAULT_TRIAGE_AGENT, fieldProblem } from "../src/config.js"
+import { DEFAULT_SESSION_AGENT, fieldProblem } from "../src/config.js"
 import { SEARCH_TOOL, SLACK_MCP_URL } from "../src/slack-mcp.js"
-import { claimsDir, KEYS, NAMESPACE } from "../src/state.js"
-import { createWatcher, LEASE_MS, REFRESH_AGENT, SESSION_EVENT_TYPES, SUSPENDED_ERROR } from "../src/watcher.js"
+import { claimsDir, KEYS, NAMESPACE, reissueDir } from "../src/state.js"
+import { createWatcher, LEASE_MS, RECORD_FORMAT, REFRESH_AGENT, SESSION_EVENT_TYPES, SUSPENDED_ERROR } from "../src/watcher.js"
 import { SlackDirectorRpc } from "../rpc.js"
 import { schemaProblem } from "./schema.js"
 
@@ -106,6 +106,51 @@ async function yieldTimes(times) {
 }
 
 /**
+ * One item record in the form an earlier build wrote: no `recordFormat`, and no
+ * issue URL unless the test gives one.
+ */
+function earlierRecord({
+  link,
+  ts,
+  sessionID,
+  flaggedAt,
+  issueUrl = null,
+  issueNumber = null,
+  title = "Flagged message in #platform-help — Maria Costa",
+  permissionPending = false,
+}) {
+  return {
+    permalink: link,
+    workspace: "slack_nexar",
+    channel: "#platform-help",
+    channelID: "C0PLATFORM",
+    ts,
+    asker: "Maria Costa",
+    flaggedAt,
+    title,
+    sessionID,
+    issueNumber,
+    issueUrl,
+    firstTurnEndedAt: null,
+    firstTurnFailed: true,
+    permissionPending,
+    openedAt: null,
+  }
+}
+
+/** The run times of a session that has been idle and unchanged past the stale age. */
+const quietTimes = (now) => ({ busy: now - 3_600_000, idle: now - 3_500_000, updated: now - 20 * 60_000 })
+
+/** Age one reissue claim and commit pair past the stale age. */
+function ageReissue(h, hash) {
+  const old = new Date(h.now() - STALE_MS - 60_000)
+  for (const name of [`${hash}.claim.0`, `${hash}.session`]) {
+    const file = join(h.reissueDir, name)
+    if (existsSync(file)) utimesSync(file, old, old)
+  }
+}
+
+/**
  * The claims files' timestamps follow the harness clock rather than the
  * machine's, so a test that moves the clock makes a claim or a commit file
  * exactly as stale as it says.
@@ -152,6 +197,7 @@ function harness({
   const root = mkdtempSync(join(tmpdir(), "slack-director-watcher-"))
   const stateHome = join(root, "state")
   const dir = claimsDir({ XDG_STATE_HOME: stateHome })
+  const reissueDirPath = reissueDir({ XDG_STATE_HOME: stateHome })
   const storage = memoryStorage()
   const clock = { ms: NOW }
   const now = () => clock.ms
@@ -175,6 +221,9 @@ function harness({
   const waited = []
   const retitles = []
   const contexts = new Map()
+  // The run times `session.get` answers for one session id, and the error it
+  // throws instead when a test seeds one.
+  const sessions = new Map()
   const changes = []
   const configWrites = []
   const tokens = credentials ?? { slack_nexar: { access: "tok-nexar", expires: 0 }, slack_nauto: { access: "tok-nauto", expires: 0 } }
@@ -184,7 +233,7 @@ function harness({
     session_directory: join(root, "session-directory"),
     poll_seconds: 60,
     work_hours: structuredClone(workHours),
-    triage_agent: DEFAULT_TRIAGE_AGENT,
+    session_agent: DEFAULT_SESSION_AGENT,
   }
 
   const fetch = async (url, init) => {
@@ -247,6 +296,12 @@ function harness({
     async wait({ sessionID }) {
       waited.push(sessionID)
     },
+    async get({ sessionID }) {
+      const seeded = sessions.get(sessionID)
+      if (seeded?.error) throw seeded.error
+      if (seeded) return { id: sessionID, time: structuredClone(seeded.time) }
+      throw new Error(`session not found: ${sessionID}`)
+    },
     async context({ sessionID }) {
       return structuredClone(contexts.get(sessionID) ?? [])
     },
@@ -256,6 +311,7 @@ function harness({
   }
 
   const claims = createClaims({ dir, now, fs: pinnedFs(now) })
+  const reissue = createClaims({ dir: reissueDirPath, now, fs: pinnedFs(now) })
 
   /**
    * A storage object of its own over the same plugin namespace, as every host
@@ -271,6 +327,7 @@ function harness({
     createWatcher({
       storage: own,
       claims,
+      reissue,
       now,
       fetch,
       readConfig: () => ({ config }),
@@ -295,6 +352,7 @@ function harness({
   return {
     root,
     dir,
+    reissueDir: reissueDirPath,
     storage,
     clock,
     now,
@@ -307,12 +365,14 @@ function harness({
     waited,
     retitles,
     contexts,
+    sessions,
     changes,
     configWrites,
     tokens,
     config,
     session,
     claims,
+    reissue,
     newWatcher,
     facade,
     watcher: newWatcher(),
@@ -320,6 +380,8 @@ function harness({
     seen: () => storage.map.get(KEYS.seen) ?? [],
     status: () => storage.map.get(KEYS.status) ?? {},
     toolCalls: () => calls.filter((call) => call.method === "tools/call"),
+    setItems: (value) => storage.map.set(KEYS.items, value),
+    setSeen: (value) => storage.map.set(KEYS.seen, value),
     clean: () => {
       console.warn = realWarn
       console.log = realLog
@@ -425,7 +487,7 @@ test("a new hit gets exactly one session on the triage agent, and the same hit o
     await h.watcher.poll()
     assert.equal(h.created.length, 1, "exactly one session")
     const [session] = h.created
-    assert.equal(session.agent, DEFAULT_TRIAGE_AGENT, "the configured triage agent")
+    assert.equal(session.agent, DEFAULT_SESSION_AGENT, "the configured session agent")
     assert.deepEqual(session.location, { directory: h.config.session_directory }, "the configured directory")
     assert.equal(h.prompts.length, 1, "exactly one first prompt")
     const prompt = h.prompts[0].text
@@ -457,7 +519,7 @@ test("a new hit's session gets the full first prompt of an item session", async 
     assert.ok(prompt.includes("no issue edit, label, close or reopen"), "the prompt forbids an issue edit")
     assert.ok(prompt.includes("Intake issue: "), "the reply's first fixed line")
     assert.ok(prompt.includes("Title: "), "the reply's second fixed line")
-    assert.ok(prompt.includes("Intake issue: none — <the reason"), "the reply's line for a message left out")
+    assert.ok(prompt.includes("A message you leave out still gets its issue"), "the reply's line for a message left out")
     assert.match(prompt, /take no other action/i, "the first turn is bounded")
   } finally {
     h.clean()
@@ -496,7 +558,7 @@ test("a permalink the earlier build already saw gets one item session with the f
 
     await h.watcher.poll()
     assert.equal(h.created.length, 1, "the skeleton-seen permalink gets one item session")
-    assert.equal(h.created[0].agent, DEFAULT_TRIAGE_AGENT, "on the triage agent")
+    assert.equal(h.created[0].agent, DEFAULT_SESSION_AGENT, "on the configured session agent")
     const prompt = h.prompts[0].text
     assert.ok(prompt.includes(link), "the full first prompt carries the permalink")
     assert.ok(prompt.includes("`slack-director` skill"), "and the skill it loads")
@@ -729,6 +791,7 @@ test("a commit whose holder stopped before recording stays invisible, then recon
       ts,
       firstTurnFailed: true,
       firstTurnEndedAt: null,
+      recordFormat: RECORD_FORMAT,
     }
     h.claims.claim(hash)
     await h.claims.commit(hash, record)
@@ -810,6 +873,7 @@ test("a holder that stopped after recording, before the prompt, keeps its record
       sessionID: "ses_holder",
       firstTurnFailed: true,
       firstTurnEndedAt: null,
+      recordFormat: RECORD_FORMAT,
     }
     h.claims.claim(hash)
     await h.claims.commit(hash, { sessionID: "ses_holder", committedAt: new Date(h.now()).toISOString(), ...record })
@@ -918,7 +982,7 @@ test("an expired credential runs one refresh session, removes it, and retries th
     assert.equal(refreshes.length, 1, "one refresh session on the refresh agent")
     assert.ok(h.removed.includes(refreshes[0].id), "the refresh session is removed after it ends")
     assert.equal(h.toolCalls().filter((call) => call.token === "tok-fresh").length, 1, "the search is retried once")
-    assert.equal(h.created.filter((session) => session.agent === DEFAULT_TRIAGE_AGENT).length, 1, "the hit got a session")
+    assert.equal(h.created.filter((session) => session.agent === DEFAULT_SESSION_AGENT).length, 1, "the hit got a session")
     assert.equal(h.status().outcome, "ok")
   } finally {
     h.clean()
@@ -935,7 +999,7 @@ test("a refused credential suspends the workspace until the credential changes o
   try {
     await h.watcher.poll()
     assert.equal(h.created.filter((session) => session.agent === REFRESH_AGENT).length, 1, "one refresh session")
-    assert.equal(h.created.filter((session) => session.agent === DEFAULT_TRIAGE_AGENT).length, 0, "no item session")
+    assert.equal(h.created.filter((session) => session.agent === DEFAULT_SESSION_AGENT).length, 0, "no item session")
     assert.deepEqual(
       h.status().workspaces,
       [{ name: "slack_nexar", ok: false, error: SUSPENDED_ERROR }],
@@ -1403,13 +1467,15 @@ test("overlapping pollNow calls share one scan", async () => {
   }
 })
 
-test("a reply that leaves the message out records no issue, keeps the title and posts no next steps", async () => {
+test("an errorless reply that names no issue leaves the item waiting", async () => {
   const ts = message(60)
   const link = permalinkOf("C0PLATFORM", ts)
   const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
   try {
     await h.watcher.poll()
     const sessionID = h.created[0].id
+    const before = structuredClone(h.items()[link])
+    assert.equal(before.firstTurnFailed, true, "the record is written pessimistic")
     h.contexts.set(sessionID, [
       {
         type: "assistant",
@@ -1418,16 +1484,15 @@ test("a reply that leaves the message out records no issue, keeps the title and 
     ])
     await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
 
-    const stored = h.items()[link]
-    assert.equal(stored.issueUrl, null, "no issue URL is recorded")
-    assert.equal(stored.issueNumber, null, "and no issue number")
-    assert.equal(stored.title, "A customer's export question", "the title still comes from the reply")
-    assert.equal(stored.firstTurnFailed, false)
-    assert.deepEqual(h.retitles, [{ sessionID, title: "A customer's export question" }])
+    assert.deepEqual(h.items()[link], before, "an errorless end whose reply names no issue leaves the record alone")
+    assert.equal(h.items()[link].firstTurnFailed, true, "the item still reads as waiting")
+    assert.equal(h.items()[link].firstTurnEndedAt, null)
+    assert.equal(h.items()[link].issueUrl, null)
+    assert.deepEqual(h.retitles, [], "no session is retitled")
 
     h.clock.ms += h.config.poll_seconds * 1000
     await h.watcher.poll()
-    assert.equal(h.status().today.nextStepsPosted, 0, "a message left out is not a next-steps post")
+    assert.equal(h.status().today.nextStepsPosted, 0, "a reply that names no issue is not a next-steps post")
     assert.equal(h.status().today.flagged, 1)
   } finally {
     h.clean()
@@ -1607,5 +1672,364 @@ test("the watcher acts on the turn-end and permission events, and on no other", 
     assert.equal(JSON.stringify(h.items()), before, "no other event type changes an item")
   } finally {
     h.clean()
+  }
+})
+
+test("a poll reissues one still-flagged record an earlier build left with no issue, once", async () => {
+  const tsA = message(60)
+  const tsB = message(120)
+  const tsC = message(180)
+  const tsD = message(240)
+  const linkA = permalinkOf("C0PLATFORM", tsA)
+  const linkB = permalinkOf("C0PLATFORM", tsB)
+  const linkC = permalinkOf("C0PLATFORM", tsC)
+  const linkD = permalinkOf("C0PLATFORM", tsD)
+  const issue = "https://github.com/empiric-earth/almeida-slack-intake/issues/41"
+  const h = harness({
+    servers: [NEXAR],
+    pages: {
+      "tok-nexar": rowsPages([
+        hitRow("C0PLATFORM", tsC, "#platform-help"),
+        hitRow("C0PLATFORM", tsA, "#platform-help"),
+        hitRow("C0PLATFORM", tsD, "#platform-help"),
+      ]),
+    },
+  })
+  try {
+    const flaggedAt = new Date(h.now()).toISOString()
+    const records = {
+      [linkA]: earlierRecord({ link: linkA, ts: tsA, sessionID: "ses_old_a", flaggedAt }),
+      [linkB]: earlierRecord({ link: linkB, ts: tsB, sessionID: "ses_old_b", flaggedAt }),
+      [linkC]: earlierRecord({ link: linkC, ts: tsC, sessionID: "ses_old_c", flaggedAt, issueUrl: issue, issueNumber: 41 }),
+      [linkD]: {
+        ...earlierRecord({ link: linkD, ts: tsD, sessionID: "ses_old_d", flaggedAt }),
+        recordFormat: RECORD_FORMAT,
+      },
+    }
+    h.setItems(structuredClone(records))
+    h.setSeen([linkA, linkB, linkC, linkD])
+    // Every earlier session is quiet: idle, and unchanged for longer than the
+    // stale age.
+    for (const id of ["ses_old_a", "ses_old_b", "ses_old_c", "ses_old_d"]) {
+      h.sessions.set(id, { time: quietTimes(h.now()) })
+    }
+    assert.deepEqual(
+      (await h.watcher.items()).items.map((record) => record.permalink),
+      [linkD],
+      "the dialog serves this build's own records alone, so the earlier build's rows stay out of it",
+    )
+
+    await h.watcher.poll()
+
+    assert.equal(h.created.length, 1, "one new session, for the still-flagged issue-less record alone")
+    const created = h.created[0]
+    assert.equal(created.agent, DEFAULT_SESSION_AGENT, "on the configured session agent")
+    assert.equal(created.title, records[linkA].title, "the record's own title")
+    assert.equal(h.prompts.length, 1, "one first prompt")
+    assert.equal(h.prompts[0].sessionID, created.id)
+    const prompt = h.prompts[0].text
+    assert.ok(prompt.includes(linkA), "the prompt carries the record's permalink")
+    assert.ok(prompt.includes("slack_nexar"), "the record's workspace")
+    assert.ok(prompt.includes("#platform-help"), "the record's channel label")
+    assert.ok(prompt.includes(tsA), "the record's message ts")
+    assert.ok(prompt.includes(h.config.intake_repo), "the intake repo")
+
+    const stored = h.items()[linkA]
+    assert.equal(stored.permalink, linkA, "the record keeps its key")
+    assert.equal(stored.sessionID, created.id, "and takes the new session id")
+    assert.equal(stored.firstTurnFailed, true, "and reads as waiting")
+    assert.equal(stored.recordFormat, RECORD_FORMAT, "and takes this build's record form")
+    assert.equal(stored.flaggedAt, records[linkA].flaggedAt, "every other field is kept")
+    assert.equal(stored.title, records[linkA].title)
+
+    assert.deepEqual(h.items()[linkB], records[linkB], "the no-longer-flagged record is unchanged")
+    assert.deepEqual(h.items()[linkC], records[linkC], "the record with an issue is unchanged")
+    assert.deepEqual(h.items()[linkD], records[linkD], "this build's own record is unchanged")
+    assert.deepEqual(
+      [...h.seen()].sort(),
+      [linkA, linkB, linkC, linkD].sort(),
+      "the seen-set still holds every seeded permalink",
+    )
+    assert.equal(h.status().today.skipped, 2, "the two seen hits are counted, and the reissued one is not")
+    assert.ok(
+      h.toolCalls().some((call) => call.args.limit === 1),
+      "the reissued permalink is established as the tool's own result, one result per call, like a new hit",
+    )
+
+    // The reply's issue and title are then recorded, like any first turn's.
+    const replyIssue = "https://github.com/empiric-earth/almeida-slack-intake/issues/42"
+    h.contexts.set(created.id, [
+      {
+        type: "assistant",
+        content: [{ type: "text", text: `Findings and next steps.\n\nIntake issue: ${replyIssue}\nTitle: The reissued paraphrase` }],
+      },
+    ])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID: created.id } })
+    assert.equal(h.items()[linkA].issueUrl, replyIssue, "the reply's issue is recorded")
+    assert.equal(h.items()[linkA].issueNumber, 42)
+    assert.equal(h.items()[linkA].title, "The reissued paraphrase", "and the reply's title")
+    assert.equal(h.items()[linkA].firstTurnFailed, false)
+    assert.deepEqual(h.retitles, [{ sessionID: created.id, title: "The reissued paraphrase" }])
+
+    // A second poll, and a second watcher on the same storage and claims, create
+    // no further session: a committed reissue refuses every later claim.
+    h.clock.ms += h.config.poll_seconds * 1000
+    await h.watcher.poll()
+    const second = h.newWatcher()
+    await second.poll()
+    assert.equal(h.created.length, 1, "no record gets a second session")
+    assert.equal(h.prompts.length, 1, "and no record gets a second prompt")
+  } finally {
+    h.clean()
+  }
+})
+
+test("two watchers racing one reissue give the record one session, once", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const hash = permalinkHash(link)
+  const flaggedAt = new Date(NOW).toISOString()
+  const pages = { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] }
+
+  // The first watcher is held at its session create until the second watcher's
+  // poll has run, so both pass the handoff check before either replaces the
+  // record. Its claim is fresh, so the second watcher may start no session.
+  {
+    const h = harness({ servers: [NEXAR], pages })
+    try {
+      const record = earlierRecord({ link, ts, sessionID: "ses_old", flaggedAt })
+      h.setItems({ [link]: record })
+      h.setSeen([link])
+      h.sessions.set("ses_old", { time: quietTimes(h.now()) })
+      let release
+      let creates = 0
+      h.session.onCreate = async () => {
+        creates += 1
+        if (creates === 1) await new Promise((resolve) => (release = resolve))
+      }
+      const first = h.watcher.poll()
+      await waitFor(() => release !== undefined, "the first watcher to reach its session create")
+      // The lease is over, so the second watcher polls; the claim is not stale.
+      h.clock.ms += LEASE_MS + 1_000
+      await h.newWatcher().poll()
+      assert.equal(creates, 1, "the fresh claim holds the record to one session create")
+      release()
+      await first
+      assert.equal(h.created.length, 1, "one session is created for the record")
+      assert.equal(h.prompts.length, 1, "and one first prompt")
+      const winner = h.prompts[0].sessionID
+      assert.equal(h.items()[link].sessionID, winner, "the record names the session that was prompted")
+    } finally {
+      h.clean()
+    }
+  }
+
+  // The first watcher is held after its create, before its commit, and its
+  // claim is aged past the stale age: the second watcher takes the next
+  // generation and replaces the record; the first watcher's commit is refused.
+  {
+    const h = harness({ servers: [NEXAR], pages })
+    try {
+      const record = earlierRecord({ link, ts, sessionID: "ses_old", flaggedAt })
+      h.setItems({ [link]: record })
+      h.setSeen([link])
+      h.sessions.set("ses_old", { time: quietTimes(h.now()) })
+      const realCommit = h.reissue.commit
+      let release
+      let commits = 0
+      h.reissue.commit = async (claimHash, value) => {
+        commits += 1
+        if (commits === 1) await new Promise((resolve) => (release = resolve))
+        return realCommit(claimHash, value)
+      }
+      const first = h.watcher.poll()
+      await waitFor(() => release !== undefined, "the first watcher to reach its reissue commit")
+      h.clock.ms += STALE_MS + 60_000
+      await h.newWatcher().poll()
+      assert.equal(h.prompts.length, 1, "the second watcher prompted one session")
+      const winner = h.prompts[0].sessionID
+      release()
+      await first
+      assert.equal(h.prompts.length, 1, "the held watcher prompted nothing")
+      const loser = h.created.find((session) => session.id !== winner)
+      assert.ok(h.removed.includes(loser.id), "the held watcher removed its own session")
+      assert.equal(h.items()[link].sessionID, winner, "the record names the second watcher's session")
+      assert.ok(existsSync(join(h.reissueDir, `${hash}.claim.1`)), "the second watcher took the next generation")
+    } finally {
+      h.clean()
+    }
+  }
+})
+
+test("the handoff holds a record whose earlier session may still be writing", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const sessionID = "ses_old"
+  const pages = { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] }
+  const cases = [
+    {
+      name: "a busy period that has not ended",
+      seed: (now) => ({ time: { busy: now - 60_000, updated: now - 20 * 60_000 } }),
+      reason: /busy period/,
+    },
+    {
+      name: "a change inside the stale age",
+      seed: (now) => ({ time: { busy: now - 3_600_000, idle: now - 3_500_000, updated: now - 60_000 } }),
+      reason: /changed \d+ s ago/,
+    },
+    {
+      name: "a read that fails for another reason",
+      seed: () => ({ error: new Error("the session store is unavailable") }),
+      reason: /was not read/,
+    },
+    {
+      name: "a pending permission",
+      seed: (now) => ({ time: quietTimes(now) }),
+      reason: /permission request is pending/,
+      permissionPending: true,
+    },
+  ]
+
+  for (const item of cases) {
+    const h = harness({ servers: [NEXAR], pages })
+    try {
+      const record = earlierRecord({
+        link,
+        ts,
+        sessionID,
+        flaggedAt: new Date(h.now()).toISOString(),
+        permissionPending: item.permissionPending === true,
+      })
+      h.setItems({ [link]: record })
+      h.setSeen([link])
+      h.sessions.set(sessionID, item.seed(h.now()))
+
+      await h.watcher.poll()
+      assert.equal(h.created.length, 0, `${item.name}: no session is created`)
+      assert.equal(h.prompts.length, 0, `${item.name}: no prompt is sent`)
+      assert.deepEqual(h.items()[link], record, `${item.name}: the record is unchanged`)
+      assert.equal(h.items()[link].firstTurnFailed, true, `${item.name}: the item still reads as waiting`)
+      assert.ok(
+        h.logs.some((line) => line.includes(sessionID) && item.reason.test(line)),
+        `${item.name}: the poll logs the session id and the reason, got ${JSON.stringify(h.logs)}`,
+      )
+      h.clock.ms += h.config.poll_seconds * 1000
+      await h.watcher.poll()
+      assert.equal(h.created.length, 0, `${item.name}: the next poll still creates none`)
+    } finally {
+      h.clean()
+    }
+  }
+
+  // The earlier session is quiet at last: the next poll reissues it exactly once.
+  const h = harness({ servers: [NEXAR], pages })
+  try {
+    const record = earlierRecord({ link, ts, sessionID, flaggedAt: new Date(h.now()).toISOString() })
+    h.setItems({ [link]: record })
+    h.setSeen([link])
+    h.sessions.set(sessionID, { time: { busy: h.now() - 60_000, updated: h.now() - 20 * 60_000 } })
+    await h.watcher.poll()
+    assert.equal(h.created.length, 0, "the in-flight session holds the record")
+    h.clock.ms += 10 * 60_000
+    h.sessions.set(sessionID, { time: quietTimes(h.now()) })
+    await h.watcher.poll()
+    assert.equal(h.created.length, 1, "the quiet session lets the record be reissued")
+    assert.equal(h.prompts.length, 1, "and prompted once")
+    h.clock.ms += h.config.poll_seconds * 1000
+    await h.watcher.poll()
+    assert.equal(h.created.length, 1, "no second session for the same record")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a poll reconciles a reissue commit whose holder stopped before the replacement", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const hash = permalinkHash(link)
+  const flaggedAt = new Date(NOW).toISOString()
+  const pages = { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] }
+
+  // (a) the crash between the reissue commit and the record replacement.
+  {
+    const h = harness({ servers: [NEXAR], pages })
+    try {
+      const record = earlierRecord({ link, ts, sessionID: "ses_old", flaggedAt })
+      h.setItems({ [link]: record })
+      h.setSeen([link])
+      h.reissue.claim(hash)
+      await h.reissue.commit(hash, { ...record, sessionID: "ses_new", committedAt: flaggedAt, replaces: "ses_old" })
+      ageReissue(h, hash)
+
+      await h.watcher.poll()
+      const stored = h.items()[link]
+      assert.equal(stored.sessionID, "ses_new", "the record takes the commit's session id")
+      assert.equal(stored.firstTurnFailed, true, "and reads as waiting")
+      assert.equal(stored.recordFormat, RECORD_FORMAT, "and takes this build's record form")
+      const { sessionID: ignored, firstTurnFailed: ignoredToo, recordFormat: ignoredAsWell, ...rest } = stored
+      const { sessionID: was, firstTurnFailed: wasFailed, recordFormat: wasFormat, ...before } = record
+      assert.deepEqual(rest, before, "every other field is kept")
+      assert.equal(h.created.length, 0, "no session is created")
+      assert.equal(h.prompts.length, 0, "and no prompt is sent")
+
+      h.clock.ms += h.config.poll_seconds * 1000
+      await h.watcher.poll()
+      assert.equal(h.created.length, 0, "a later poll creates no session either")
+    } finally {
+      h.clean()
+    }
+  }
+
+  // (b) a replacement that succeeded: the record is this build's own and names
+  // the commit's session, so the reconciliation leaves it alone.
+  {
+    const h = harness({ servers: [NEXAR], pages })
+    try {
+      const issue = "https://github.com/empiric-earth/almeida-slack-intake/issues/41"
+      const record = {
+        ...earlierRecord({ link, ts, sessionID: "ses_new", flaggedAt, issueUrl: issue, issueNumber: 41 }),
+        firstTurnFailed: false,
+        recordFormat: RECORD_FORMAT,
+      }
+      h.setItems({ [link]: record })
+      h.setSeen([link])
+      h.reissue.claim(hash)
+      await h.reissue.commit(hash, { ...record, committedAt: flaggedAt, replaces: "ses_old" })
+      ageReissue(h, hash)
+
+      await h.watcher.poll()
+      assert.deepEqual(h.items()[link], record, "the replaced record is unchanged, field for field")
+      assert.equal(h.created.length, 0, "no session is created")
+      assert.equal(h.prompts.length, 0, "and no prompt is sent")
+      h.clock.ms += h.config.poll_seconds * 1000
+      await h.watcher.poll()
+      assert.equal(h.created.length, 0, "a later poll creates no session either")
+    } finally {
+      h.clean()
+    }
+  }
+
+  // (c) a reissue in progress: a claim and a commit inside the stale age, and
+  // the record still in the earlier build's form with the replaced session id.
+  {
+    const h = harness({ servers: [NEXAR], pages })
+    try {
+      const record = earlierRecord({ link, ts, sessionID: "ses_old", flaggedAt })
+      h.setItems({ [link]: record })
+      h.setSeen([link])
+      h.sessions.set("ses_old", { time: quietTimes(h.now()) })
+      h.reissue.claim(hash)
+      await h.reissue.commit(hash, { ...record, sessionID: "ses_new", committedAt: flaggedAt, replaces: "ses_old" })
+
+      await h.watcher.poll()
+      assert.deepEqual(h.items()[link], record, "the record of a reissue in progress is unchanged")
+      assert.equal(h.created.length, 0, "no session is created")
+      assert.equal(h.prompts.length, 0, "and no prompt is sent")
+      h.clock.ms += h.config.poll_seconds * 1000
+      await h.watcher.poll()
+      assert.equal(h.created.length, 0, "a later poll creates no session either")
+    } finally {
+      h.clean()
+    }
   }
 })

@@ -1,14 +1,17 @@
 // The fixed prompts the server part sends.
 //
-// The triage agent allows the Slack read tools, the file read tools, the
-// `slack-director` skill and the credential broker. The broker judges each of
-// its calls against the session's task, so the first prompt names the only
-// GitHub writes the first turn may make: one issue create and one comment.
+// The `slack-director` agent allows the Slack read tools, the file read tools,
+// the `slack-director` skill and the credential broker, and denies the shell
+// commands of the credentialed CLIs. The broker judges each of its calls
+// against the session's task, so the first prompt names the only GitHub writes
+// the first turn may make: one issue create and one comment.
 
 /**
  * The first prompt of an item session: apply the skill's scope rules, find or
  * create the intake issue for the permalink, read the thread, and post the
- * findings and next steps once.
+ * findings and next steps once. Every flagged message gets an issue; a message
+ * the scope rules leave out gets one that holds the permalink fields and its
+ * category only.
  */
 export function itemFirstPrompt(hit, intakeRepo) {
   return [
@@ -22,7 +25,7 @@ export function itemFirstPrompt(hit, intakeRepo) {
     "",
     "Load the `slack-director` skill and follow it.",
     "",
-    "The flag is the user's own triage, so a flagged message counts as a request to the user. Apply the skill's scope rules first: only a message in one of the skill's out-of-scope categories — customer or production data, Slack Connect or an external channel — or one whose category you cannot tell is left out. For a message you leave out, create no issue and post no comment, and use the reply's first line below that starts with `Intake issue: none`.",
+    "The flag is the user's own triage, so a flagged message counts as a request to the user. Apply the skill's scope rules first: only a message in one of the skill's out-of-scope categories — customer or production data, Slack Connect or an external channel — or one whose category you cannot tell is left out of the investigation. A message you leave out still gets its issue: create one that holds the permalink fields and the category only, with no paraphrase of its content, and post one comment that says it is out of scope and asks the user. Do not read its thread.",
     "",
     "Otherwise find the intake issue in that repo whose `permalink` field equals the permalink above, among open and closed issues alike, and create one in the skill's issue format only when no issue carries it. Write a paraphrase and the permalink only, never verbatim Slack text.",
     "",
@@ -35,13 +38,7 @@ export function itemFirstPrompt(hit, intakeRepo) {
     "Reply with the same findings and next steps, and end your reply with exactly these two lines:",
     "",
     "Intake issue: <the issue's URL>",
-    "Title: <the issue title's paraphrase>",
-    "",
-    "For a message the scope rules leave out, the first line is instead:",
-    "",
-    "Intake issue: none — <the reason, a few words>",
-    "",
-    "and the second line carries the paraphrase the issue's title would have had.",
+    "Title: <the issue's exact title>",
     "",
     "Then stop, and take no other action.",
   ].join("\n")

@@ -1,5 +1,6 @@
-// The overview page's own logic: the state of an item, the order of the rows,
-// the text of every line, the URL opener and the settings dialog's values.
+// The overview dialog's own logic: the state of an item, the order of the rows,
+// the text of every line, the colour roles, the selection move, the URL opener
+// and the settings dialog's values.
 //
 // The expected lines are the approved layout's own lines, so this suite fails
 // when a column moves or a label changes. No dependencies; run with
@@ -7,18 +8,24 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
+  ATTENTION,
   COLUMNS,
+  DIMMED,
   KEY_HELP,
   PAGE_TITLE,
   ageText,
+  colourRole,
   countsText,
   fieldValue,
   headerText,
   issueLabel,
+  itemTitle,
+  moveSelection,
   openerCommand,
   pageRows,
   pollClock,
   rowText,
+  selectedItem,
   settingsValue,
   sidebarText,
   stateOf,
@@ -169,7 +176,7 @@ test("every column starts where the approved layout puts it", () => {
   assert.equal(tableHeaderText().length, COLUMNS.age + 3, "the header is as long as a row")
 })
 
-test("a value too long for its column is shortened, and an item without an issue shows a dash", () => {
+test("a value too long for its column is shortened, and one space still separates the columns", () => {
   const long = item({
     asker: "A".repeat(40),
     title: "B".repeat(80),
@@ -177,17 +184,59 @@ test("a value too long for its column is shortened, and an item without an issue
     channel: "C".repeat(40),
   })
   const row = rowText(long, "waiting", { now: NOW })
-  assert.equal(row.slice(COLUMNS.asker, COLUMNS.item), `${"A".repeat(16)}…`)
-  assert.equal(row.slice(COLUMNS.item, COLUMNS.issue), `${"B".repeat(38)}…`)
+  assert.equal(row.slice(COLUMNS.asker, COLUMNS.item), `${"A".repeat(15)}… `)
+  assert.equal(row.slice(COLUMNS.item, COLUMNS.issue), `${"B".repeat(37)}… `)
   assert.equal(row.slice(COLUMNS.issue, COLUMNS.channel), "—      ")
-  assert.equal(row.slice(COLUMNS.channel, COLUMNS.age), `${"C".repeat(17)}…`)
+  assert.equal(row.slice(COLUMNS.channel, COLUMNS.age), `${"C".repeat(16)}… `)
   assert.equal(issueLabel(item({ issueNumber: 41 })), "#41")
+
+  // Every two columns of the header and of this row keep at least one space
+  // between them, whatever the cell lengths are.
+  const starts = [COLUMNS.state, COLUMNS.asker, COLUMNS.item, COLUMNS.issue, COLUMNS.channel, COLUMNS.age]
+  for (const line of [tableHeaderText(), row]) {
+    for (const start of starts) {
+      assert.equal(line[start - 1], " ", `a space sits before the column at ${start}: ${line}`)
+    }
+  }
+})
+
+test("the ITEM cell drops a leading asker, so ASKER is not shown twice", () => {
+  const repeated = item({ asker: "Maria Costa", title: "Maria Costa — Access to the staging dashboards" })
+  assert.equal(itemTitle(repeated), "Access to the staging dashboards")
+  assert.equal(itemTitle(item()), "Access to the staging dashboards", "a title with no prefix is unchanged")
+  assert.equal(
+    itemTitle(item({ asker: "", title: "Someone — a paraphrase" })),
+    "Someone — a paraphrase",
+    "with no asker nothing is dropped",
+  )
+})
+
+test("the selection move wraps at both ends, and the marker picks the row the keys act on", () => {
+  const rows = pageRows(ITEMS, liveOf)
+  assert.equal(moveSelection(4, 5, 1), 0, "down from the last row goes to the first")
+  assert.equal(moveSelection(0, 5, -1), 4, "up from the first row goes to the last")
+  assert.equal(moveSelection(2, 5, 1), 3, "down from a middle row is the next one")
+  assert.equal(moveSelection(0, 0, 1), 0, "an empty table has no move")
+  assert.equal(selectedItem(rows, 4).sessionID, "ses_5", "the selected row's item is the one the keys act on")
+  assert.equal(selectedItem(rows, 0).sessionID, "ses_1")
+  assert.equal(selectedItem([], 0), undefined)
+})
+
+test("the colour role marks what needs attention and dims the rest", () => {
+  assert.equal(colourRole("row", { state: "waiting", selected: false }), ATTENTION, "a waiting row stands out")
+  assert.equal(colourRole("row", { state: "working", selected: true }), ATTENTION, "the selected row stands out")
+  assert.equal(colourRole("row", { state: "idle", selected: false }), DIMMED, "an idle row is dimmed")
+  assert.equal(colourRole("row", { state: "working", selected: false }), DIMMED, "a working row is dimmed")
+  assert.equal(colourRole("mark", { ok: false }), ATTENTION, "a failing workspace's mark stands out")
+  assert.equal(colourRole("mark", { ok: true }), DIMMED, "a healthy workspace's mark is dimmed")
+  assert.equal(colourRole("label"), DIMMED, "a label is dimmed")
 })
 
 test("the header names the last poll, the outcome and every workspace, a failing one with its label", () => {
   assert.equal(headerText(STATUS), "last poll 14:32 · ok · slack_nexar ✓ · slack_nauto ✗ sign-in expired — run /mcps")
   assert.equal(headerText({ lastPoll: null, outcome: "never polled", workspaces: [] }), "last poll never · never polled")
   assert.equal(headerText({ lastPoll: "not a time", outcome: "ok", workspaces: [] }), "last poll never · ok")
+  assert.equal(pollClock("2026-11-19T14:32:00.000Z"), "14:32")
 })
 
 test("the counts line, the today line and the sidebar line carry the counts", () => {
@@ -210,9 +259,12 @@ test("the age counts from the flag, in minutes, then hours, then days", () => {
   assert.equal(ageText(minutes(-5), NOW), "0m", "a clock that runs behind reads as just now")
 })
 
-test("the page title and the help line are the approved layout's own", () => {
+test("the dialog's title and the help line are the approved layout's own", () => {
   assert.equal(PAGE_TITLE, "Slack Director")
-  assert.equal(KEY_HELP, "enter open session · i open issue · s open in Slack · r poll now · , settings · esc back")
+  assert.equal(
+    KEY_HELP,
+    "↑↓ move · [enter] open session · [i]ssue · [s]lack · [r]efresh · s[e]ttings · [esc] close",
+  )
 })
 
 test("the URL opener runs the system's opener for http and https, and refuses every other URL", () => {
@@ -254,5 +306,5 @@ test("the settings dialog sends a field's own type and offers the current value"
     settingsValue("work_hours", { days: ["Mon"], start: "09:00", end: "18:00", time_zone: "UTC" }),
     '{"days":["Mon"],"start":"09:00","end":"18:00","time_zone":"UTC"}',
   )
-  assert.equal(settingsValue("triage_agent", undefined), "")
+  assert.equal(settingsValue("session_agent", undefined), "")
 })

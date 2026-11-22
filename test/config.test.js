@@ -89,7 +89,7 @@ test("every field takes its default when the file omits it", () => {
   assert.deepEqual(Object.keys(config).sort(), [...FIELD_NAMES].sort(), "the config carries every field and no other")
   assert.equal(config.flag_emoji, "oc")
   assert.equal(config.poll_seconds, 60)
-  assert.equal(config.triage_agent, "slack-director-triage")
+  assert.equal(config.session_agent, "slack-director")
   assert.deepEqual(config.work_hours, defaultWorkHours(), "the window is the documented default")
   assert.equal(config.intake_repo, REQUIRED.intake_repo)
   assert.equal(config.session_directory, REQUIRED.session_directory)
@@ -100,6 +100,15 @@ test("every field takes its default when the file omits it", () => {
   assert.equal(defaults.work_hours.end, "18:00")
   assert.equal(defaults.work_hours.time_zone, machineTimeZone(), "the default window is in this machine's own zone")
   for (const field of REQUIRED_FIELDS) assert.equal(defaults[field], "", `${field} has no default`)
+})
+
+test("a field an earlier build wrote is ignored, and the new field takes its default", () => {
+  const { config, error } = parseConfig(
+    JSON.stringify({ ...REQUIRED, triage_agent: "slack-director-triage", work_hours: WINDOW }),
+  )
+  assert.equal(error, undefined, "an unknown field is not an error")
+  assert.equal(config.session_agent, "slack-director", "the session agent takes its own default")
+  assert.equal(Object.hasOwn(config, "triage_agent"), false, "the retired field is not carried")
 })
 
 test("a field the file gets wrong is named, and the last good config stays in use", () => {

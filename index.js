@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url"
 import { SlackDirectorRpc } from "./rpc.js"
 import { createClaims } from "./src/claims.js"
 import { createConfigReader, DEFAULT_POLL_SECONDS } from "./src/config.js"
-import { claimsDir } from "./src/state.js"
+import { claimsDir, reissueDir } from "./src/state.js"
 import { createWatcher, SESSION_EVENT_TYPES } from "./src/watcher.js"
 
 /** The skill this package ships. */
@@ -85,6 +85,8 @@ export default {
     const watcher = createWatcher({
       storage: ctx.storage,
       claims: createClaims({ dir: claimsDir(), randomID: () => randomUUID() }),
+      // The reissue's own claim and commit files, beside the main claims.
+      reissue: createClaims({ dir: reissueDir(), randomID: () => randomUUID() }),
       now: () => Date.now(),
       fetch: (url, init) => fetch(url, init),
       readConfig: () => config.read(),

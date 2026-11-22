@@ -17,8 +17,10 @@ const read = (rel) => readFileSync(join(ROOT, rel), "utf8")
 const SKILL_ID = "slack-director"
 const SKILL_REL = `skills/${SKILL_ID}/SKILL.md`
 const AGENT_REL = "agents/slack-director.md"
-const TRIAGE_AGENT_REL = "agents/slack-director-triage.md"
 const REFRESH_AGENT_REL = "agents/slack-director-refresh.md"
+// The read-only triage agent is gone from the package; the install target
+// removes a copy an earlier install left behind.
+const RETIRED_TRIAGE_AGENT = "slack-director-triage.md"
 const SOURCE_MODULES = [
   "config.js",
   "work-hours.js",
@@ -288,7 +290,7 @@ test("the README install and uninstall steps match the Makefile", () => {
   }
 })
 
-test("the item first prompt carries the item, the skill, the writes it allows and the reply's two forms", () => {
+test("the item first prompt carries the item, the skill, the writes it allows and the reply's two lines", () => {
   const hit = {
     permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
     workspace: "slack_nexar",
@@ -315,17 +317,32 @@ test("the item first prompt carries the item, the skill, the writes it allows an
     "the prompt names an issue edit as forbidden",
   )
   assert.match(prompt, /end your reply with exactly these two\s+lines/i, "the reply ends with the two lines")
-  assert.ok(prompt.includes("Intake issue: "), "the reply's first fixed line")
-  assert.ok(prompt.includes("Title: "), "the reply's second fixed line")
+  assert.ok(prompt.includes("Intake issue: <the issue's URL>"), "the reply's first fixed line")
+  assert.ok(prompt.includes("Title: <the issue's exact title>"), "the reply asks for the issue's exact title")
   assert.ok(
-    prompt.includes("Intake issue: none — <the reason, a few words>"),
-    "the reply's first line for a message the scope rules leave out",
+    prompt.includes("A message you leave out still gets its issue"),
+    "every flagged message gets its issue, the out-of-scope ones included",
   )
   assert.match(prompt, /take no other action/i, "the first turn is bounded")
 })
 
+test("the first prompt and the skill carry no issue-less path", () => {
+  const hit = {
+    permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
+    workspace: "slack_nexar",
+    channel: { id: "C0PLATFORM", label: "#platform-help" },
+    ts: "1795194443.137219",
+  }
+  const prompt = itemFirstPrompt(hit, "empiric-earth/almeida-slack-intake")
+  for (const text of [prompt, read(SKILL_REL)]) {
+    assert.ok(!text.includes("Intake issue: none"), "no reply line leaves the message without an issue")
+    assert.ok(!/create no issue/i.test(text), "no path tells the session to create no issue")
+  }
+  assert.match(prompt, /create one that holds the permalink fields and the category only/i, "the out-of-scope form")
+})
+
 test("the skill, the README and the agent files carry none of the retired tokens", () => {
-  const files = [SKILL_REL, "README.md", AGENT_REL, TRIAGE_AGENT_REL, REFRESH_AGENT_REL]
+  const files = [SKILL_REL, "README.md", AGENT_REL, REFRESH_AGENT_REL]
   const banned = [
     "/slack-director-intake",
     "slack-director.yaml",
@@ -356,7 +373,7 @@ test("the skill keeps the item format, the data rule, the field sources and the 
   assert.match(flat, /never post a decision or a commitment/i, "no decisions or commitments")
 })
 
-test("the skill bounds the first turn's writes and gives its two reply forms", () => {
+test("the skill bounds the first turn's writes and gives its reply's two lines", () => {
   const flat = read(SKILL_REL).replace(/\s+/g, " ")
   assert.match(
     flat,
@@ -370,8 +387,10 @@ test("the skill bounds the first turn's writes and gives its two reply forms", (
   )
   assert.match(flat, /belongs to a later turn the user drives/i, "the skill's other writes are later-turn writes")
   assert.match(flat, /a flagged message counts as a request to the user/i, "a flagged message counts as a request")
-  assert.match(flat, /Intake issue: none — <the reason, a few words>/, "the reply's form for a message left out")
+  assert.match(flat, /Intake issue: <the issue's URL>/, "the reply's first line names the issue")
+  assert.match(flat, /Title: <the issue's exact title>/, "the reply's second line is the issue's exact title")
   assert.match(flat, /only when no issue carries it/i, "an issue is created only when none carries the permalink")
+  assert.match(flat, /every flagged message gets\s+its issue/i, "every flagged message gets its issue")
 })
 
 test("a fixture install lays down the parts, the modules and the agents; uninstall removes them", () => {
@@ -380,7 +399,7 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
   const prefix = join(fixture, "prefix")
   const pluginDir = join(prefix, "plugins", "slack-director")
   const agentFile = join(prefix, "agents", "slack-director.md")
-  const triageFile = join(prefix, "agents", "slack-director-triage.md")
+  const triageFile = join(prefix, "agents", RETIRED_TRIAGE_AGENT)
   const refreshFile = join(prefix, "agents", "slack-director-refresh.md")
   const env = {
     ...process.env,
@@ -390,13 +409,16 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
   }
   const make = (...args) => execFileSync("make", args, { cwd: ROOT, encoding: "utf8", env })
   try {
-    // The old hand-copied skill, and files install and uninstall must leave alone.
+    // The old hand-copied skill, an installed triage agent an earlier build
+    // left, and files install and uninstall must leave alone.
     const staleSkill = join(prefix, "skills", "slack-director", "SKILL.md")
     mkdirSync(join(prefix, "skills", "slack-director"), { recursive: true })
     writeFileSync(staleSkill, "old copy")
     writeFileSync(join(prefix, "keep.txt"), "keep me")
     mkdirSync(join(home, ".config", "opencode", "skills", "slack-director"), { recursive: true })
     writeFileSync(join(home, ".config", "opencode", "skills", "slack-director", "SKILL.md"), "not mine")
+    mkdirSync(join(prefix, "agents"), { recursive: true })
+    writeFileSync(triageFile, "an earlier build's triage agent")
     const before = tree(home)
 
     make("install", `PREFIX=${prefix}`)
@@ -409,7 +431,6 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
       [join(pluginDir, "package.json"), "package.json"],
       [join(pluginDir, SKILL_REL), SKILL_REL],
       [agentFile, AGENT_REL],
-      [triageFile, TRIAGE_AGENT_REL],
       [refreshFile, REFRESH_AGENT_REL],
       ...SOURCE_MODULES.map((name) => [join(pluginDir, "src", name), `src/${name}`]),
     ]) {
@@ -419,6 +440,7 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
     assert.ok(!existsSync(join(pluginDir, "skills", "skills")), "a second install nests no skills directory")
     assert.ok(!existsSync(join(pluginDir, "src", "src")), "a second install nests no src directory")
     assert.ok(!existsSync(staleSkill), "the stale config-directory skill is removed")
+    assert.ok(!existsSync(triageFile), "the installed triage agent an earlier build left is removed")
 
     make("uninstall", `PREFIX=${prefix}`)
     assert.ok(!existsSync(pluginDir), "uninstall removes the plugin directory")
@@ -434,7 +456,8 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
   }
 })
 
-test("the two plugin-only agents are hidden and the director agent stays listed", () => {
+test("the package ships no triage agent, and the refresh agent stays hidden", () => {
+  assert.ok(!existsSync(join(ROOT, "agents", RETIRED_TRIAGE_AGENT)), "the triage agent file is gone from the package")
   const field = (rel, name) => {
     const block = /^---\r?\n([\s\S]*?)\r?\n---/.exec(read(rel))
     assert.ok(block, `${rel} carries frontmatter`)
@@ -444,11 +467,34 @@ test("the two plugin-only agents are hidden and the director agent stays listed"
       .find((raw) => raw.startsWith(`${name}:`))
     return line === undefined ? undefined : line.slice(line.indexOf(":") + 1).trim()
   }
-  for (const rel of [TRIAGE_AGENT_REL, REFRESH_AGENT_REL]) {
-    assert.equal(field(rel, "hidden"), "true", `${rel} is hidden from the agent list`)
-    assert.equal(field(rel, "mode"), "primary", `${rel} stays an agent a session can run on`)
-  }
+  assert.equal(field(REFRESH_AGENT_REL, "hidden"), "true", "the refresh agent is hidden from the agent list")
+  assert.equal(field(REFRESH_AGENT_REL, "mode"), "primary", "it stays an agent a session can run on")
   assert.equal(field(AGENT_REL, "hidden"), undefined, `${AGENT_REL} stays in the agent list`)
+})
+
+test("the director agent says the plugin starts its item sessions on it", () => {
+  const text = read(AGENT_REL)
+  assert.match(text, /starts every item session on this agent/i, "the agent file says the plugin starts sessions on it")
+  assert.ok(text.includes("`slack-director` skill"), "the agent file names the skill it loads")
+  assert.ok(
+    !/Switch that session's agent/i.test(text),
+    "the agent file no longer tells the user to switch an item session's agent",
+  )
+  const rules = [...text.matchAll(/- action: "([^"]+)"\n\s+resource: "([^"]+)"\n\s+effect: "?([^"\n]+)"?/g)].map((match) => ({
+    action: match[1],
+    resource: match[2],
+    effect: match[3].trim(),
+  }))
+  assert.ok(
+    rules.some((rule) => rule.action === "slack_*" && rule.resource === "*" && rule.effect === "ask"),
+    "every Slack tool asks first",
+  )
+  for (const cli of ["gh", "glab", "aws"]) {
+    assert.ok(
+      rules.some((rule) => rule.action === "shell" && rule.resource === `${cli} *` && rule.effect === "deny"),
+      `the ${cli} shell command is denied`,
+    )
+  }
 })
 
 test("the skill path helper points at the shipped skill", () => {
@@ -466,7 +512,7 @@ test("every RPC handler answers what the contract's own schema for it describes"
         session_directory: "/home/someone/notes",
         poll_seconds: 60,
         work_hours: { days: ["Mon", "Fri"], start: "09:00", end: "18:00", time_zone: "UTC" },
-        triage_agent: "slack-director-triage",
+        session_agent: "slack-director",
       }),
     )
     const { ctx, rpcRegistrations } = fakeContext()

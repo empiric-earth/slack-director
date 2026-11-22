@@ -1,5 +1,6 @@
-// The overview page's own logic: the state of one item, the order of the rows
-// and the text of every line the page and the sidebar show.
+// The overview dialog's own logic: the state of one item, the order of the rows,
+// the text of every line the dialog and the sidebar show, and the colour role
+// each part of a row takes from the theme.
 //
 // Everything here reads only its arguments, so the node suite drives it with
 // fixed items and fixed session data and asserts the text a person sees. The
@@ -8,11 +9,19 @@
 /** Where each column of the table starts, as the approved layout lays it out. */
 export const COLUMNS = { marker: 0, state: 2, asker: 13, item: 30, issue: 69, channel: 76, age: 94 }
 
-/** The page's title, and the name of its palette entry. */
+/** The dialog's title, and the name of its palette entry. */
 export const PAGE_TITLE = "Slack Director"
 
-/** The keys the page answers, as its own help line shows them. */
-export const KEY_HELP = "enter open session · i open issue · s open in Slack · r poll now · , settings · esc back"
+/** The dialog's size, as the host's own dialog sizes name it. */
+export const DIALOG_SIZE = "xlarge"
+
+/** The keys the dialog answers, as its own help line shows them. */
+export const KEY_HELP =
+  "↑↓ move · [enter] open session · [i]ssue · [s]lack · [r]efresh · s[e]ttings · [esc] close"
+
+/** The two colour roles a part of the dialog takes from the theme. */
+export const ATTENTION = "attention"
+export const DIMMED = "dimmed"
 
 /** The glyph the STATE column draws for each state. */
 const GLYPH = { waiting: "●", working: "◐", idle: "○" }
@@ -20,14 +29,19 @@ const GLYPH = { waiting: "●", working: "◐", idle: "○" }
 /** The display order of the states: waiting first, then working, then idle. */
 const ORDER = ["waiting", "working", "idle"]
 
-/** One cell of a line, in the order the columns are drawn. */
+/** One cell of a line: its column, and the text it holds. */
 const cell = (start, text) => [start, text]
 
-/** A line of cells, each starting at its own column. */
+/**
+ * A line of cells, each starting at its own column. A cell that would reach the
+ * next column is pushed right, so at least one space always separates two
+ * columns whatever the cell lengths are.
+ */
 function columnsText(cells) {
   let line = ""
   for (const [start, text] of cells) {
-    if (line.length < start) line += " ".repeat(start - line.length)
+    const at = line === "" ? start : Math.max(start, line.length + 1)
+    if (line.length < at) line += " ".repeat(at - line.length)
     line += text
   }
   return line
@@ -37,8 +51,11 @@ function columnsText(cells) {
 function clip(text, width) {
   const value = typeof text === "string" ? text : String(text ?? "")
   if (value.length <= width) return value
-  return `${value.slice(0, width - 1)}…`
+  return `${value.slice(0, Math.max(0, width - 1))}…`
 }
+
+/** The width a column's value may use, one space short of the next column. */
+const widthBefore = (start, next) => next - start - 1
 
 /**
  * One item's state, the first match winning:
@@ -78,6 +95,22 @@ function flaggedAt(item) {
   return Number.isNaN(at) ? 0 : at
 }
 
+/**
+ * The row the selection marker sits on after one move: down from the last row
+ * is the first, up from the first is the last, and an empty table has none.
+ */
+export function moveSelection(index, count, step) {
+  if (!Number.isInteger(count) || count <= 0) return 0
+  const from = Number.isInteger(index) ? index : 0
+  return (((from + step) % count) + count) % count
+}
+
+/** The item the keys act on: the row the marker marks. */
+export function selectedItem(rows, index) {
+  const row = (rows ?? [])[index ?? 0]
+  return row?.item
+}
+
 /** How long ago the flag was made, in the units the mock uses: minutes, then hours, then days. */
 export function ageText(flaggedAt, now = Date.now()) {
   const from = Date.parse(flaggedAt)
@@ -94,6 +127,18 @@ export function issueLabel(item) {
   return typeof item?.issueNumber === "number" ? `#${item.issueNumber}` : "—"
 }
 
+/**
+ * The ITEM cell: the session's own title. A title the session still carries the
+ * neutral label in repeats the asker, so a leading `<asker> — ` comes off and
+ * ASKER is not shown twice.
+ */
+export function itemTitle(item) {
+  const title = typeof item?.title === "string" ? item.title : ""
+  const asker = typeof item?.asker === "string" ? item.asker : ""
+  const prefix = asker === "" ? "" : `${asker} — `
+  return prefix !== "" && title.startsWith(prefix) ? title.slice(prefix.length) : title
+}
+
 /** The table's header line. */
 export function tableHeaderText() {
   return columnsText([
@@ -108,23 +153,23 @@ export function tableHeaderText() {
 
 /**
  * One row's line: the selection marker, the state, then the item's asker, its
- * session title, its intake issue, its channel and the age of the flag. No
- * Slack message text is on the page: the title is the session's own.
+ * title, its intake issue, its channel and the age of the flag. No Slack
+ * message text is in the dialog: the title is the session's own.
  */
 export function rowText(item, state, options = {}) {
   const now = options.now ?? Date.now()
   return columnsText([
     cell(COLUMNS.marker, options.selected ? "▸" : " "),
     cell(COLUMNS.state, `${GLYPH[state] ?? " "} ${state}`),
-    cell(COLUMNS.asker, clip(item.asker, COLUMNS.item - COLUMNS.asker)),
-    cell(COLUMNS.item, clip(item.title, COLUMNS.issue - COLUMNS.item)),
-    cell(COLUMNS.issue, clip(issueLabel(item), COLUMNS.channel - COLUMNS.issue)),
-    cell(COLUMNS.channel, clip(item.channel, COLUMNS.age - COLUMNS.channel)),
+    cell(COLUMNS.asker, clip(item.asker, widthBefore(COLUMNS.asker, COLUMNS.item))),
+    cell(COLUMNS.item, clip(itemTitle(item), widthBefore(COLUMNS.item, COLUMNS.issue))),
+    cell(COLUMNS.issue, clip(issueLabel(item), widthBefore(COLUMNS.issue, COLUMNS.channel))),
+    cell(COLUMNS.channel, clip(item.channel, widthBefore(COLUMNS.channel, COLUMNS.age))),
     cell(COLUMNS.age, ageText(item.flaggedAt, now)),
   ])
 }
 
-/** The counts line: how many items the page holds, by state. */
+/** The counts line: how many items the dialog holds, by state. */
 export function countsText(rows) {
   const of = (state) => (rows ?? []).filter((row) => row.state === state).length
   return `${(rows ?? []).length} flagged · ${of("working")} working · ${of("waiting")} waiting for you · ${of("idle")} idle`
@@ -144,12 +189,45 @@ export function pollClock(lastPoll) {
   return [at.getHours(), at.getMinutes()].map((value) => String(value).padStart(2, "0")).join(":")
 }
 
-/** The header's right part: the last poll, its outcome and each workspace. */
+/**
+ * The colour role of one part of the dialog, from the theme's two roles:
+ * `attention` for what the user has to look at — a waiting row, the row the
+ * marker marks, a workspace that failed — and `dimmed` for everything else.
+ */
+export function colourRole(part, options = {}) {
+  if (part === "row") {
+    if (options.selected) return ATTENTION
+    return options.state === "waiting" ? ATTENTION : DIMMED
+  }
+  if (part === "mark") return options.ok === false ? ATTENTION : DIMMED
+  return DIMMED
+}
+
+/**
+ * The header's right part in segments, each with its colour role: the last
+ * poll, its outcome, and every workspace with its mark, so a failing workspace
+ * stands out and the rest is dimmed.
+ */
+export function headerParts(status) {
+  const parts = [
+    { text: `last poll ${pollClock(status?.lastPoll)}`, role: DIMMED },
+    { text: " · ", role: DIMMED },
+    { text: status?.outcome ?? "unknown", role: DIMMED },
+  ]
+  for (const workspace of status?.workspaces ?? []) {
+    parts.push({ text: " · ", role: DIMMED })
+    parts.push({ text: `${workspace.name} `, role: DIMMED })
+    parts.push({ text: workspace.ok ? "✓" : "✗", role: colourRole("mark", { ok: workspace.ok }) })
+    if (workspace.error) parts.push({ text: ` ${workspace.error}`, role: DIMMED })
+  }
+  return parts
+}
+
+/** The header's right part as one line. */
 export function headerText(status) {
-  const workspaces = (status?.workspaces ?? []).map(
-    (workspace) => `${workspace.name} ${workspace.ok ? "✓" : "✗"}${workspace.error ? ` ${workspace.error}` : ""}`,
-  )
-  return [`last poll ${pollClock(status?.lastPoll)}`, status?.outcome ?? "unknown", ...workspaces].join(" · ")
+  return headerParts(status)
+    .map((part) => part.text)
+    .join("")
 }
 
 /** The today line: the day's counts the status carries. */

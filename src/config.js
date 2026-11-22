@@ -5,6 +5,10 @@
 // poll; an unreadable file, or a field it cannot use, is named in the status
 // and the values it last read stay in use, so a typo never stops a working
 // watcher.
+//
+// The parser reads the fields named below and nothing else, so a field an
+// earlier build wrote and this one does not know is ignored rather than
+// refused.
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
@@ -12,7 +16,7 @@ import { defaultWorkHours, normalizeWorkHours, validateWorkHours } from "./work-
 
 export const DEFAULT_FLAG_EMOJI = "oc"
 export const DEFAULT_POLL_SECONDS = 60
-export const DEFAULT_TRIAGE_AGENT = "slack-director-triage"
+export const DEFAULT_SESSION_AGENT = "slack-director"
 
 /** The fields a poll cannot run without. */
 export const REQUIRED_FIELDS = ["intake_repo", "session_directory"]
@@ -24,7 +28,7 @@ export const FIELD_NAMES = [
   "session_directory",
   "poll_seconds",
   "work_hours",
-  "triage_agent",
+  "session_agent",
 ]
 
 /** The config file's path. */
@@ -43,7 +47,7 @@ export function defaultConfig() {
     session_directory: "",
     poll_seconds: DEFAULT_POLL_SECONDS,
     work_hours: defaultWorkHours(),
-    triage_agent: DEFAULT_TRIAGE_AGENT,
+    session_agent: DEFAULT_SESSION_AGENT,
   }
 }
 
@@ -66,8 +70,8 @@ export function fieldProblem(field, value) {
       return Number.isInteger(value) && value > 0 ? undefined : "config field invalid: poll_seconds"
     case "work_hours":
       return validateWorkHours(value)
-    case "triage_agent":
-      return filled(value) ? undefined : "config field invalid: triage_agent"
+    case "session_agent":
+      return filled(value) ? undefined : "config field invalid: session_agent"
     default:
       return `no config field named ${String(field)}`
   }

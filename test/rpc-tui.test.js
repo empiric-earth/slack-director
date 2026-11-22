@@ -426,6 +426,34 @@ test("the keys act on the row the marker marks", async () => {
   assert.deepEqual(spawned.at(-1).args, [SECOND.permalink], "s opens the marked row's Slack message")
 })
 
+test("an opener that cannot start is reported instead of failing silently", async () => {
+  const spawned = []
+  const handlers = []
+  const { context, layers, dialogs, toasts } = fakeTuiContext()
+  await createTui({
+    spawnProcess: (command, args, options) => {
+      spawned.push({ command, args, options })
+      return { on: (name, handler) => handlers.push([name, handler]), unref: () => {} }
+    },
+  }).setup(context)
+  await layers[0].commands[0].run()
+  renderDialog(dialogs)
+  modalLayer(layers).commands.find((entry) => entry.bind === "i").run()
+
+  assert.equal(spawned.length, 1, "the opener was started")
+  const failure = handlers.find(([name]) => name === "error")
+  assert.ok(failure, "the opener's own failure event is watched")
+  // A missing opener binary is reported asynchronously, on the child's error
+  // event; the user must see it rather than a key that did nothing.
+  failure[1](new Error("spawn xdg-open ENOENT"))
+  assert.deepEqual(
+    toasts.map((entry) => entry.message),
+    [`${PAGE_TITLE}: spawn xdg-open ENOENT`],
+    "the opener's failure reaches the user",
+  )
+  assert.equal(toasts.at(-1).variant, "error", "and it is shown as an error")
+})
+
 test("the dialog's help line is the layout's own, and its keys are the ones it names", async () => {
   const { context, layers, dialogs } = fakeTuiContext()
   await tui.setup(context)

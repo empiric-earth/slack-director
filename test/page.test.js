@@ -332,8 +332,8 @@ test("the URL opener runs the system's opener for http and https, and refuses ev
   })
   assert.deepEqual(openerCommand("http://example.test/a", "darwin"), { command: "open", args: ["http://example.test/a"] })
   assert.deepEqual(openerCommand("https://example.test/a", "win32"), {
-    command: "cmd",
-    args: ["/c", "start", "", "https://example.test/a"],
+    command: "rundll32",
+    args: ["url.dll,FileProtocolHandler", "https://example.test/a"],
   })
   for (const url of [
     "file:///etc/passwd",
@@ -346,6 +346,31 @@ test("the URL opener runs the system's opener for http and https, and refuses ev
     42,
   ]) {
     assert.equal(openerCommand(url, "linux"), undefined, `${String(url)} is not opened`)
+  }
+})
+
+test("a hostile URL reaches no shell, and none of it reaches an opener as it stands", () => {
+  // A URL may hold `&`, `|` and `^`, and `cmd` re-reads them as its own
+  // operators. Windows opens an address through `rundll32`, which is not a
+  // shell, and the whole address is one argument of it.
+  const metacharacters = "https://example.test/a?x=1&calc.exe"
+  const windows = openerCommand(metacharacters, "win32")
+  assert.equal(windows.command, "rundll32", "Windows opens an address without cmd")
+  assert.deepEqual(windows.args, ["url.dll,FileProtocolHandler", metacharacters], "the address is one argument")
+
+  // Text a URL may not hold comes back in the parser's own form, or the address
+  // is refused: a quote, a space and a line break never reach an opener as they
+  // stand.
+  assert.deepEqual(openerCommand('https://example.test/a" & calc.exe', "linux").args, [
+    "https://example.test/a%22%20&%20calc.exe",
+  ])
+  assert.deepEqual(openerCommand("https://example.test/a\r\nb", "darwin").args, ["https://example.test/ab"])
+  assert.deepEqual(openerCommand("https://example.test/a^|<>%", "win32").args, [
+    "url.dll,FileProtocolHandler",
+    "https://example.test/a%5E|%3C%3E%",
+  ])
+  for (const url of ["https://", "http://", "https:// example.test/a"]) {
+    assert.equal(openerCommand(url, "linux"), undefined, `${JSON.stringify(url)} is not opened`)
   }
 })
 

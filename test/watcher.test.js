@@ -1676,6 +1676,52 @@ test("the watcher acts on the turn-end and permission events, and on no other", 
   }
 })
 
+test("the dialog serves an earlier build's records, and the record's internal form stays out of the answer", async () => {
+  const tsA = message(60)
+  const tsB = message(120)
+  const linkA = permalinkOf("C0PLATFORM", tsA)
+  const linkB = permalinkOf("C0PLATFORM", tsB)
+  const issue = "https://github.com/empiric-earth/almeida-slack-intake/issues/41"
+  const h = harness({
+    servers: [NEXAR],
+    pages: { "tok-nexar": rowsPages([hitRow("C0PLATFORM", tsA, "#platform-help")]) },
+  })
+  try {
+    const flaggedAt = new Date(h.now()).toISOString()
+    // An earlier build's record that already has its issue, and one held by a
+    // permission request: neither is a reissue candidate, so its row is the
+    // only way the user reaches the session it holds.
+    const records = {
+      [linkA]: earlierRecord({ link: linkA, ts: tsA, sessionID: "ses_old_a", flaggedAt, issueUrl: issue, issueNumber: 41 }),
+      [linkB]: earlierRecord({ link: linkB, ts: tsB, sessionID: "ses_old_b", flaggedAt, permissionPending: true }),
+    }
+    h.setItems(structuredClone(records))
+    h.setSeen([linkA, linkB])
+    h.sessions.set("ses_old_a", { time: quietTimes(h.now()) })
+    h.sessions.set("ses_old_b", { time: quietTimes(h.now()) })
+
+    const served = (await h.watcher.items()).items
+    assert.deepEqual(
+      served.map((record) => record.permalink).sort(),
+      [linkA, linkB].sort(),
+      "both earlier records are served, so their rows are in the dialog",
+    )
+    for (const item of served) {
+      assert.ok(!("recordFormat" in item), "the record's internal form stays out of the answer")
+    }
+    const held = served.find((item) => item.permalink === linkB)
+    assert.equal(held.permissionPending, true, "a held record reads as waiting")
+    assert.equal(held.issueUrl, null, "and shows no issue yet")
+
+    await h.watcher.poll()
+
+    assert.equal(h.created.length, 0, "neither record is reissued: one has its issue, the other is held")
+    assert.deepEqual(h.items(), records, "and both records are left as they are")
+  } finally {
+    h.clean()
+  }
+})
+
 test("a poll reissues one still-flagged record an earlier build left with no issue, once", async () => {
   const tsA = message(60)
   const tsB = message(120)
@@ -1715,11 +1761,15 @@ test("a poll reissues one still-flagged record an earlier build left with no iss
     for (const id of ["ses_old_a", "ses_old_b", "ses_old_c", "ses_old_d"]) {
       h.sessions.set(id, { time: quietTimes(h.now()) })
     }
+    const served = (await h.watcher.items()).items
     assert.deepEqual(
-      (await h.watcher.items()).items.map((record) => record.permalink),
-      [linkD],
-      "the dialog serves this build's own records alone, so the earlier build's rows stay out of it",
+      served.map((record) => record.permalink).sort(),
+      [linkA, linkB, linkC, linkD].sort(),
+      "every item record is served, an earlier build's rows included",
     )
+    for (const item of served) {
+      assert.ok(!("recordFormat" in item), "the record's internal form stays out of the answer")
+    }
 
     await h.watcher.poll()
 

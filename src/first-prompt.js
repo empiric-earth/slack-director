@@ -7,12 +7,13 @@
 // the first turn may make: one issue create and one comment.
 
 /**
- * The first prompt of an item session: apply the skill's scope rules, find or
- * create the intake issue for the permalink, read the thread, and post the
- * findings and next steps once. Every flagged message gets an issue; a message
- * the scope rules leave out gets one that holds the permalink fields and its
- * category only. The category is decided from what this prompt already carries,
- * so a session reads nothing to place a message it leaves out.
+ * The first prompt of an item session: find the intake issue for the permalink
+ * — creating one only when no issue carries it, before either branch writes —
+ * apply the skill's scope rules, read the thread, and post the findings and
+ * next steps once. Every flagged message gets an issue; a message the scope
+ * rules leave out gets the one the lookup found or made, holding the permalink
+ * fields and its category only. The category is decided from what this prompt
+ * already carries, so a session reads nothing to place a message it leaves out.
  */
 export function itemFirstPrompt(hit, intakeRepo) {
   return [
@@ -26,13 +27,13 @@ export function itemFirstPrompt(hit, intakeRepo) {
     "",
     "Load the `slack-director` skill and follow it.",
     "",
-    "The flag is the user's own triage, so a flagged message counts as a request to the user. Apply the skill's scope rules first, and decide the category without reading anything: the permalink, the workspace and the channel above are what tell it. The skill's out-of-scope categories are customer or production data, Slack Connect or an external channel, and a category the permalink, the workspace and the channel do not tell; only a message in one of them is left out of the investigation. A message you leave out still gets its issue: create one that holds the permalink fields and the category only, with no paraphrase of its content, and post one comment that says it is out of scope and asks the user. Read no thread and no channel for it, in any workspace: not to confirm the category, and not to look for a message Slack does not hold.",
+    "The flag is the user's own triage, so a flagged message counts as a request to the user.",
     "",
-    "Otherwise find the intake issue in that repo whose `permalink` field equals the permalink above, among open and closed issues alike, and create one in the skill's issue format only when no issue carries it. Write a paraphrase and the permalink only, never verbatim Slack text.",
+    "Find the intake issue first, before any other write: look in that repo for the issue whose `permalink` field equals the permalink above, among open and closed issues alike, and create one in the skill's issue format only when no issue carries it. One issue per permalink is what keeps a later turn — a reissue included — from making a second one for the same message, so no branch below creates an issue of its own.",
     "",
-    "Read that message's thread with the Slack read tools and investigate, read-only.",
+    "Then apply the skill's scope rules, and decide the category without reading anything: the permalink, the workspace and the channel above are what tell it. The skill's out-of-scope categories are customer or production data, Slack Connect or an external channel, and a category the permalink, the workspace and the channel do not tell; only a message in one of them is left out of the investigation. A message you leave out still gets its issue — the one the lookup found or made — which holds the permalink fields and the category only, with no paraphrase of its content, and one comment that says it is out of scope and asks the user. Read no thread and no channel for it, in any workspace: not to confirm the category, and not to look for a message Slack does not hold.",
     "",
-    "Post the findings and proposed next steps as one comment on the issue.",
+    "Otherwise write a paraphrase and the permalink only, never verbatim Slack text; read that message's thread with the Slack read tools and investigate, read-only; and post the findings and proposed next steps as one comment on the issue.",
     "",
     "Make no GitHub write but that one issue create and that one comment: no issue edit, label, close or reopen, and no second comment. A correction goes into the one comment.",
     "",

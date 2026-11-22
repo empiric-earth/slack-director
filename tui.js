@@ -221,7 +221,12 @@ async function setup(context, spawnProcess) {
       context.ui.router.navigate({ type: "session", sessionID: item.sessionID })
     }
 
-    /** Open a URL with the operating system's own opener; nothing else is opened. */
+    /**
+     * Open a URL with the operating system's own opener; nothing else is opened.
+     * An opener that cannot start reports it asynchronously, on the child's own
+     * `error` event, so that failure is shown as well: otherwise the keys look
+     * like they did nothing at all.
+     */
     function openUrl(url) {
       const command = openerCommand(url)
       if (!command) {
@@ -230,7 +235,7 @@ async function setup(context, spawnProcess) {
       }
       try {
         const child = spawnProcess(command.command, command.args, { detached: true, stdio: "ignore" })
-        child.on("error", () => {})
+        child.on("error", (error) => toast(`${PAGE_TITLE}: ${messageOf(error)}`, "error"))
         child.unref()
       } catch (error) {
         toast(`${PAGE_TITLE}: ${messageOf(error)}`, "error")

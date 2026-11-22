@@ -55,28 +55,31 @@ write to another tracker.
 The first prompt names the item: its permalink, its workspace, its channel and
 its message timestamp, and the intake repo. The flag is the user's own triage,
 so a flagged message counts as a request to the user. Every flagged message gets
-its issue. The first turn applies the scope rules below first, and then runs
-these steps in this order:
+its issue. The first turn runs these steps in this order:
 
 1. **Apply the scope rules.** Decide the category without reading anything: the
    permalink, the workspace and the channel are what tell it. The out-of-scope
    categories are customer or production data, Slack Connect or an external
    channel, and a category the permalink, the workspace and the channel do not
-   tell. A message in one of them is left out of the investigation, and it still
-   gets its issue: create an issue that holds the permalink fields and the
-   category only, with no paraphrase of the message's content, post one comment
-   that says it is out of scope and asks the user, and read no thread and no
-   channel — not to confirm the category, and not to look for a message Slack
-   does not hold.
-2. **Find or create the intake issue.** List every page of the intake repo's
-   issues once, open and closed alike, and look for the one whose `permalink`
-   field equals the item's permalink. That permalink is the issue's key. Create
-   one in the format below only when no issue carries it.
-3. **Read the thread and investigate.** Read the flagged message's thread by
-   the channel and the timestamp in the prompt, through the Slack read tools.
-   Read only: change nothing.
-4. **Post the findings and proposed next steps** as one comment on the issue.
-5. **Reply with the same findings and next steps**, and end the reply with
+   tell. A message in one of them is left out of the investigation.
+2. **Find the intake issue before you create one.** List every page of the
+   intake repo's issues once, open and closed alike, and look for the one whose
+   `permalink` field equals the item's permalink. That permalink is the issue's
+   key. Create an issue only when no issue carries it, and in the form the
+   branch below names: the permalink fields and the category only when the
+   message is left out, the format below otherwise. The lookup comes before the
+   create in either branch, so a reply that was lost, or a reissue, never makes
+   a second issue for one message.
+3. **Leave a message the rules leave out alone.** Its issue — the one the lookup
+   found or made — holds the permalink fields and the category only, with no
+   paraphrase of the message's content. Post one comment that says it is out of
+   scope and asks the user, and read no thread and no channel — not to confirm
+   the category, and not to look for a message Slack does not hold.
+4. **Otherwise read the thread and investigate.** Read the flagged message's
+   thread by the channel and the timestamp in the prompt, through the Slack read
+   tools. Read only: change nothing.
+5. **Post the findings and proposed next steps** as one comment on the issue.
+6. **Reply with the same findings and next steps**, and end the reply with
    exactly these two lines:
 
    ```

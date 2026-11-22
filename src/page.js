@@ -292,14 +292,38 @@ export function todayText(status) {
 
 /**
  * The command the operating system's own opener runs for a URL, or undefined
- * for anything that is not an http or https address. The TUI plugin API has no
- * URL opener of its own.
+ * for anything that is not an http or https address. The opener is given the
+ * URL parser's own form of the string, and it is spawned without a shell: on
+ * Windows `cmd` is never used, because it re-reads `&`, `^` and `|` inside a
+ * URL as its own operators and would run whatever a reply put there. `rundll32`
+ * hands the address to the registered protocol handler as one argument, with no
+ * shell to re-parse it. The TUI plugin API has no URL opener of its own.
  */
 export function openerCommand(url, platform = process.platform) {
-  if (typeof url !== "string" || !/^https?:\/\//i.test(url)) return undefined
-  if (platform === "darwin") return { command: "open", args: [url] }
-  if (platform === "win32") return { command: "cmd", args: ["/c", "start", "", url] }
-  return { command: "xdg-open", args: [url] }
+  const address = webAddress(url)
+  if (!address) return undefined
+  if (platform === "darwin") return { command: "open", args: [address] }
+  if (platform === "win32") return { command: "rundll32", args: ["url.dll,FileProtocolHandler", address] }
+  return { command: "xdg-open", args: [address] }
+}
+
+/**
+ * An http or https address as the URL parser writes it, or undefined for
+ * anything else: another scheme, or text the parser refuses. The parser's form
+ * holds only what a URL may hold — a quote, a space or a line break in the text
+ * comes back percent-encoded or dropped — so no text a reply carries reaches an
+ * opener as it stands.
+ */
+function webAddress(url) {
+  if (typeof url !== "string") return undefined
+  let parsed
+  try {
+    parsed = new URL(url)
+  } catch {
+    return undefined
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined
+  return parsed.href
 }
 
 /** A field's current value as the settings dialog's prompt offers it to edit. */

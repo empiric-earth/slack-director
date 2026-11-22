@@ -43,7 +43,7 @@ import { inWorkHours } from "./work-hours.js"
 /** The agent a refresh session runs on. */
 export const REFRESH_AGENT = "slack-director-refresh"
 
-/** The record form this build writes; `items()` serves these and no others. */
+/** The record form this build writes; a record without it is an earlier build's. */
 export const RECORD_FORMAT = 2
 
 /**
@@ -719,10 +719,15 @@ export function createWatcher({
     return { ...stored, today: await today() }
   }
 
-  /** Every item record of this build's form, as the RPC contract serves them. */
+  /**
+   * Every item record, as the RPC contract serves them. An earlier build's
+   * record is served too: its row is how the user opens the session it holds,
+   * and the ones that need recovery are the ones an earlier build left. The
+   * record's internal form is read here and not served.
+   */
   async function items() {
     const records = Object.values(await readItems()).filter(
-      (record) => record?.recordFormat === RECORD_FORMAT,
+      (record) => record && typeof record.permalink === "string",
     )
     return { items: records.map(itemOfRecord) }
   }

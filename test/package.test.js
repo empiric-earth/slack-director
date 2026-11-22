@@ -341,7 +341,7 @@ test("the first prompt and the skill carry no issue-less path", () => {
   assert.match(prompt, /create one that holds the permalink fields and the category only/i, "the out-of-scope form")
 })
 
-test("the first prompt and the skill decide the category without reading, and read nothing for a message left out", () => {
+test("criterion 15: the first prompt and the skill carry the out-of-scope rule, its read-free decision, the issue form and the one comment", () => {
   const hit = {
     permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
     workspace: "slack_nexar",
@@ -354,9 +354,27 @@ test("the first prompt and the skill decide the category without reading, and re
     ["the skill", read(SKILL_REL)],
   ]) {
     const flat = text.replace(/\s+/g, " ")
+    assert.match(flat, /customer or production data/i, `${name} names customer or production data`)
+    assert.match(flat, /Slack Connect or an external channel/i, `${name} names Slack Connect or an external channel`)
+    assert.match(
+      flat,
+      /category the permalink, the workspace and the channel do not tell/i,
+      `${name} names the category the three sources do not tell`,
+    )
     assert.match(flat, /decide the category without reading anything/i, `${name} decides the category without a read`)
     assert.match(flat, /read no thread and no channel/i, `${name} reads nothing for a message it leaves out`)
     assert.match(flat, /not to look for a message Slack does not hold/i, `${name} covers a message Slack does not hold`)
+    assert.match(
+      flat,
+      /holds the permalink fields and the category only/i,
+      `${name} gives a left-out message the issue that holds the permalink fields and the category only`,
+    )
+    assert.match(flat, /no paraphrase/i, `${name} forbids a paraphrase for it`)
+    assert.match(
+      flat,
+      /one comment that says it is out of scope and asks the user/i,
+      `${name} gives it one comment that says it is out of scope and asks the user`,
+    )
   }
 })
 

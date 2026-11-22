@@ -59,14 +59,15 @@ its issue. The first turn applies the scope rules below first, and then runs
 these steps in this order:
 
 1. **Apply the scope rules.** Decide the category without reading anything: the
-   permalink, the workspace, the channel and the search result are what tell it.
-   A message in one of the out-of-scope categories — customer or production
-   data, Slack Connect or an external channel — or one whose category they do
-   not tell is left out of the investigation: create an issue that holds the
-   permalink fields and the category only, with no paraphrase of the message's
-   content, post one comment that says it is out of scope and asks the user, and
-   read no thread and no channel — not to confirm the category, and not to look
-   for a message Slack does not hold.
+   permalink, the workspace and the channel are what tell it. The out-of-scope
+   categories are customer or production data, Slack Connect or an external
+   channel, and a category the permalink, the workspace and the channel do not
+   tell. A message in one of them is left out of the investigation, and it still
+   gets its issue: create an issue that holds the permalink fields and the
+   category only, with no paraphrase of the message's content, post one comment
+   that says it is out of scope and asks the user, and read no thread and no
+   channel — not to confirm the category, and not to look for a message Slack
+   does not hold.
 2. **Find or create the intake issue.** List every page of the intake repo's
    issues once, open and closed alike, and look for the one whose `permalink`
    field equals the item's permalink. That permalink is the issue's key. Create
@@ -102,9 +103,9 @@ The intake repo holds requests to the user, and nothing else.
 - Slack Connect and external channels are out of scope. Do not read them, and
   do not paraphrase anything from them; their issue holds the permalink fields
   and the category only.
-- A message whose category the permalink, the workspace, the channel and the
-  search result do not tell is out of scope too: its `category` field says the
-  category cannot be told, and nothing is read to look for the message.
+- A message whose category the permalink, the workspace and the channel do not
+  tell is out of scope too: its `category` field says the category cannot be
+  told, and nothing is read to look for the message.
 - Never post a decision or a commitment, never edit or delete a Slack message,
   and never write to another person's intake repo.
 

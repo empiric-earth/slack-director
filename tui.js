@@ -284,9 +284,9 @@ async function setup(context, spawnProcess) {
       }
     }
 
-    /** Open the overview as a floating dialog over the current screen. */
-    function openOverview() {
-      dropOverviewLayer = context.keymap.layer(() => ({
+    /** The overview's own keys, as one modal layer its dialog owns. */
+    function overviewKeys() {
+      return context.keymap.layer(() => ({
         mode: "modal",
         priority: 20,
         commands: [
@@ -331,10 +331,18 @@ async function setup(context, spawnProcess) {
           { id: `${COMMAND_ID}.down`, title: "Move down", bind: "down", run: () => move(1) },
         ],
       }))
-      context.ui.dialog.show(
-        () => dialogView({ renderer, rows, status, selected, now: Date.now, theme: theme() }),
-        dropLayer,
-      )
+    }
+
+    /** Open the overview as a floating dialog over the current screen. */
+    function openOverview() {
+      // The dialog's own render registers the keys, so the host removes them
+      // when it disposes the dialog: every dialog pushes the modal mode, so a
+      // layer registered anywhere else would answer another dialog's keys and
+      // the prompt's.
+      context.ui.dialog.show(() => {
+        if (dropOverviewLayer === null) dropOverviewLayer = overviewKeys()
+        return dialogView({ renderer, rows, status, selected, now: Date.now, theme: theme() })
+      }, dropLayer)
       context.ui.dialog.set({ size: DIALOG_SIZE, centered: true })
     }
 

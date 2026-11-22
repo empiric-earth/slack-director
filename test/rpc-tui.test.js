@@ -240,6 +240,12 @@ const drawnLines = (view) =>
 /** The modal keymap layer the dialog registered. */
 const modalLayer = (layers) => layers.find((layer) => layer.mode === "modal")
 
+/**
+ * The host renders a shown dialog once, and the dialog registers its own key
+ * layer from that render; the layer lives and dies with the dialog.
+ */
+const renderDialog = (dialogs) => dialogs.at(-1).render()
+
 test("the RPC contract defines every method and the updated event with an input and an output schema", () => {
   assert.equal(SlackDirectorRpc.id, "slack-director")
   assert.deepEqual(Object.keys(SlackDirectorRpc.methods).sort(), [
@@ -329,6 +335,7 @@ test("the Slack Director entry opens a floating dialog with its own modal keys",
   const { context, layers, dialogs, dialogSettings, calls, navigations } = fakeTuiContext()
   await tui.setup(context)
   await layers[0].commands[0].run()
+  renderDialog(dialogs)
 
   assert.equal(dialogs.length, 1, "one floating dialog is open")
   assert.deepEqual(dialogSettings, [{ size: "xlarge", centered: true }], "the dialog takes the layout's own size")
@@ -387,9 +394,10 @@ test("up and down move the marker while the dialog stays open", () => {
 
 test("the keys act on the row the marker marks", async () => {
   const spawned = []
-  const { context, layers, opened, navigations } = fakeTuiContext()
+  const { context, layers, dialogs, opened, navigations } = fakeTuiContext()
   await recordedTui(spawned).setup(context)
   await layers[0].commands[0].run()
+  renderDialog(dialogs)
 
   const modal = modalLayer(layers)
   const command = (bind) => modal.commands.find((entry) => entry.bind === bind)
@@ -409,6 +417,7 @@ test("the keys act on the row the marker marks", async () => {
   const second = fakeTuiContext()
   await recordedTui(spawned).setup(second.context)
   await second.layers[0].commands[0].run()
+  renderDialog(second.dialogs)
   const secondModal = modalLayer(second.layers)
   secondModal.commands.find((entry) => entry.bind === "down").run()
   secondModal.commands.find((entry) => entry.bind === "i").run()
@@ -418,9 +427,10 @@ test("the keys act on the row the marker marks", async () => {
 })
 
 test("the dialog's help line is the layout's own, and its keys are the ones it names", async () => {
-  const { context, layers } = fakeTuiContext()
+  const { context, layers, dialogs } = fakeTuiContext()
   await tui.setup(context)
   await layers[0].commands[0].run()
+  renderDialog(dialogs)
   const modal = modalLayer(layers)
   const keys = modal.commands.map((command) => command.bind)
   for (const key of ["up", "down", "return", "i", "s", "r", "e"]) {
@@ -438,21 +448,23 @@ test("the dialog's help line is the layout's own, and its keys are the ones it n
 })
 
 test("r polls now through the contract", async () => {
-  const { context, layers, calls } = fakeTuiContext()
+  const { context, layers, dialogs, calls } = fakeTuiContext()
   await tui.setup(context)
   await layers[0].commands[0].run()
+  renderDialog(dialogs)
   modalLayer(layers).commands.find((command) => command.bind === "r").run()
   await new Promise((resolve) => setImmediate(resolve))
   assert.ok(calls.includes("pollNow"), "r calls pollNow")
 })
 
 test("e on the dialog opens the settings dialog", async () => {
-  const { context, layers, selections, prompts, toasts, cleared } = fakeTuiContext({
+  const { context, layers, dialogs, selections, prompts, toasts, cleared } = fakeTuiContext({
     selectAnswer: "poll_seconds",
     promptAnswer: "90",
   })
   await tui.setup(context)
   await layers[0].commands[0].run()
+  renderDialog(dialogs)
   modalLayer(layers).commands.find((command) => command.bind === "e").run()
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(cleared.length > 0, true, "the overview dialog closes behind the settings dialog")
@@ -470,10 +482,36 @@ test("e on the dialog opens the settings dialog", async () => {
   assert.equal(toasts.at(-1).variant, "success")
 })
 
+test("the overview's keys are registered by its own dialog, so no other dialog answers them", async () => {
+  const { context, layers, dialogs, dropped } = fakeTuiContext()
+  await tui.setup(context)
+  const binds = () =>
+    layers
+      .filter((layer) => !dropped.includes(layer))
+      .flatMap((layer) => (layer.commands ?? []).map((command) => command.bind))
+      .filter(Boolean)
+  assert.deepEqual(binds(), [], "setup registers no key of its own")
+
+  // Another dialog is open — the TUI's own settings, the session list — and the
+  // plugin answers none of its keys.
+  await layers[0].commands[1].run()
+  assert.deepEqual(binds(), [], "the settings entry registers no key")
+
+  await layers[0].commands[0].run()
+  assert.deepEqual(binds(), [], "opening the overview registers no key outside its dialog")
+  renderDialog(dialogs)
+  assert.ok(binds().includes("e"), "the dialog's own render registers the overview's keys")
+
+  dialogs.at(-1).onClose()
+  assert.deepEqual(binds(), [], "and the host's close takes them away with the dialog")
+  assert.equal(dropped.length, 1)
+})
+
 test("e on the dialog drops the overview's own keys, so the settings dialog's keys reach it", async () => {
-  const { context, layers, dropped, selections } = fakeTuiContext({ selectAnswer: "poll_seconds", promptAnswer: "90" })
+  const { context, layers, dialogs, dropped, selections } = fakeTuiContext({ selectAnswer: "poll_seconds", promptAnswer: "90" })
   await tui.setup(context)
   await layers[0].commands[0].run()
+  renderDialog(dialogs)
   assert.equal(dropped.length, 0, "the overview's keys hold while its dialog is open")
   modalLayer(layers).commands.find((command) => command.bind === "e").run()
   await new Promise((resolve) => setImmediate(resolve))
@@ -483,6 +521,7 @@ test("e on the dialog drops the overview's own keys, so the settings dialog's ke
   const closed = fakeTuiContext()
   await tui.setup(closed.context)
   await closed.layers[0].commands[0].run()
+  renderDialog(closed.dialogs)
   closed.dialogs.at(-1).onClose()
   assert.equal(closed.dropped.length, 1, "the host's own close drops the overview's keys too")
 })
@@ -509,13 +548,14 @@ test("the item map follows the contract's updated event", async () => {
 })
 
 test("a rejected call becomes a toast rather than a crash", async () => {
-  const { context, toasts, layers } = fakeTuiContext({ rejection: new Error("RPC is unavailable: slack-director") })
+  const { context, toasts, layers, dialogs } = fakeTuiContext({ rejection: new Error("RPC is unavailable: slack-director") })
   await tui.setup(context)
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(toasts.length, 1)
   assert.match(toasts[0].message, /RPC is unavailable/)
   assert.equal(toasts[0].variant, "error")
   await layers[0].commands[0].run()
+  renderDialog(dialogs)
   assert.equal(toasts.length, 2, "opening the dialog reports the failure instead of throwing")
 })
 

@@ -138,19 +138,55 @@ export function askerName(asker) {
   return text.replace(/\s*[<(][^>)]*[>)]\s*$/, "").trim()
 }
 
+/** Whether the record already names the intake issue its title comes from. */
+function hasIssue(item) {
+  if (typeof item?.issueNumber === "number") return true
+  return typeof item?.issueUrl === "string" && item.issueUrl !== ""
+}
+
 /**
- * The ITEM cell: the session's own title. The issue title is
- * `<asker> — <paraphrase>`, so a leading `<asker> — ` comes off and ASKER is
+ * The asker an item's own title carries, for a record an earlier build left
+ * without one. The issue's title is `<asker> — <short paraphrase>`, and an
+ * item's title becomes the issue's own title exactly when its first turn has
+ * named the issue; so the part before the first ` — ` of a titled item is the
+ * asker. A record that names no issue still holds the neutral title the watcher
+ * gave it — `Flagged message in <channel> — …`, whose dash separates the channel
+ * from the asker or the flag's own time — so that title is read as carrying no
+ * asker.
+ */
+function titleAsker(item) {
+  if (!hasIssue(item)) return { raw: "", name: "" }
+  const title = typeof item?.title === "string" ? item.title : ""
+  const at = title.indexOf(" — ")
+  if (at <= 0) return { raw: "", name: "" }
+  const raw = title.slice(0, at).trim()
+  return { raw, name: askerName(raw) }
+}
+
+/**
+ * The ASKER cell: the name part of the asker the search reported, so the id or
+ * the address beside it is not shown — or, for a record an earlier build left
+ * without an asker, the asker its own title carries.
+ */
+export function itemAsker(item) {
+  const stored = askerName(item?.asker)
+  if (stored !== "") return stored
+  return titleAsker(item).name
+}
+
+/**
+ * The ITEM cell: the session's own title without the asker's part, so ASKER is
  * not shown twice. The asker the search reported may carry an id or an address
- * the session left out of the title, so the name part comes off too.
+ * the session left out of the title, and a record an earlier build left may
+ * carry no asker at all, so every form the record holds is tried.
  */
 export function itemTitle(item) {
   const title = typeof item?.title === "string" ? item.title : ""
-  const asker = typeof item?.asker === "string" ? item.asker.trim() : ""
-  if (asker === "" || title === "") return title
-  const name = askerName(asker)
-  const forms = name !== "" && name !== asker ? [asker, name] : [asker]
-  for (const form of forms) {
+  if (title === "") return title
+  const stored = typeof item?.asker === "string" ? item.asker.trim() : ""
+  const fromTitle = stored === "" ? titleAsker(item) : { raw: "", name: "" }
+  for (const form of new Set([stored, askerName(stored), fromTitle.raw, fromTitle.name])) {
+    if (form === "") continue
     const prefix = `${form} — `
     if (title.startsWith(prefix)) return title.slice(prefix.length)
   }
@@ -179,7 +215,7 @@ export function rowText(item, state, options = {}) {
   return columnsText([
     cell(COLUMNS.marker, options.selected ? "▸" : " "),
     cell(COLUMNS.state, `${GLYPH[state] ?? " "} ${state}`),
-    cell(COLUMNS.asker, clip(item.asker, widthBefore(COLUMNS.asker, COLUMNS.item))),
+    cell(COLUMNS.asker, clip(itemAsker(item), widthBefore(COLUMNS.asker, COLUMNS.item))),
     cell(COLUMNS.item, clip(itemTitle(item), widthBefore(COLUMNS.item, COLUMNS.issue))),
     cell(COLUMNS.issue, clip(issueLabel(item), widthBefore(COLUMNS.issue, COLUMNS.channel))),
     cell(COLUMNS.channel, clip(item.channel, widthBefore(COLUMNS.channel, COLUMNS.age))),

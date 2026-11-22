@@ -20,6 +20,7 @@ import {
   fieldValue,
   headerText,
   issueLabel,
+  itemAsker,
   itemTitle,
   moveSelection,
   openerCommand,
@@ -207,9 +208,51 @@ test("the ITEM cell drops a leading asker, so ASKER is not shown twice", () => {
   assert.equal(itemTitle(item()), "Access to the staging dashboards", "a title with no prefix is unchanged")
   assert.equal(
     itemTitle(item({ asker: "", title: "Someone — a paraphrase" })),
-    "Someone — a paraphrase",
-    "with no asker nothing is dropped",
+    "a paraphrase",
+    "a record with no asker takes the one its own title carries",
   )
+})
+
+test("a record an earlier build left without an asker shows the asker its title carries", () => {
+  const earlier = item({
+    asker: "",
+    title: "André Almeida — note-to-self to verify the dialog",
+    issueNumber: 34,
+    issueUrl: "https://github.com/empiric-earth/almeida-slack-intake/issues/34",
+  })
+  assert.equal(itemAsker(earlier), "André Almeida", "the ASKER cell is not left empty")
+  assert.equal(itemTitle(earlier), "note-to-self to verify the dialog", "and ITEM keeps no asker prefix")
+  const row = rowText(earlier, "waiting", { now: NOW })
+  assert.equal(row.slice(COLUMNS.asker, COLUMNS.item).trimEnd(), "André Almeida")
+  assert.equal(row.slice(COLUMNS.item, COLUMNS.item + 12), "note-to-self")
+  assert.equal(row[COLUMNS.item - 1], " ", "at least one space separates ASKER and ITEM")
+})
+
+test("the ASKER cell drops the id or the address the search reported beside the name", () => {
+  const idle = item({
+    asker: "André Almeida <aalmeida@empiricearth.com>",
+    title: "André Almeida — note-to-self to verify the dialog",
+    issueNumber: 38,
+    openedAt: minutes(60 * 5),
+  })
+  assert.equal(itemAsker(idle), "André Almeida")
+  assert.equal(itemTitle(idle), "note-to-self to verify the dialog")
+  const row = rowText(idle, "idle", { now: NOW })
+  assert.equal(row.slice(COLUMNS.asker, COLUMNS.item).trimEnd(), "André Almeida")
+})
+
+test("a record whose first turn has named no issue keeps its neutral title and shows no asker", () => {
+  const fresh = item({
+    asker: "",
+    title: "Flagged message in DM — 1795263523.511709",
+    issueNumber: null,
+    issueUrl: null,
+  })
+  assert.equal(itemAsker(fresh), "", "the neutral title's dash is not an asker separator")
+  assert.equal(itemTitle(fresh), "Flagged message in DM — 1795263523.511709")
+  const row = rowText(fresh, "waiting", { now: NOW })
+  assert.equal(row.slice(COLUMNS.asker, COLUMNS.item), " ".repeat(COLUMNS.item - COLUMNS.asker))
+  assert.equal(row.slice(COLUMNS.item, COLUMNS.item + 9), "Flagged m")
 })
 
 test("the ITEM cell drops the asker's name when the search reported an id or an address beside it", () => {

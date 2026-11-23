@@ -1,6 +1,6 @@
 // The watcher: one poll finds the messages the user flagged and gives each new
-// one a session, and the item map holds what the overview and the settings
-// dialog show.
+// one a session, and the item map holds what the overview dialog and the
+// settings dialog show.
 //
 // A poll reads the config again, does nothing outside the configured work
 // hours, resolves each Slack MCP server's own OAuth credential, searches that
@@ -10,6 +10,13 @@
 // same poll; the claim and commit files are what keep one flagged message to
 // one prompted session.
 //
+// A record an earlier build left with no issue and whose message is still
+// flagged is reissued once, through the same claim files in a `reissue/`
+// subdirectory: the search treats its permalink as unseen, so the hit is
+// established as the tool's own result, and the record is replaced in place
+// only when the earlier session is quiet by its persisted run times. A commit
+// whose holder stopped before the replacement is reconciled without a prompt.
+//
 // A session's first turn ends as an event, so the watcher follows the event
 // stream for its own item sessions: it writes the item map and the session
 // title from the reply's two fixed lines, and records a pending permission
@@ -17,12 +24,13 @@
 // end arrives as `session.execution.succeeded`, `.failed` or `.interrupted`.
 //
 // The completion binds to the first execution: only a turn of a session this
-// instance started may complete the item, and only the first one to end. A turn
-// that ended in error, a later turn, and a turn whose end no instance saw (a
-// restart) all leave the item in the pessimistic waiting state its record was
-// written with. The event carries no execution identity, so the binding is the
-// set of sessions this instance started, held for the instance's lifetime: a
-// new instance accepts no first turn it did not start.
+// instance started may complete the item, and only the first one to end, and
+// only when its reply names the issue it made. A turn that ended in error, a
+// turn whose reply names no issue, a later turn, and a turn whose end no
+// instance saw (a restart) all leave the item in the pessimistic waiting state
+// its record was written with. The event carries no execution identity, so the
+// binding is the set of sessions this instance started, held for the instance's
+// lifetime: a new instance accepts no first turn it did not start.
 import { randomUUID } from "node:crypto"
 import { permalinkHash, STALE_MS } from "./claims.js"
 import { DEFAULT_POLL_SECONDS } from "./config.js"
@@ -34,6 +42,9 @@ import { inWorkHours } from "./work-hours.js"
 
 /** The agent a refresh session runs on. */
 export const REFRESH_AGENT = "slack-director-refresh"
+
+/** The record form this build writes; a record without it is an earlier build's. */
+export const RECORD_FORMAT = 2
 
 /**
  * How long one instance's lease keeps another from polling. An instance's own
@@ -63,6 +74,19 @@ const TURN_ENDED = {
 }
 
 const messageOf = (error) => (error instanceof Error ? error.message : String(error))
+
+/**
+ * The reissue store of a watcher built without one: it claims nothing, so a
+ * caller that holds no reissue directory reissues nothing. The plugin passes
+ * the real one, over the `reissue/` subdirectory of its claims directory.
+ */
+const NO_REISSUE = {
+  claim: () => null,
+  removeClaim: () => {},
+  commit: async () => false,
+  listCommits: () => [],
+  removeStaleTemporaries: () => {},
+}
 
 const emptyToday = () => ({ flagged: 0, nextStepsPosted: 0, skipped: 0 })
 
@@ -125,6 +149,7 @@ export function createWatcher({
   staleMs = STALE_MS,
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
   inHours = inWorkHours,
+  reissue = NO_REISSUE,
 }) {
   const owner = randomUUID()
   // The item sessions this instance started and whose first turn it is still
@@ -254,6 +279,156 @@ export function createWatcher({
     claims.removeStaleTemporaries()
   }
 
+  /**
+   * The records an earlier build left with no issue: this build's own form
+   * carries `recordFormat`, so a record without it is an earlier build's, and
+   * one whose message is still flagged is reissued once.
+   */
+  async function reissueCandidates() {
+    const candidates = new Map()
+    for (const record of Object.values(await readItems())) {
+      if (!record || typeof record.permalink !== "string") continue
+      if (record.recordFormat !== undefined) continue
+      if (typeof record.issueUrl === "string" && record.issueUrl !== "") continue
+      candidates.set(record.permalink, record)
+    }
+    return candidates
+  }
+
+  /** Whether an error means the session is gone rather than unreadable. */
+  const notFound = (error) =>
+    error?.code === "NOT_FOUND" || /not found|no such session/i.test(messageOf(error))
+
+  /**
+   * Whether an earlier build's session is quiet, by the run times every process
+   * reads: no busy period that has not ended, and no change for the stale age.
+   * A session that is gone is quiet too. Anything else is an unknown outcome —
+   * the earlier writer may still be writing — so the record is left alone.
+   */
+  async function quietSession(sessionID, record) {
+    if (record?.permissionPending === true) {
+      return { quiet: false, reason: "a permission request is pending" }
+    }
+    if (typeof sessionID !== "string" || sessionID === "") {
+      return { quiet: false, reason: "the record names no session" }
+    }
+    let times
+    try {
+      const found = await session.get({ sessionID })
+      if (found === undefined || found === null) return { quiet: true, reason: "the session is gone" }
+      times = found.time
+    } catch (error) {
+      if (notFound(error)) return { quiet: true, reason: "the session is gone" }
+      return { quiet: false, reason: `the session was not read: ${messageOf(error)}` }
+    }
+    if (!times || typeof times !== "object") return { quiet: false, reason: "the session's run times were not read" }
+    if (times.busy !== undefined && times.busy !== null) {
+      if (!(typeof times.idle === "number" && times.idle >= times.busy)) {
+        return { quiet: false, reason: `a busy period that began at ${times.busy} has not ended` }
+      }
+    }
+    if (typeof times.updated !== "number") return { quiet: false, reason: "the session's update time was not read" }
+    if (now() - times.updated <= staleMs) {
+      return { quiet: false, reason: `the session changed ${Math.round((now() - times.updated) / 1000)} s ago` }
+    }
+    return { quiet: true, reason: "the session is quiet" }
+  }
+
+  /** The hit fields an item record carries, as the first prompt takes them. */
+  const hitOfRecord = (record) => ({
+    permalink: record.permalink,
+    workspace: record.workspace,
+    channel: { id: record.channelID, label: record.channel },
+    ts: record.ts,
+    asker: record.asker,
+  })
+
+  /**
+   * Reissue one still-flagged record an earlier build left with no issue: read
+   * the record and the handoff, claim it in the reissue directory, create one
+   * session on the configured agent, commit the replacement, replace the record
+   * in place and send the first prompt. A commit another instance made first
+   * refuses this one, and its session is removed unprompted.
+   */
+  async function handleReissue(hit, config) {
+    const hash = permalinkHash(hit.permalink)
+    const record = (await readItems())[hit.permalink]
+    if (!record || record.recordFormat !== undefined || record.issueUrl) return
+    const handoff = await quietSession(record.sessionID, record)
+    if (!handoff.quiet) {
+      log(`reissue held for ${hit.permalink}: session ${record.sessionID} — ${handoff.reason}`)
+      return
+    }
+    const generation = reissue.claim(hash)
+    if (generation === null) return
+    const title = typeof record.title === "string" && record.title !== "" ? record.title : neutralTitle(hit)
+    let created
+    try {
+      created = await session.create({
+        title,
+        agent: config.session_agent,
+        location: { directory: config.session_directory },
+      })
+    } catch (error) {
+      reissue.removeClaim(hash, generation)
+      log(`reissue session create failed for ${hit.permalink}: ${messageOf(error)}`)
+      return
+    }
+    const next = {
+      ...record,
+      sessionID: created.id,
+      title,
+      // An earlier build's record carries no asker; the search result has it.
+      asker: record.asker || hit.asker || "",
+      firstTurnEndedAt: null,
+      firstTurnFailed: true,
+      permissionPending: false,
+      recordFormat: RECORD_FORMAT,
+    }
+    const committed = await reissue.commit(hash, {
+      ...next,
+      committedAt: new Date(now()).toISOString(),
+      replaces: record.sessionID,
+    })
+    if (!committed) {
+      // Another instance committed the reissue first: this session is unprompted.
+      await removeSession(created.id)
+      return
+    }
+    firstTurns.add(created.id)
+    await updateItem(next)
+    try {
+      await session.prompt({ sessionID: created.id, text: itemFirstPrompt(hitOfRecord(next), config.intake_repo) })
+    } catch (error) {
+      firstTurns.delete(created.id)
+      log(`reissue first prompt failed for ${hit.permalink}: ${messageOf(error)}`)
+    }
+  }
+
+  /**
+   * Reconcile the reissue commits: one older than the stale age whose record is
+   * still an earlier build's and still names the session it replaced becomes
+   * that commit's session, without a prompt. Any other record is left alone, so
+   * a replacement that succeeded is never overwritten.
+   */
+  async function reconcileReissues() {
+    for (const entry of reissue.listCommits()) {
+      if (now() - entry.mtimeMs <= staleMs) continue
+      const commit = entry.record
+      if (!commit || typeof commit.permalink !== "string" || typeof commit.sessionID !== "string") continue
+      const record = (await readItems())[commit.permalink]
+      if (!record || record.recordFormat !== undefined) continue
+      if (record.sessionID !== commit.replaces) continue
+      await updateItem({
+        ...record,
+        sessionID: commit.sessionID,
+        firstTurnFailed: true,
+        recordFormat: RECORD_FORMAT,
+      })
+    }
+    reissue.removeStaleTemporaries()
+  }
+
   /** One new hit: claim it, create one session, commit it, then record and prompt it. */
   async function handleHit(hit, config) {
     const hash = permalinkHash(hit.permalink)
@@ -264,7 +439,7 @@ export function createWatcher({
     try {
       created = await session.create({
         title,
-        agent: config.triage_agent,
+        agent: config.session_agent,
         location: { directory: config.session_directory },
       })
     } catch (error) {
@@ -288,6 +463,7 @@ export function createWatcher({
       firstTurnFailed: true,
       permissionPending: false,
       openedAt: null,
+      recordFormat: RECORD_FORMAT,
     }
     const committed = await claims.commit(hash, {
       sessionID: created.id,
@@ -341,7 +517,7 @@ export function createWatcher({
     await storage.set(KEYS.suspended, suspended)
   }
 
-  async function scanWorkspace(server, config, seen) {
+  async function scanWorkspace(server, config, seen, candidates) {
     const name = server.name
     const suspended = (await storage.get(KEYS.suspended)) ?? {}
     if (Object.hasOwn(suspended, name)) {
@@ -356,7 +532,9 @@ export function createWatcher({
       refreshed = true
       credential = (await refresh(name, config)) ?? credential
     }
-    const isSeen = (permalink) => seen.has(permalink)
+    // A candidate's permalink is treated as unseen, so the search establishes
+    // its hit as the tool's own result exactly as it does a new one.
+    const isSeen = (permalink) => seen.has(permalink) && !candidates.has(permalink)
     let search = await searchFlagged({
       fetch,
       url: server.url,
@@ -389,6 +567,12 @@ export function createWatcher({
     }
     const skipped = []
     for (const hit of search.hits) {
+      // A reissued hit is not one the scan left alone, so it is never counted
+      // in today's skipped.
+      if (candidates.has(hit.permalink)) {
+        await handleReissue({ ...hit, workspace: name }, config)
+        continue
+      }
       if (seen.has(hit.permalink)) {
         skipped.push(hit.permalink)
         continue
@@ -443,8 +627,10 @@ export function createWatcher({
     await storage.set(KEYS.lease, { owner, expires: now() + leaseMs })
 
     await reconcile()
+    await reconcileReissues()
 
     const seen = new Set((await storage.get(KEYS.seen)) ?? [])
+    const candidates = await reissueCandidates()
     const workspaces = []
     const skipped = []
     let discoveryError = null
@@ -460,7 +646,7 @@ export function createWatcher({
     for (const server of servers) {
       let outcome
       try {
-        outcome = await scanWorkspace(server, config, seen)
+        outcome = await scanWorkspace(server, config, seen, candidates)
       } catch (error) {
         log(`scan failed for ${server.name}: ${messageOf(error)}`)
         outcome = { ok: false, error: messageOf(error) }
@@ -533,9 +719,17 @@ export function createWatcher({
     return { ...stored, today: await today() }
   }
 
-  /** Every item record, as the RPC contract serves them. */
+  /**
+   * Every item record, as the RPC contract serves them. An earlier build's
+   * record is served too: its row is how the user opens the session it holds,
+   * and the ones that need recovery are the ones an earlier build left. The
+   * record's internal form is read here and not served.
+   */
   async function items() {
-    return { items: Object.values(await readItems()).map(itemOfRecord) }
+    const records = Object.values(await readItems()).filter(
+      (record) => record && typeof record.permalink === "string",
+    )
+    return { items: records.map(itemOfRecord) }
   }
 
   /** The config as the RPC contract serves it. */
@@ -579,7 +773,8 @@ export function createWatcher({
   /**
    * The first turn of one item session ended. Only the first turn of a session
    * this instance started may complete the item, and only when it ends without
-   * error: a turn that ended in error, a later turn, and a turn whose start no
+   * error and its reply names the issue it made: a turn that ended in error, a
+   * turn whose reply names no issue, a later turn, and a turn whose start no
    * instance saw (a restart) all leave the item waiting, the pessimistic state
    * its record was written with. Once the first turn closes, whatever its
    * outcome, no later turn changes the record.
@@ -592,14 +787,20 @@ export function createWatcher({
     if (failed) return
     const text = await readReply(sessionID)
     const reply = text === undefined ? undefined : parseReply(text)
-    const next = { ...record, firstTurnEndedAt: new Date(now()).toISOString(), firstTurnFailed: false }
-    if (reply) {
-      next.title = reply.title
-      next.issueUrl = reply.issueUrl
-      next.issueNumber = reply.issueNumber
+    // Both are needed: a turn this instance saw end without error, and a reply
+    // that names the issue it made. An errorless reply with no issue URL leaves
+    // the item waiting.
+    if (!reply || !reply.issueUrl) return
+    const next = {
+      ...record,
+      firstTurnEndedAt: new Date(now()).toISOString(),
+      firstTurnFailed: false,
+      title: reply.title,
+      issueUrl: reply.issueUrl,
+      issueNumber: reply.issueNumber,
     }
     await updateItem(next)
-    if (reply) await renameSession(sessionID, reply.title)
+    await renameSession(sessionID, reply.title)
   }
 
   async function permissionChanged(sessionID, pending) {

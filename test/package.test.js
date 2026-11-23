@@ -17,8 +17,10 @@ const read = (rel) => readFileSync(join(ROOT, rel), "utf8")
 const SKILL_ID = "slack-director"
 const SKILL_REL = `skills/${SKILL_ID}/SKILL.md`
 const AGENT_REL = "agents/slack-director.md"
-const TRIAGE_AGENT_REL = "agents/slack-director-triage.md"
 const REFRESH_AGENT_REL = "agents/slack-director-refresh.md"
+// The read-only triage agent is gone from the package; the install target
+// removes a copy an earlier install left behind.
+const RETIRED_TRIAGE_AGENT = "slack-director-triage.md"
 const SOURCE_MODULES = [
   "config.js",
   "work-hours.js",
@@ -28,8 +30,11 @@ const SOURCE_MODULES = [
   "first-prompt.js",
   "reply.js",
   "watcher.js",
+  "page.js",
 ]
 const PARTS = ["index.js", "tui.js", "rpc.js", "package.json"]
+// The modules only a running TUI serves, reached by a runtime import.
+const RENDERER_MODULES = ["@opentui/solid", "solid-js"]
 
 /**
  * A fake plugin context that records what the plugin registers, and rejects any
@@ -248,7 +253,30 @@ test("no shipped module imports the plugin SDK, so every one loads under plain n
         `${rel} imports only node builtins and its own modules, not ${match[1]}`,
       )
     }
+    // A runtime import loads only where the host serves it, so the file itself
+    // still loads under plain node.
+    for (const match of text.matchAll(/import\s*\(\s*"([^"]+)"/g)) {
+      assert.ok(
+        RENDERER_MODULES.includes(match[1]),
+        `${rel} reaches only the TUI host's renderer modules by a runtime import, not ${match[1]}`,
+      )
+    }
   }
+})
+
+test("the TUI part reaches the TUI host's renderer modules by a runtime import alone", async () => {
+  const source = read("tui.js")
+  const runtimeImports = [...source.matchAll(/import\s*\(\s*"([^"]+)"/g)].map((match) => match[1])
+  assert.deepEqual(runtimeImports.sort(), ["@opentui/solid", "solid-js"])
+  for (const specifier of runtimeImports) {
+    assert.ok(!new RegExp(`from\\s+"${specifier}"`).test(source), `${specifier} is not a static import`)
+  }
+  const { loadRenderer } = await import("../tui.js")
+  assert.equal(
+    await loadRenderer(),
+    undefined,
+    "outside a TUI the renderer is absent, and the part still loads",
+  )
 })
 
 test("the README install and uninstall steps match the Makefile", () => {
@@ -262,7 +290,7 @@ test("the README install and uninstall steps match the Makefile", () => {
   }
 })
 
-test("the item first prompt carries the item, the skill, the writes it allows and the reply's two forms", () => {
+test("the item first prompt carries the item, the skill, the writes it allows and the reply's two lines", () => {
   const hit = {
     permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
     workspace: "slack_nexar",
@@ -289,17 +317,105 @@ test("the item first prompt carries the item, the skill, the writes it allows an
     "the prompt names an issue edit as forbidden",
   )
   assert.match(prompt, /end your reply with exactly these two\s+lines/i, "the reply ends with the two lines")
-  assert.ok(prompt.includes("Intake issue: "), "the reply's first fixed line")
-  assert.ok(prompt.includes("Title: "), "the reply's second fixed line")
+  assert.ok(prompt.includes("Intake issue: <the issue's URL>"), "the reply's first fixed line")
+  assert.ok(prompt.includes("Title: <the issue's exact title>"), "the reply asks for the issue's exact title")
   assert.ok(
-    prompt.includes("Intake issue: none — <the reason, a few words>"),
-    "the reply's first line for a message the scope rules leave out",
+    prompt.includes("A message you leave out still gets its issue"),
+    "every flagged message gets its issue, the out-of-scope ones included",
   )
   assert.match(prompt, /take no other action/i, "the first turn is bounded")
 })
 
+test("the first prompt and the skill carry no issue-less path", () => {
+  const hit = {
+    permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
+    workspace: "slack_nexar",
+    channel: { id: "C0PLATFORM", label: "#platform-help" },
+    ts: "1795194443.137219",
+  }
+  const prompt = itemFirstPrompt(hit, "empiric-earth/almeida-slack-intake")
+  for (const text of [prompt, read(SKILL_REL)]) {
+    assert.ok(!text.includes("Intake issue: none"), "no reply line leaves the message without an issue")
+    assert.ok(!/create no issue/i.test(text), "no path tells the session to create no issue")
+  }
+  assert.match(prompt, /holds the permalink fields and the category only/i, "the out-of-scope form")
+})
+
+test("criterion 15: the first prompt and the skill carry the out-of-scope rule, its read-free decision, the issue form and the one comment", () => {
+  const hit = {
+    permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
+    workspace: "slack_nexar",
+    channel: { id: "C0PLATFORM", label: "#platform-help" },
+    ts: "1795194443.137219",
+  }
+  const prompt = itemFirstPrompt(hit, "empiric-earth/almeida-slack-intake")
+  for (const [name, text] of [
+    ["the first prompt", prompt],
+    ["the skill", read(SKILL_REL)],
+  ]) {
+    const flat = text.replace(/\s+/g, " ")
+    assert.match(flat, /customer or production data/i, `${name} names customer or production data`)
+    assert.match(flat, /Slack Connect or an external channel/i, `${name} names Slack Connect or an external channel`)
+    assert.match(
+      flat,
+      /category the permalink, the workspace and the channel do not tell/i,
+      `${name} names the category the three sources do not tell`,
+    )
+    assert.match(flat, /decide the category without reading anything/i, `${name} decides the category without a read`)
+    assert.match(flat, /read no thread and no channel/i, `${name} reads nothing for a message it leaves out`)
+    assert.match(flat, /not to look for a message Slack does not hold/i, `${name} covers a message Slack does not hold`)
+    assert.match(
+      flat,
+      /holds the permalink fields and the category only/i,
+      `${name} gives a left-out message the issue that holds the permalink fields and the category only`,
+    )
+    assert.match(flat, /no paraphrase/i, `${name} forbids a paraphrase for it`)
+    assert.match(
+      flat,
+      /one comment that says it is out of scope and asks the user/i,
+      `${name} gives it one comment that says it is out of scope and asks the user`,
+    )
+  }
+})
+
+test("the first prompt and the skill look the permalink up before either branch creates an issue", () => {
+  const hit = {
+    permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
+    workspace: "slack_nexar",
+    channel: { id: "C0PLATFORM", label: "#platform-help" },
+    ts: "1795194443.137219",
+  }
+  const prompt = itemFirstPrompt(hit, "empiric-earth/almeida-slack-intake")
+  const at = (text, needle) => {
+    const index = text.indexOf(needle)
+    assert.ok(index >= 0, `${needle} is in the text`)
+    return index
+  }
+  // A reply that was lost, or a reissue, must not make a second issue for one
+  // permalink: the lookup comes before the create in either branch.
+  for (const [name, text, lookup, branches] of [
+    [
+      "the first prompt",
+      prompt,
+      "create one in the skill's issue format only when no issue carries it",
+      ["A message you leave out still gets its issue", "Otherwise write a paraphrase"],
+    ],
+    [
+      "the skill",
+      read(SKILL_REL),
+      "Create an issue only when no issue carries it",
+      ["Leave a message the rules leave out alone", "Otherwise read the thread and investigate"],
+    ],
+  ]) {
+    const lookupAt = at(text, lookup)
+    for (const branch of branches) {
+      assert.ok(lookupAt < at(text, branch), `${name} looks the permalink up before ${branch}`)
+    }
+  }
+})
+
 test("the skill, the README and the agent files carry none of the retired tokens", () => {
-  const files = [SKILL_REL, "README.md", AGENT_REL, TRIAGE_AGENT_REL, REFRESH_AGENT_REL]
+  const files = [SKILL_REL, "README.md", AGENT_REL, REFRESH_AGENT_REL]
   const banned = [
     "/slack-director-intake",
     "slack-director.yaml",
@@ -330,7 +446,7 @@ test("the skill keeps the item format, the data rule, the field sources and the 
   assert.match(flat, /never post a decision or a commitment/i, "no decisions or commitments")
 })
 
-test("the skill bounds the first turn's writes and gives its two reply forms", () => {
+test("the skill bounds the first turn's writes and gives its reply's two lines", () => {
   const flat = read(SKILL_REL).replace(/\s+/g, " ")
   assert.match(
     flat,
@@ -344,8 +460,10 @@ test("the skill bounds the first turn's writes and gives its two reply forms", (
   )
   assert.match(flat, /belongs to a later turn the user drives/i, "the skill's other writes are later-turn writes")
   assert.match(flat, /a flagged message counts as a request to the user/i, "a flagged message counts as a request")
-  assert.match(flat, /Intake issue: none — <the reason, a few words>/, "the reply's form for a message left out")
+  assert.match(flat, /Intake issue: <the issue's URL>/, "the reply's first line names the issue")
+  assert.match(flat, /Title: <the issue's exact title>/, "the reply's second line is the issue's exact title")
   assert.match(flat, /only when no issue carries it/i, "an issue is created only when none carries the permalink")
+  assert.match(flat, /every flagged message gets\s+its issue/i, "every flagged message gets its issue")
 })
 
 test("a fixture install lays down the parts, the modules and the agents; uninstall removes them", () => {
@@ -354,7 +472,7 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
   const prefix = join(fixture, "prefix")
   const pluginDir = join(prefix, "plugins", "slack-director")
   const agentFile = join(prefix, "agents", "slack-director.md")
-  const triageFile = join(prefix, "agents", "slack-director-triage.md")
+  const triageFile = join(prefix, "agents", RETIRED_TRIAGE_AGENT)
   const refreshFile = join(prefix, "agents", "slack-director-refresh.md")
   const env = {
     ...process.env,
@@ -364,13 +482,16 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
   }
   const make = (...args) => execFileSync("make", args, { cwd: ROOT, encoding: "utf8", env })
   try {
-    // The old hand-copied skill, and files install and uninstall must leave alone.
+    // The old hand-copied skill, an installed triage agent an earlier build
+    // left, and files install and uninstall must leave alone.
     const staleSkill = join(prefix, "skills", "slack-director", "SKILL.md")
     mkdirSync(join(prefix, "skills", "slack-director"), { recursive: true })
     writeFileSync(staleSkill, "old copy")
     writeFileSync(join(prefix, "keep.txt"), "keep me")
     mkdirSync(join(home, ".config", "opencode", "skills", "slack-director"), { recursive: true })
     writeFileSync(join(home, ".config", "opencode", "skills", "slack-director", "SKILL.md"), "not mine")
+    mkdirSync(join(prefix, "agents"), { recursive: true })
+    writeFileSync(triageFile, "an earlier build's triage agent")
     const before = tree(home)
 
     make("install", `PREFIX=${prefix}`)
@@ -383,7 +504,6 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
       [join(pluginDir, "package.json"), "package.json"],
       [join(pluginDir, SKILL_REL), SKILL_REL],
       [agentFile, AGENT_REL],
-      [triageFile, TRIAGE_AGENT_REL],
       [refreshFile, REFRESH_AGENT_REL],
       ...SOURCE_MODULES.map((name) => [join(pluginDir, "src", name), `src/${name}`]),
     ]) {
@@ -393,6 +513,7 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
     assert.ok(!existsSync(join(pluginDir, "skills", "skills")), "a second install nests no skills directory")
     assert.ok(!existsSync(join(pluginDir, "src", "src")), "a second install nests no src directory")
     assert.ok(!existsSync(staleSkill), "the stale config-directory skill is removed")
+    assert.ok(!existsSync(triageFile), "the installed triage agent an earlier build left is removed")
 
     make("uninstall", `PREFIX=${prefix}`)
     assert.ok(!existsSync(pluginDir), "uninstall removes the plugin directory")
@@ -405,6 +526,47 @@ test("a fixture install lays down the parts, the modules and the agents; uninsta
     assert.deepEqual([...after], [...before], "install and uninstall write nothing outside PREFIX")
   } finally {
     rmSync(fixture, { recursive: true, force: true })
+  }
+})
+
+test("the package ships no triage agent, and the refresh agent stays hidden", () => {
+  assert.ok(!existsSync(join(ROOT, "agents", RETIRED_TRIAGE_AGENT)), "the triage agent file is gone from the package")
+  const field = (rel, name) => {
+    const block = /^---\r?\n([\s\S]*?)\r?\n---/.exec(read(rel))
+    assert.ok(block, `${rel} carries frontmatter`)
+    const line = block[1]
+      .split(/\r?\n/)
+      .map((raw) => raw.trim())
+      .find((raw) => raw.startsWith(`${name}:`))
+    return line === undefined ? undefined : line.slice(line.indexOf(":") + 1).trim()
+  }
+  assert.equal(field(REFRESH_AGENT_REL, "hidden"), "true", "the refresh agent is hidden from the agent list")
+  assert.equal(field(REFRESH_AGENT_REL, "mode"), "primary", "it stays an agent a session can run on")
+  assert.equal(field(AGENT_REL, "hidden"), undefined, `${AGENT_REL} stays in the agent list`)
+})
+
+test("the director agent says the plugin starts its item sessions on it", () => {
+  const text = read(AGENT_REL)
+  assert.match(text, /starts every item session on this agent/i, "the agent file says the plugin starts sessions on it")
+  assert.ok(text.includes("`slack-director` skill"), "the agent file names the skill it loads")
+  assert.ok(
+    !/Switch that session's agent/i.test(text),
+    "the agent file no longer tells the user to switch an item session's agent",
+  )
+  const rules = [...text.matchAll(/- action: "([^"]+)"\n\s+resource: "([^"]+)"\n\s+effect: "?([^"\n]+)"?/g)].map((match) => ({
+    action: match[1],
+    resource: match[2],
+    effect: match[3].trim(),
+  }))
+  assert.ok(
+    rules.some((rule) => rule.action === "slack_*" && rule.resource === "*" && rule.effect === "ask"),
+    "every Slack tool asks first",
+  )
+  for (const cli of ["gh", "glab", "aws"]) {
+    assert.ok(
+      rules.some((rule) => rule.action === "shell" && rule.resource === `${cli} *` && rule.effect === "deny"),
+      `the ${cli} shell command is denied`,
+    )
   }
 })
 
@@ -423,35 +585,42 @@ test("every RPC handler answers what the contract's own schema for it describes"
         session_directory: "/home/someone/notes",
         poll_seconds: 60,
         work_hours: { days: ["Mon", "Fri"], start: "09:00", end: "18:00", time_zone: "UTC" },
-        triage_agent: "slack-director-triage",
+        session_agent: "slack-director",
       }),
     )
     const { ctx, rpcRegistrations } = fakeContext()
     const dispose = await plugin.setup(ctx)
-    const { definition, handlers } = rpcRegistrations[0]
-    const context = { error: (name, message, data) => ({ error: { name, message, data } }) }
-    const inputs = {
-      status: {},
-      items: {},
-      getConfig: {},
-      setConfig: { field: "poll_seconds", value: 90 },
-      pollNow: {},
-      markOpened: { sessionID: "ses_fixture" },
-    }
-    for (const [name, method] of Object.entries(definition.methods)) {
-      const output = await handlers[name](inputs[name], context)
-      assert.equal(schemaProblem(method.output, output), undefined, `${name} answers its output schema`)
-    }
-    assert.equal(JSON.parse(readFileSync(configFile, "utf8")).poll_seconds, 90, "setConfig wrote the field")
+    // The plugin schedules its next poll, so a failed assertion below must still
+    // unload it, or the suite waits on the timer for ever.
+    try {
+      const { definition, handlers } = rpcRegistrations[0]
+      const context = { error: (name, message, data) => ({ error: { name, message, data } }) }
+      const inputs = {
+        status: {},
+        items: {},
+        getConfig: {},
+        setConfig: { field: "poll_seconds", value: 90 },
+        pollNow: {},
+        markOpened: { sessionID: "ses_fixture" },
+      }
+      for (const [name, method] of Object.entries(definition.methods)) {
+        const answer = handlers[name](inputs[name], context)
+        assert.equal(typeof answer?.then, "function", `${name} answers a promise, which the RPC layer awaits`)
+        const output = await answer
+        assert.equal(schemaProblem(method.output, output), undefined, `${name} answers its output schema`)
+      }
+      assert.equal(JSON.parse(readFileSync(configFile, "utf8")).poll_seconds, 90, "setConfig wrote the field")
 
-    const refused = await handlers.setConfig({ field: "poll_seconds", value: "soon" }, context)
-    assert.equal(refused.error.name, "invalid", "a wrong type is the contract's declared error")
-    assert.equal(schemaProblem(definition.methods.setConfig.errors.invalid, refused.error.data), undefined)
-    assert.equal(refused.error.data.field, "poll_seconds", "the error names the field")
-    assert.equal(JSON.parse(readFileSync(configFile, "utf8")).poll_seconds, 90, "the refused write left the file alone")
-    const unknown = await handlers.setConfig({ field: "not_a_field", value: 1 }, context)
-    assert.equal(unknown.error.name, "invalid")
-    assert.equal(unknown.error.data.field, null, "a field that does not exist has no name to carry")
-    await dispose()
+      const refused = await handlers.setConfig({ field: "poll_seconds", value: "soon" }, context)
+      assert.equal(refused.error.name, "invalid", "a wrong type is the contract's declared error")
+      assert.equal(schemaProblem(definition.methods.setConfig.errors.invalid, refused.error.data), undefined)
+      assert.equal(refused.error.data.field, "poll_seconds", "the error names the field")
+      assert.equal(JSON.parse(readFileSync(configFile, "utf8")).poll_seconds, 90, "the refused write left the file alone")
+      const unknown = await handlers.setConfig({ field: "not_a_field", value: 1 }, context)
+      assert.equal(unknown.error.name, "invalid")
+      assert.equal(unknown.error.data.field, null, "a field that does not exist has no name to carry")
+    } finally {
+      await dispose()
+    }
   })
 })

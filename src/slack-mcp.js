@@ -131,11 +131,14 @@ function blockFields(block) {
   return (end === -1 ? lines : lines.slice(0, end)).join("\n")
 }
 
-/** The display name a `From:` line carries, without the user id beside it. */
+/**
+ * The display name a `From:` line carries, without the id or the address beside
+ * it: Slack writes the name and then `(U…)`, `<U…>` or `<address>`.
+ */
 function askerOf(line) {
   const text = typeof line === "string" ? line.trim() : ""
   if (text === "") return ""
-  return (text.replace(/\s*\([^)]*\)\s*$/, "") || text).trim()
+  return (text.replace(/\s*[<(][^>)]*[>)]\s*$/, "") || text).trim()
 }
 
 function hitOfRow(row) {
@@ -147,7 +150,7 @@ function hitOfRow(row) {
   const label = row.channel_name ?? row.channel ?? row.channel_id
   if (typeof label === "string" && label.trim() !== "") hit.channel.label = label.trim()
   const asker = row.user_name ?? row.username ?? row.author
-  hit.asker = typeof asker === "string" ? asker.trim() : ""
+  hit.asker = typeof asker === "string" ? askerOf(asker) : ""
   return hit
 }
 

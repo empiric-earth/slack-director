@@ -143,63 +143,27 @@ test("the director agent allows no schedule", () => {
   }
 })
 
-// The two agents the watcher runs sessions on. Each file starts from the same
-// baseline and the same trailing rules, and decides everything else itself.
-const TRIAGE_REL = "agents/slack-director-triage.md"
+test("the credentialed CLIs' shell commands are refused, so their calls go through the broker", () => {
+  for (const command of ["gh api user", "glab api user", "aws sts get-caller-identity"]) {
+    assert.equal(effect("shell", command), "deny", `${command} is refused on this agent`)
+  }
+  assert.equal(effect("sparta_exec"), "allow", "the same calls go through the credential broker")
+})
+
+test("other authenticated shell clients stay by the user's own rules", () => {
+  for (const command of ["git push origin HEAD:refs/heads/example", "ssh git@github.com", "ls -la"]) {
+    assert.equal(effect("shell", command), "allow", `${command} resolves by the user's own rules`)
+  }
+})
+
+// The one agent the watcher runs its short refresh session on. Its file starts
+// from the same baseline and the same trailing rules, and decides everything
+// else itself.
 const REFRESH_REL = "agents/slack-director-refresh.md"
-const TRIAGE = [...BASELINE, ...declaredRules(readFileSync(join(ROOT, TRIAGE_REL), "utf8"), TRIAGE_REL), ...TRAILING]
 const REFRESH = [...BASELINE, ...declaredRules(readFileSync(join(ROOT, REFRESH_REL), "utf8"), REFRESH_REL), ...TRAILING]
 
 /** The effect a tool resolves to under one agent's rules, with `*` as the usual resource. */
 const effectUnder = (rules, action, resource = "*") => resolve(rules, action, resource)
-
-test("the triage agent reads, searches and lists Slack, and reads files", () => {
-  for (const server of SERVERS) {
-    for (const tool of ["read_channel", "search_messages", "list_channels"]) {
-      assert.equal(
-        effectUnder(TRIAGE, `${server}_slack_${tool}`),
-        "allow",
-        `${server}_slack_${tool} proceeds without a prompt`,
-      )
-    }
-  }
-  for (const tool of ["read", "glob", "grep"]) {
-    assert.equal(effectUnder(TRIAGE, tool, "notes.md"), "allow", `the file read tool ${tool} is allowed`)
-  }
-})
-
-test("the triage agent denies every Slack write", () => {
-  const writes = [
-    "send_message",
-    "schedule_message",
-    "add_reaction",
-    "create_canvas",
-    "update_canvas",
-    "create_conversation",
-    "send_message_draft",
-    "get_reactions",
-  ]
-  for (const server of SERVERS) {
-    for (const tool of writes) {
-      assert.equal(effectUnder(TRIAGE, `${server}_slack_${tool}`), "deny", `${server}_slack_${tool} is refused`)
-    }
-  }
-})
-
-test("the triage agent loads only the slack-director skill, and holds the broker", () => {
-  assert.equal(effectUnder(TRIAGE, "skill", "slack-director"), "allow", "the slack-director skill is allowed")
-  for (const other of ["slack-minion", "almeida-slack-style", "browser", "my-slack-director"]) {
-    assert.equal(effectUnder(TRIAGE, "skill", other), "deny", `the ${other} skill id is refused`)
-  }
-  assert.equal(effectUnder(TRIAGE, "sparta_exec"), "allow", "the credential broker is allowed")
-})
-
-test("the triage agent denies edits, writes, the shell, schedules, subagents and outside directories", () => {
-  for (const action of ["edit", "write", "shell", "opencode_schedule_run", "subagent", "external_directory"]) {
-    assert.equal(effectUnder(TRIAGE, action, "*"), "deny", `${action} is refused`)
-    assert.equal(effectUnder(TRIAGE, action, "anything"), "deny", `${action} is refused whatever the resource`)
-  }
-})
 
 test("the refresh agent allows only the Slack search tool", () => {
   for (const server of SERVERS) {

@@ -6,7 +6,7 @@
 // validating only that no error name is reserved — so this file imports nothing
 // and the package's tests load it with plain Node.
 //
-// The overview page reads `status`, `items` and the `updated` event, and the
+// The overview dialog reads `status`, `items` and the `updated` event, and the
 // settings dialog reads and writes the config through `getConfig` and
 // `setConfig`. The live state of an item's session — whether it is running and
 // whether it waits on a permission — is not here: the TUI reads that from its
@@ -36,9 +36,9 @@ const config = {
     session_directory: { type: "string" },
     poll_seconds: { type: "integer" },
     work_hours: workHours,
-    triage_agent: { type: "string" },
+    session_agent: { type: "string" },
   },
-  required: ["flag_emoji", "intake_repo", "session_directory", "poll_seconds", "work_hours", "triage_agent"],
+  required: ["flag_emoji", "intake_repo", "session_directory", "poll_seconds", "work_hours", "session_agent"],
   additionalProperties: false,
 }
 

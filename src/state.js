@@ -27,3 +27,11 @@ export function claimsDir(env = process.env) {
   const stateHome = env.XDG_STATE_HOME || join(env.HOME || homedir(), ".local", "state")
   return join(stateHome, "opencode", "slack-director", "claims", NAMESPACE)
 }
+
+/** The subdirectory the reissue's own claim and commit files live in. */
+export const REISSUE_DIR = "reissue"
+
+/** The reissue directory, beside the claims it belongs to. */
+export function reissueDir(env = process.env) {
+  return join(claimsDir(env), REISSUE_DIR)
+}

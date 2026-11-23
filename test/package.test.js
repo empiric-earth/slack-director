@@ -433,6 +433,35 @@ test("the skill, the README and the agent files carry none of the retired tokens
   }
 })
 
+test("no shipped file names the retired flag field or the emoji search filter", () => {
+  const pkg = JSON.parse(read("package.json"))
+  const files = []
+  const walk = (rel) => {
+    if (statSync(join(ROOT, rel)).isDirectory()) {
+      for (const entry of readdirSync(join(ROOT, rel))) walk(join(rel, entry))
+      return
+    }
+    files.push(rel)
+  }
+  for (const entry of pkg.files) walk(entry)
+  assert.ok(files.includes("src/config.js") && files.includes("README.md"), "the shipped set is walked")
+  for (const rel of files) {
+    const text = read(rel)
+    for (const token of ["flag_emoji", "hasmy"]) {
+      assert.ok(!text.includes(token), `${rel} names no ${token}`)
+    }
+  }
+})
+
+test("the README describes flagging with Save for later", () => {
+  const flat = read("README.md").replace(/\s+/g, " ")
+  assert.ok(flat.includes("Save for later"), "the README names Save for later as the way to flag")
+  assert.match(flat, /marking the message Completed or removing it from Later leaves the search/, "a handled message leaves the search")
+  assert.match(flat, /picks up every message already in your Save-for-later list/, "every saved message is picked up on the first poll")
+  assert.ok(!flat.includes("flag emoji"), "no emoji is named as the way to flag")
+  assert.ok(!flat.includes("Only your own reaction counts"), "no reaction is named as the way to flag")
+})
+
 test("the skill keeps the item format, the data rule, the field sources and the scope rules", () => {
   const skill = read(SKILL_REL)
   const flat = skill.replace(/\s+/g, " ")

@@ -43,7 +43,7 @@ const hitRow = (channel, ts, channelName, host, asker) => ({
  */
 const page = (rows, next) => ({
   results: [
-    `Search results for: "hasmy::oc:"`,
+    `Search results for: "is:saved"`,
     "",
     `## Messages (${rows.length} results) ===`,
     ...rows.flatMap((row, index) => [
@@ -186,7 +186,6 @@ function harness({
   pages = {},
   statuses = {},
   servers = [NEXAR, NAUTO],
-  emoji = "oc",
   credentials,
   stall = [],
   fetchHold,
@@ -228,7 +227,6 @@ function harness({
   const configWrites = []
   const tokens = credentials ?? { slack_nexar: { access: "tok-nexar", expires: 0 }, slack_nauto: { access: "tok-nauto", expires: 0 } }
   const config = {
-    flag_emoji: emoji,
     intake_repo: "empiric-earth/almeida-slack-intake",
     session_directory: join(root, "session-directory"),
     poll_seconds: 60,
@@ -391,8 +389,8 @@ function harness({
   }
 }
 
-test("a poll calls only the Slack servers, only the search tool, with the configured flag and no date modifier", async () => {
-  const h = harness({ servers: [NEXAR, NAUTO, TODOIST], emoji: "triage" })
+test("a poll calls only the Slack servers, only the search tool, with the Save-for-later filter and no date modifier", async () => {
+  const h = harness({ servers: [NEXAR, NAUTO, TODOIST] })
   try {
     await h.watcher.poll()
     assert.equal(h.calls.filter((call) => call.url === TODOIST.url).length, 0, "the non-Slack MCP server is never called")
@@ -406,7 +404,7 @@ test("a poll calls only the Slack servers, only the search tool, with the config
     assert.equal(searches.length, 2, "both Slack workspaces are searched")
     for (const call of searches) {
       assert.equal(call.name, SEARCH_TOOL, "every tool call names the search tool and no other")
-      assert.equal(call.args.filters, "hasmy::triage:", "the search carries the configured flag as its filter")
+      assert.equal(call.args.filters, "is:saved", "the search carries the Save-for-later filter")
       assert.equal(call.args.query, undefined, "the search sends no `query` argument the tool does not take")
       assert.ok(!/(after|before|on|during):/.test(call.args.filters), "the filter carries no date modifier")
       assert.equal(call.args.sort, "timestamp", "the scan sorts by message time")
@@ -1190,7 +1188,7 @@ const rowsPages = (rows) => (index, search, args) => {
   const more = start + limit < rows.length
   return {
     results: [
-      `Search results for: "hasmy::oc:"`,
+      `Search results for: "is:saved"`,
       "",
       `## Messages (${slice.length} results) ===`,
       ...slice.flatMap((row, position) => [

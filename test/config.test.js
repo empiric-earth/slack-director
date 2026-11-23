@@ -87,7 +87,6 @@ test("every field takes its default when the file omits it", () => {
   const { config, error } = parseConfig(JSON.stringify(REQUIRED))
   assert.equal(error, undefined)
   assert.deepEqual(Object.keys(config).sort(), [...FIELD_NAMES].sort(), "the config carries every field and no other")
-  assert.equal(config.flag_emoji, "oc")
   assert.equal(config.poll_seconds, 60)
   assert.equal(config.session_agent, "slack-director")
   assert.deepEqual(config.work_hours, defaultWorkHours(), "the window is the documented default")
@@ -162,6 +161,31 @@ test("setConfig refuses a value of the wrong type and leaves the file unchanged"
     assert.equal(stored.poll_seconds, 5)
     assert.equal(stored.intake_repo, REQUIRED.intake_repo, "the other fields survive the write")
     assert.equal(reader.read().config.poll_seconds, 5, "the next read sees the new value")
+  } finally {
+    fx.clean()
+  }
+})
+
+test("a config that still holds the retired flag field loads, keeps it on a write, and is refused a write of it", () => {
+  const fx = fixture()
+  try {
+    const reader = createConfigReader({ env: fx.env })
+    writeFileSync(fx.path, JSON.stringify({ ...REQUIRED, flag_emoji: "oc", poll_seconds: 60, work_hours: WINDOW }))
+
+    const loaded = reader.read()
+    assert.equal(loaded.error, undefined, "the retired field is not a config error")
+    assert.equal(Object.hasOwn(loaded.config, "flag_emoji"), false, "the retired field is not carried in the config")
+    assert.equal(loaded.config.poll_seconds, 60, "the fields the build knows are read")
+
+    const written = reader.write("poll_seconds", 5)
+    assert.equal(written.error, undefined)
+    const stored = JSON.parse(readFileSync(fx.path, "utf8"))
+    assert.equal(stored.flag_emoji, "oc", "a settings write of another field keeps the retired field in the file")
+    assert.equal(stored.poll_seconds, 5)
+
+    assert.deepEqual(reader.write("flag_emoji", "oc"), {
+      error: { field: null, message: "no config field named flag_emoji" },
+    })
   } finally {
     fx.clean()
   }
@@ -280,7 +304,7 @@ test("a window the config cannot use is named by the field it breaks", () => {
   assert.equal(validateWorkHours({ ...WINDOW, end: "08:00" }), "config field invalid: work_hours.end")
   assert.equal(validateWorkHours({ ...WINDOW, time_zone: "Mars/Olympus" }), "config field invalid: work_hours.time_zone")
   assert.equal(fieldProblem("work_hours", { ...WINDOW, days: ["Funday"] }), "config field invalid: work_hours.days")
-  assert.equal(fieldProblem("flag_emoji", ":oc:"), "config field invalid: flag_emoji")
+  assert.equal(fieldProblem("flag_emoji", "oc"), "no config field named flag_emoji")
   assert.equal(fieldProblem("poll_seconds", 0), "config field invalid: poll_seconds")
   assert.equal(fieldProblem("poll_seconds", 60), undefined)
 })

@@ -31,14 +31,13 @@ const workHours = {
 const config = {
   type: "object",
   properties: {
-    flag_emoji: { type: "string" },
     intake_repo: { type: "string" },
     session_directory: { type: "string" },
     poll_seconds: { type: "integer" },
     work_hours: workHours,
     session_agent: { type: "string" },
   },
-  required: ["flag_emoji", "intake_repo", "session_directory", "poll_seconds", "work_hours", "session_agent"],
+  required: ["intake_repo", "session_directory", "poll_seconds", "work_hours", "session_agent"],
   additionalProperties: false,
 }
 

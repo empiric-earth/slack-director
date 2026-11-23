@@ -14,7 +14,6 @@ import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { defaultWorkHours, normalizeWorkHours, validateWorkHours } from "./work-hours.js"
 
-export const DEFAULT_FLAG_EMOJI = "oc"
 export const DEFAULT_POLL_SECONDS = 60
 export const DEFAULT_SESSION_AGENT = "slack-director"
 
@@ -23,7 +22,6 @@ export const REQUIRED_FIELDS = ["intake_repo", "session_directory"]
 
 /** Every field the file may carry, in the order the settings dialog shows them. */
 export const FIELD_NAMES = [
-  "flag_emoji",
   "intake_repo",
   "session_directory",
   "poll_seconds",
@@ -42,7 +40,6 @@ const filled = (value) => typeof value === "string" && value.trim() !== ""
 /** Every field's default, with an empty value where the field has none. */
 export function defaultConfig() {
   return {
-    flag_emoji: DEFAULT_FLAG_EMOJI,
     intake_repo: "",
     session_directory: "",
     poll_seconds: DEFAULT_POLL_SECONDS,
@@ -54,10 +51,6 @@ export function defaultConfig() {
 /** Why a value is not usable for a field, or undefined. The message names the field. */
 export function fieldProblem(field, value) {
   switch (field) {
-    case "flag_emoji":
-      return /^[A-Za-z0-9_+-]+$/.test(typeof value === "string" ? value : "")
-        ? undefined
-        : "config field invalid: flag_emoji"
     case "intake_repo":
       return /^[^/\s]+\/[^/\s]+$/.test(typeof value === "string" ? value.trim() : "")
         ? undefined

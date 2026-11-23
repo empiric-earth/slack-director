@@ -1,8 +1,8 @@
 # slack-director
 
 The Slack Director turns a flagged Slack message into a working OpenCode
-session. React to a message with the flag emoji, and the plugin's watcher finds
-it and starts one session for it, on the `slack-director` agent — the agent you
+session. Save a message for later in Slack, and the plugin's watcher finds it
+and starts one session for it, on the `slack-director` agent — the agent you
 act with, so no switch is needed. That session finds or creates the intake issue
 for the message in your private intake repo, reads the thread, investigates, and
 posts the findings and proposed next steps as one comment on the issue. Then it
@@ -69,11 +69,11 @@ watcher starts to renew a Slack sign-in, and you never pick it.
    and removes any `~/.config/opencode/skills/slack-director/`, which would
    otherwise shadow the skill the package serves. Set `PREFIX` to install into
    another OpenCode config directory.
-3. Add the flag emoji to your Slack workspaces, under the name the config's
-   `flag_emoji` holds (default `oc`). Only your own reaction counts.
+3. Flag a message by saving it for later: open the message's `⋯` menu and pick
+   `Save for later`, or add it to `Later` in the Slack sidebar. Only messages
+   you save yourself count, and only you can see the flag.
 4. Write the config file `~/.config/opencode/slack-director/config.json`: one
    JSON object, and no secret in it. Its fields are:
-   - `flag_emoji` — the emoji name without colons; default `oc`.
    - `intake_repo` — `owner/name`; required.
    - `session_directory` — the absolute path an item session runs in; required.
    - `poll_seconds` — the interval between scans; default `60`.
@@ -101,19 +101,22 @@ stays.
 - The watcher polls every connected Slack MCP server whose URL is
   `https://mcp.slack.com/mcp`, and gives each flagged message one item session.
   It writes nothing to Slack.
+- Flagging is saving for later: on the first poll the watcher picks up every
+  message already in your Save-for-later list that has no item record, each one
+  as a separate item session.
 - A session is titled after the flagged message's channel and its author until
   its first turn ends, and after the intake issue's title from then on.
 - Removing the flag from a message you have handled keeps the scan short: the
-  watcher searches for the messages you have flagged, so a cleared flag leaves
-  the search.
+  watcher searches your Save-for-later list, so marking the message Completed or
+  removing it from Later leaves the search.
 - One permalink gets one item session and one intake issue. Flagging the same
   message again, or sending the first prompt for it again, finds the issue that
   permalink already has, so no second issue appears. A second message in the
   same thread is a different permalink, so it gets its own issue.
 - An item an earlier build left without an issue is reissued once, on the next
-  poll, when its message is still flagged and its earlier session is quiet: one
-  new session on `session_agent`, whose first turn makes the issue that
-  permalink was missing.
+  poll, when its message is still saved for later and its earlier session is
+  quiet: one new session on `session_agent`, whose first turn makes the issue
+  that permalink was missing.
 - An item session's transcript holds the thread text it read. It lives in your
   local OpenCode database, and deleting the session deletes it.
 - The message you flag is read by the item session and reaches the model. That

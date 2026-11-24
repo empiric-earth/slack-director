@@ -57,6 +57,10 @@ An item's state is its session's live state: `working` while the session runs,
 from the dialog, and `idle` once you have opened it and it is quiet. Waiting
 comes first, then working, then idle; the newest flag comes first inside each.
 
+A row leaves the dialog when its session is deleted or archived: the item's
+record goes with the session, so the row is gone from the overview and stays
+gone.
+
 Keys: `↑` and `↓` move the selection, `enter` opens the item's session, `i`
 opens its intake issue in your browser, `s` opens the Slack message, `r` polls
 now, `e` opens the settings dialog and `esc` closes the dialog.
@@ -129,6 +133,9 @@ stays.
   poll, when its message is still flagged and its earlier session is quiet: one
   new session on `session_agent`, whose first turn makes the issue that
   permalink was missing.
+- Deleting or archiving an item's session takes its row out of the overview for
+  good. The message is not picked up again: a permalink that has had a session
+  keeps its place, so a removed item gets no second session.
 - An item session's transcript holds the thread text it read. It lives in your
   local OpenCode database, and deleting the session deletes it.
 - The message you flag is read by the item session and reaches the model. That

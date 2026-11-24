@@ -12,6 +12,7 @@ import assert from "node:assert/strict"
 import { SlackDirectorRpc } from "../rpc.js"
 import { schemaProblem } from "./schema.js"
 import {
+  DIALOG_INSET,
   PAGE_TITLE,
   STATE_MARK,
   countsText,
@@ -658,19 +659,29 @@ test("the dialog draws the title, the header, the counts, the sections, the rows
   const title = lines[0]
   assert.equal(title.type, "box")
   assert.equal(title.props.justifyContent, "space-between", "the title and esc share one row")
-  assert.equal(title.props.paddingLeft, 3, "the title takes the host's own side inset")
+  assert.equal(title.props.paddingLeft, DIALOG_INSET, "the title takes the side inset")
+  assert.equal(title.props.paddingRight, DIALOG_INSET, "and leaves esc a right margin")
   assert.equal(lineChildren(title)[0].props.content, PAGE_TITLE)
   assert.equal(lineChildren(title)[1].props.content, "esc")
   assert.equal(lineText(lines[1]), headerText(STATUS), "the header names the last poll and each workspace")
   assert.equal(lineText(lines[2]), "", "a blank line separates the blocks")
   assert.equal(lineText(lines[3]), countsText(rows))
   assert.equal(lines[4].props.content, "", "the counts line is followed by a blank line")
-  assert.equal(childWith(lines[5], "Waiting for you") !== undefined, true, "the first section is Waiting for you")
+  const waiting = childWith(lines[5], "Waiting for you")
+  assert.ok(waiting, "the first section is Waiting for you")
+  assert.equal(lines[5].props.paddingLeft, DIALOG_INSET, "a section header shares the title's left edge")
   assert.equal(lineText(lines[6]), rowText(rows[0], { selected: true, now: NOW, hours: HOURS }))
+  assert.equal(
+    lineText(lines[6]).indexOf(STATE_MARK.waiting),
+    DIALOG_INSET,
+    "and the row's mark aligns with it",
+  )
   assert.equal(childWith(lines[7], "Idle") !== undefined, true, "the idle section follows, with no empty section")
   assert.equal(lineText(lines[8]), rowText(rows[1], { selected: false, now: NOW, hours: HOURS }))
   assert.equal(lineText(lines[10]), todayText(STATUS))
   assert.equal(lineText(lines[12]), footerText())
+  assert.equal(lines.length, 14)
+  assert.equal(lineText(lines[13]), "", "a blank margin line sits below the footer")
 })
 
 test("a failing workspace's mark takes the warning colour, and the rest of the header is muted", () => {
@@ -757,7 +768,7 @@ test("the title and the section header and the footer's keys are bold, and their
   const section = childWith(lines[5], "Waiting for you")
   assert.equal(section.props.attributes, BOLD, "the section header is bold")
   assert.equal(section.props.fg, THEME.text.muted, "and muted")
-  const footer = lines.at(-1)
+  const footer = lines.at(-2)
   assert.equal(childWith(footer, "↵").props.attributes, BOLD, "a footer key is bold")
   assert.equal(childWith(footer, "↵").props.fg, THEME.text.base)
   assert.equal(childWith(footer, " session").props.fg, THEME.text.muted, "and its label is muted")

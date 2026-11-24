@@ -20,7 +20,6 @@ import { SlackDirectorRpc } from "./rpc.js"
 import { FIELD_NAMES } from "./src/config.js"
 import {
   DIALOG_INSET,
-  DIALOG_LIST_INSET,
   DIALOG_SIZE,
   PAGE_TITLE,
   countsParts,
@@ -149,6 +148,7 @@ function rowBox(renderer, segments, theme, options = {}) {
   const box = renderer.createElement("box")
   const props = { flexDirection: "row", children: segments.map((segment) => textEl(renderer, segment, theme)) }
   if (options.paddingLeft !== undefined) props.paddingLeft = options.paddingLeft
+  if (options.paddingRight !== undefined) props.paddingRight = options.paddingRight
   if (options.justifyContent) props.justifyContent = options.justifyContent
   if (options.background !== undefined) props.backgroundColor = options.background
   renderer.spread(box, props)
@@ -177,7 +177,11 @@ function plainLine(renderer, content) {
  */
 function bodyLines({ renderer, rows, status, selected, now, hours, theme }) {
   const lines = [
-    rowBox(renderer, titleParts(), theme, { paddingLeft: DIALOG_INSET, justifyContent: "space-between" }),
+    rowBox(renderer, titleParts(), theme, {
+      paddingLeft: DIALOG_INSET,
+      paddingRight: DIALOG_INSET,
+      justifyContent: "space-between",
+    }),
     rowBox(renderer, headerParts(read(status)), theme, { paddingLeft: DIALOG_INSET }),
     blankLine(renderer),
     rowBox(renderer, countsParts(read(rows)), theme, { paddingLeft: DIALOG_INSET }),
@@ -185,7 +189,7 @@ function bodyLines({ renderer, rows, status, selected, now, hours, theme }) {
   ]
   for (const section of sections(read(rows))) {
     lines.push(
-      rowBox(renderer, [{ text: section.title, role: "muted", bold: true }], theme, { paddingLeft: DIALOG_LIST_INSET }),
+      rowBox(renderer, [{ text: section.title, role: "muted", bold: true }], theme, { paddingLeft: DIALOG_INSET }),
     )
     for (const entry of section.entries) {
       const marked = entry.index === read(selected)
@@ -198,6 +202,7 @@ function bodyLines({ renderer, rows, status, selected, now, hours, theme }) {
   }
   lines.push(blankLine(renderer), rowBox(renderer, todayParts(read(status)), theme, { paddingLeft: DIALOG_INSET }))
   lines.push(blankLine(renderer), rowBox(renderer, footerParts(), theme, { paddingLeft: DIALOG_INSET }))
+  lines.push(blankLine(renderer))
   return lines
 }
 

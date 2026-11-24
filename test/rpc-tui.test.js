@@ -977,6 +977,24 @@ test("a click in a gap between two controls runs nothing", async () => {
   assert.deepEqual(fake.selections, [], "no dialog opened")
 })
 
+test("a click with no row acts like its shortcut: nothing to open, one notice", async () => {
+  const spawned = []
+  const fake = fakeTuiContext({ items: [], selectAnswer: undefined })
+  await renderedRecordedTui(spawned).setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  const view = renderDialog(fake.dialogs)
+
+  clickPart(view, "i")
+  assert.deepEqual(spawned, [], "no link is opened with no row to act on")
+  assert.match(fake.toasts.at(-1).message, /not a web address/, "the missing link is reported, as the key reports it")
+
+  clickPart(view, "↵")
+  await tick()
+  assert.deepEqual(fake.opened, [], "no session is opened with no row to act on")
+  assert.deepEqual(fake.navigations, [], "and no route is navigated to")
+  assert.equal(fake.cleared.length > 0, true, "the Session control closes the overview, exactly as its key does")
+})
+
 test("cancel restores the overview on the captured item, by identity, after its position moved", async () => {
   const older = { ...ITEM, flaggedAt: "2026-11-19T14:00:00.000Z" }
   const newer = {

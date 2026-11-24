@@ -60,8 +60,9 @@ today  4 flagged · 3 next steps posted
 
 The issue cell shows `—` until the item's first turn has named its issue. A
 heading sits directly above its first row, and no blank line is drawn for a
-group that is not shown. Click an action or use its shortcut. The Esc hint
-closes the overview.
+group that is not shown.
+
+Click an action or use its shortcut. The Esc hint closes the overview.
 
 There is no table header, and no state column of its own: the section a row
 sits under is its state, and the mark repeats it. The dialog follows OpenCode's

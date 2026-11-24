@@ -29,6 +29,8 @@ import {
   moveSelection,
   openerCommand,
   pageRows,
+  reconcileSelection,
+  rowIDs,
   rowParts,
   sections,
   selectedItem,
@@ -132,21 +134,59 @@ export function selectedBackground(theme) {
   return theme?.background?.action?.primary?.focused
 }
 
-/** One part of a line, as the host's text element. */
-function textEl(renderer, segment, theme) {
+/**
+ * One part of a line, as the host's text element. A part that carries an action
+ * takes that action's mouse handlers, so the host's own mouse routing is what
+ * decides a press landed on it.
+ */
+function textEl(renderer, segment, theme, press) {
   const element = renderer.createElement("text")
   const props = { content: segment.text }
   const colour = roleColour(theme, segment.role)
   if (colour !== undefined) props.fg = colour
   if (segment.bold) props.attributes = BOLD
+  if (press) {
+    props.onMouseDown = press.onMouseDown
+    props.onMouseUp = press.onMouseUp
+  }
   renderer.spread(element, props)
   return element
 }
 
-/** One line as a row of its parts. */
+/** Whether a mouse event is a primary (left) button press. */
+const isPrimary = (event) => !event || event.button === undefined || event.button === 0
+
+/**
+ * The handlers a clickable part takes. A physical primary click arrives as a
+ * down and an up, not a click, so the action runs on the release — and only
+ * once. Both events are consumed: the press starts no text selection, and the
+ * release never reaches the dialog's own backdrop, which treats a release it
+ * sees as a click outside and closes the view the action just opened.
+ */
+function primaryClick(run) {
+  return {
+    onMouseDown: (event) => {
+      if (!isPrimary(event)) return
+      event?.preventDefault?.()
+      event?.stopPropagation?.()
+    },
+    onMouseUp: (event) => {
+      if (!isPrimary(event)) return
+      event?.preventDefault?.()
+      event?.stopPropagation?.()
+      run()
+    },
+  }
+}
+
+/** One line as a row of its parts. A part with an action takes that action's handlers. */
 function rowBox(renderer, segments, theme, options = {}) {
   const box = renderer.createElement("box")
-  const props = { flexDirection: "row", children: segments.map((segment) => textEl(renderer, segment, theme)) }
+  const actions = options.actions ?? {}
+  const props = {
+    flexDirection: "row",
+    children: segments.map((segment) => textEl(renderer, segment, theme, actions[segment.action])),
+  }
   if (options.paddingLeft !== undefined) props.paddingLeft = options.paddingLeft
   if (options.paddingRight !== undefined) props.paddingRight = options.paddingRight
   if (options.justifyContent) props.justifyContent = options.justifyContent
@@ -175,7 +215,7 @@ function plainLine(renderer, content) {
  * rows — each a bold muted header, then its rows — the today line and the
  * footer, one blank line between each block.
  */
-function bodyLines({ renderer, rows, status, selected, now, hours, theme }) {
+function bodyLines({ renderer, rows, status, selected, now, hours, theme, actions }) {
   const lines = [
     rowBox(renderer, titleParts(), theme, {
       paddingLeft: DIALOG_INSET,
@@ -201,7 +241,10 @@ function bodyLines({ renderer, rows, status, selected, now, hours, theme }) {
     }
   }
   lines.push(blankLine(renderer), rowBox(renderer, todayParts(read(status)), theme, { paddingLeft: DIALOG_INSET }))
-  lines.push(blankLine(renderer), rowBox(renderer, footerParts(), theme, { paddingLeft: DIALOG_INSET }))
+  lines.push(
+    blankLine(renderer),
+    rowBox(renderer, footerParts(), theme, { paddingLeft: DIALOG_INSET, actions }),
+  )
   lines.push(blankLine(renderer))
   return lines
 }
@@ -210,10 +253,11 @@ function bodyLines({ renderer, rows, status, selected, now, hours, theme }) {
  * The dialog's whole body. `rows`, `status`, `selected`, `now` and `hours` are
  * accessors, so the one reactive child the host renders reads them again
  * whenever the item map, the status, the selection or the config changes.
+ * `actions` maps a part's action name to the click handler that runs it.
  */
-export function dialogView({ renderer, rows, status, selected, now = Date.now, hours = () => undefined, theme }) {
+export function dialogView({ renderer, rows, status, selected, now = Date.now, hours = () => undefined, theme, actions }) {
   if (!renderer) return null
-  const body = renderer.createMemo(() => bodyLines({ renderer, rows, status, selected, now, hours, theme }))
+  const body = renderer.createMemo(() => bodyLines({ renderer, rows, status, selected, now, hours, theme, actions }))
   const dialog = renderer.createElement("box")
   renderer.spread(dialog, { flexDirection: "column", children: body })
   return dialog
@@ -250,6 +294,32 @@ async function setup(context, spawnProcess, rendererOverride) {
     const rows = () => pageRows(items(), live)
     const current = () => selectedItem(rows(), selected())
 
+    // The marker follows an item's identity, not its index: the identity the
+    // user last selected, and the display order they last saw. Both survive a
+    // refresh, a confirmation and a restore, so the same item stays marked when
+    // the rows are reordered and a removed item hands the marker to a neighbor.
+    let selectedID = null
+    let order = []
+
+    /** Put the marker on one index, and remember the identity it sits on. */
+    function select(index) {
+      const list = rows()
+      setSelected(index)
+      selectedID = list[index]?.item?.sessionID ?? null
+    }
+
+    /**
+     * Follow the rows after a change: keep the selected identity while it still
+     * has a row, else take its neighbor in the order the user last saw.
+     */
+    function reconcile(identity = selectedID) {
+      const list = rows()
+      const at = reconcileSelection(list, identity, order)
+      order = rowIDs(list)
+      setSelected(at)
+      selectedID = list[at]?.item?.sessionID ?? null
+    }
+
     /** The overview's own key layer, while its dialog is open. */
     let dropOverviewLayer = null
 
@@ -270,15 +340,14 @@ async function setup(context, spawnProcess, rendererOverride) {
         setItems(list?.items ?? [])
         setStatus(state)
         setHours(config?.config?.work_hours)
-        const count = (list?.items ?? []).length
-        if (selected() >= count) setSelected(moveSelection(0, count, 0))
+        reconcile()
       } catch (error) {
         toast(`${PAGE_TITLE}: ${messageOf(error)}`, "error")
       }
     }
 
     /** Move the marker one row, wrapping at both ends. */
-    const move = (step) => setSelected(moveSelection(selected(), rows().length, step))
+    const move = (step) => select(moveSelection(selected(), rows().length, step))
 
     /** Open one item's session, and record that the user has read it. */
     async function openItem(item) {
@@ -326,34 +395,56 @@ async function setup(context, spawnProcess, rendererOverride) {
     const refusedSessions = new Set()
 
     /**
-     * Close one item for good, on the user's `d`: the confirm names the item and
-     * what the delete takes with it, and only a yes calls `done`. The plugin
-     * closes the intake issue in the item's own session and deletes the
-     * session on the close turn's own proof, so the row leaves only then.
+     * Close one item for good, on the user's `d` or a click on the Done hint:
+     * the confirm names the captured item and what the delete takes with it, and
+     * only a yes calls `done`. The plugin closes the intake issue in the item's
+     * own session and deletes the session on the close turn's own proof, so the
+     * row leaves only then. The overview closes behind the confirm and comes
+     * back on the captured item whatever the answer: a cancel, a refusal or a
+     * failed request leaves the item visible and the overview usable.
      */
     async function closeItem(item) {
       if (!item) return
+      const captured = { sessionID: item.sessionID, title: item.title }
+      closeDialog()
       let confirmed
       try {
         confirmed = await context.ui.dialog.confirm({
           title: PAGE_TITLE,
-          message: `Close the intake issue of “${item.title}” and delete its session? The session and its child sessions are deleted, any turn in them stops, and this cannot be restored.`,
+          message: `Close the intake issue of “${captured.title}” and delete its session? The session and its child sessions are deleted, any turn in them stops, and this cannot be restored.`,
           label: { confirm: "Close and delete", cancel: "Cancel" },
         })
       } catch (error) {
         toast(`${PAGE_TITLE}: ${messageOf(error)}`, "error")
+        restoreOverview(captured.sessionID)
         return
       }
-      if (confirmed !== true) return
+      if (confirmed !== true) {
+        restoreOverview(captured.sessionID)
+        return
+      }
       try {
-        refusedSessions.delete(item.sessionID)
-        await rpc().done({ sessionID: item.sessionID })
+        refusedSessions.delete(captured.sessionID)
+        await rpc().done({ sessionID: captured.sessionID })
         // A refusal that arrived before the answer already told the user why;
         // "closing" would overwrite it.
-        if (!refusedSessions.delete(item.sessionID)) toast(`${PAGE_TITLE}: closing “${item.title}”`)
+        if (!refusedSessions.delete(captured.sessionID)) toast(`${PAGE_TITLE}: closing “${captured.title}”`)
       } catch (error) {
         toast(`${PAGE_TITLE}: ${messageOf(error)}`, "error")
       }
+      // The row leaves only when the item's record does: the close's own
+      // completion refreshes the list, and never reopens the overview.
+      restoreOverview(captured.sessionID)
+    }
+
+    /**
+     * Show the overview again, on the item the user left it on. The marker
+     * follows that item's identity through any reordering, and when the item is
+     * already gone it takes the neighbor the reconcile rule picks.
+     */
+    function restoreOverview(capturedID) {
+      reconcile(capturedID)
+      openOverview()
     }
 
     /** The config fields, one prompt per value, saved through the RPC contract. */
@@ -441,17 +532,22 @@ async function setup(context, spawnProcess, rendererOverride) {
             id: `${COMMAND_ID}.done`,
             title: "Close the item and delete its session",
             bind: "d",
-            run: () => {
-              const item = current()
-              closeDialog()
-              void closeItem(item)
-            },
+            run: () => void closeItem(current()),
           },
           { id: `${COMMAND_ID}.up`, title: "Move up", bind: "up", run: () => move(-1) },
           { id: `${COMMAND_ID}.down`, title: "Move down", bind: "down", run: () => move(1) },
         ],
       }))
     }
+
+    /**
+     * The click actions the dialog's parts carry. The Done hint runs the same
+     * close the `d` key runs, on the row the marker is on at the click; the
+     * click's own two events are consumed, so one physical click runs it once.
+     */
+    const dialogActions = () => ({
+      done: primaryClick(() => void closeItem(current())),
+    })
 
     /** Open the overview as a floating dialog over the current screen. */
     function openOverview() {
@@ -461,7 +557,16 @@ async function setup(context, spawnProcess, rendererOverride) {
       // the prompt's.
       context.ui.dialog.show(() => {
         if (dropOverviewLayer === null) dropOverviewLayer = overviewKeys()
-        return dialogView({ renderer, rows, status, selected, now: Date.now, hours, theme: theme() })
+        return dialogView({
+          renderer,
+          rows,
+          status,
+          selected,
+          now: Date.now,
+          hours,
+          theme: theme(),
+          actions: dialogActions(),
+        })
       }, dropLayer)
       context.ui.dialog.set({ size: DIALOG_SIZE, centered: true })
     }
@@ -489,7 +594,7 @@ async function setup(context, spawnProcess, rendererOverride) {
           slash: { name: "slack-director" },
           run: async () => {
             await refresh()
-            setSelected(0)
+            select(0)
             openOverview()
           },
         },

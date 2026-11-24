@@ -34,6 +34,8 @@ import {
   pageRows,
   partsText,
   pollClock,
+  reconcileSelection,
+  rowIDs,
   rowParts,
   rowText,
   sections,
@@ -365,6 +367,45 @@ test("the selection move wraps at both ends, and the marker picks the row the ke
   assert.equal(selectedItem(rows, 4).sessionID, "ses_5", "the selected row's item is the one the keys act on")
   assert.equal(selectedItem(rows, 0).sessionID, "ses_1")
   assert.equal(selectedItem([], 0), undefined)
+})
+
+test("the rows carry their identities in display order", () => {
+  const rows = pageRows(ITEMS, liveOf)
+  assert.deepEqual(rowIDs(rows), ["ses_1", "ses_2", "ses_3", "ses_4", "ses_5"])
+  assert.deepEqual(rowIDs([]), [])
+})
+
+test("the marker follows an identity through a reordering, and a removed item hands it to a neighbor", () => {
+  const ids = (order) => order.map((id) => ({ item: { sessionID: id }, state: "waiting" }))
+  const order = ["a", "b", "c", "d"]
+
+  assert.equal(
+    reconcileSelection(ids(["d", "c", "b", "a"]), "b", order),
+    2,
+    "the selected identity keeps the marker where it now sits",
+  )
+  assert.equal(reconcileSelection(ids(["a", "c", "d"]), "b", order), 1, "the next survivor takes it")
+  assert.equal(reconcileSelection(ids(["a", "d"]), "b", order), 1, "with no next survivor, the previous one takes it")
+  assert.equal(reconcileSelection(ids(["c", "d"]), "b", order), 0, "with neither, the first remaining row takes it")
+  assert.equal(reconcileSelection(ids(["c", "d"]), "a", ["a"]), 0, "the last item deleted picks the first remaining row")
+  assert.equal(reconcileSelection([], "b", order), 0, "an empty table marks no row")
+  assert.equal(reconcileSelection(ids(["a"]), "gone", []), 0, "an identity no order knows falls back to the first row")
+})
+
+test("the footer's Done hint carries the done action and no other part carries one", () => {
+  const carried = footerParts().filter((entry) => entry.action !== undefined)
+  assert.deepEqual(
+    carried.map((entry) => [entry.text, entry.action]),
+    [
+      ["d", "done"],
+      [" done", "done"],
+    ],
+    "the key and its label are the Done hint's two clickable parts",
+  )
+  assert.ok(
+    footerParts().filter((entry) => entry.action === undefined).every((entry) => !("action" in entry)),
+    "a part with no action keeps its plain shape",
+  )
 })
 
 test("the age counts from the flag, in minutes, then hours, then days", () => {

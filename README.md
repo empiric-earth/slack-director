@@ -66,6 +66,14 @@ opens its intake issue in your browser, `s` opens the Slack message, `r` polls
 now, `e` opens the settings dialog, `d` closes the item and deletes its session,
 and `esc` closes the dialog.
 
+Click Done or press `d` to close the item and delete its session. The confirm
+names the item and says the delete cannot be restored. Cancel or Esc returns to
+the same item, still highlighted, wherever it now sits in the list. Confirming
+starts the close; the item stays in the list until it is removed, and the
+overview comes straight back, so you can carry on. A close the watcher refuses,
+or a request that fails, keeps the item visible and shows the reason and what to
+do next; the overview stays usable, and you can try again through the confirm.
+
 While you are in a session, the sidebar carries one line:
 `Slack Director  2 waiting · 1 working`.
 
@@ -137,11 +145,13 @@ stays.
 - Deleting or archiving an item's session takes its row out of the overview for
   good. The message is not picked up again: a permalink that has had a session
   keeps its place, so a removed item gets no second session.
-- `d` closes the item for good: the item's own session posts a close-reason
-  comment and closes the intake issue as completed, and the plugin deletes the
-  session and every child session under it once that session's own reply names
-  the issue as closed. A turn running in the session is stopped. The confirm
-  before it names the item and says the delete cannot be restored.
+- `d`, or a click on the footer's Done hint, closes the item for good: the
+  item's own session posts a close-reason comment and closes the intake issue as
+  completed, and the plugin deletes the session and every child session under it
+  once that session's own reply names the issue as closed. A turn running in the
+  session is stopped. The confirm before it names the item and says the delete
+  cannot be restored; cancelling returns to the same item, and the row stays
+  until the session is actually deleted.
 - A session that is running, or one with a permission request pending, refuses
   the close and keeps its row: the close turn must be the only turn in the
   session. The dialog says the close was refused, and what to do next.

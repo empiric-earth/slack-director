@@ -106,6 +106,9 @@ function fakeTuiContext({
   promptAnswer,
   confirmAnswer,
 } = {}) {
+  // The item map the contract serves. `setItems` swaps it, so a test drives a
+  // refresh with rows that appeared, reordered or left.
+  let currentItems = items
   const layers = []
   const dropped = []
   const toasts = []
@@ -171,7 +174,7 @@ function fakeTuiContext({
           async items() {
             calls.push("items")
             if (rejection) throw rejection
-            return { items }
+            return { items: currentItems }
           },
           async getConfig() {
             calls.push("getConfig")
@@ -231,8 +234,14 @@ function fakeTuiContext({
     dialogs,
     dialogSettings,
     cleared,
+    setItems: (next) => {
+      currentItems = next
+    },
   }
 }
+
+/** The TUI part with a stub renderer, so the dialog's own element tree can be read. */
+const renderedTui = () => createTui({ renderer: stubRenderer() })
 
 /** The TUI part with the URL opener recorded rather than run. */
 function recordedTui(spawned) {
@@ -298,6 +307,36 @@ const modalLayer = (layers) => layers.find((layer) => layer.mode === "modal")
  * layer from that render; the layer lives and dies with the dialog.
  */
 const renderDialog = (dialogs) => dialogs.at(-1).render()
+
+/** Let the pending promises of a key's handler settle. */
+const tick = () => new Promise((resolve) => setImmediate(resolve))
+
+/** The dialog's clickable parts, in the order they are drawn. */
+const clickables = (view) =>
+  drawnLines(view)
+    .flatMap((line) => lineChildren(line))
+    .filter((child) => typeof child.props.onMouseUp === "function")
+
+/** A mouse event of the host's own shape. */
+const mouseEvent = (button = 0) => ({ button, preventDefault() {}, stopPropagation() {} })
+
+/** A primary click on one of the dialog's clickable parts: a press, then a release. */
+function primaryClick(view, index = 0) {
+  const part = clickables(view)[index]
+  assert.ok(part, `a clickable part is drawn at ${index}`)
+  part.props.onMouseDown(mouseEvent())
+  part.props.onMouseUp(mouseEvent())
+}
+
+/** The ITEM cell of the row the marker is on, or undefined when no row is marked. */
+function markedItem(view) {
+  const line = rowLines(view).find((candidate) => childWith(candidate, "┃") !== undefined)
+  return line ? lineChildren(line)[5].props.content.trim() : undefined
+}
+
+/** The modal layers the dialog has registered and not dropped. */
+const liveModalLayers = ({ layers, dropped }) =>
+  layers.filter((layer) => layer.mode === "modal" && !dropped.includes(layer))
 
 test("the RPC contract defines every method and every event with a schema", () => {
   assert.equal(SlackDirectorRpc.id, "slack-director")
@@ -564,6 +603,7 @@ test("d asks the confirm dialog once, naming the item and the delete, and a no a
   assert.match(confirms[0].message, /intake issue/i, "it says the intake issue will be closed")
   assert.match(confirms[0].message, /child sessions/i, "it says the session and its child sessions are deleted")
   assert.ok(cleared.length > 0, "the overview closes behind the confirm")
+  assert.equal(dialogs.length, 2, "the key's own cancel brings the overview back")
   assert.equal(calls.length, before, "a no answer calls no RPC method")
   assert.equal(calls.includes("done"), false)
 })
@@ -749,6 +789,272 @@ test("a refusal for another session does not hide the closing toast", async () =
   modalLayer(layers).commands.find((command) => command.bind === "d").run()
   await new Promise((resolve) => setImmediate(resolve))
   assert.match(toasts.at(-1).message, /closing/, "a refusal of another close leaves this close's toast")
+})
+
+test("the Done hint is clickable: a primary click asks one confirm for the marked row, and another button asks none", async () => {
+  const fake = fakeTuiContext({ confirmAnswer: false })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  const view = renderDialog(fake.dialogs)
+
+  assert.deepEqual(
+    clickables(view).map((child) => child.props.content),
+    ["d", " done"],
+    "only the Done key and its label carry a click handler",
+  )
+
+  // A non-primary press runs nothing, and a press alone is not yet a click.
+  const part = clickables(view)[0]
+  part.props.onMouseDown(mouseEvent(2))
+  part.props.onMouseUp(mouseEvent(2))
+  part.props.onMouseDown(mouseEvent(0))
+  await tick()
+  assert.equal(fake.confirms.length, 0, "a press alone, and another button, ask no confirm")
+
+  modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
+  primaryClick(renderDialog(fake.dialogs), 1)
+  await tick()
+  assert.equal(fake.confirms.length, 1, "one click asks one confirm")
+  assert.match(fake.confirms[0].message, /Review of the Terraform module change/, "the confirm names the marked row")
+  assert.equal(fake.cleared.length > 0, true, "the overview closes behind the confirm, so its commands cannot fire")
+})
+
+test("cancel restores the overview on the captured item, by identity, after its position moved", async () => {
+  const older = { ...ITEM, flaggedAt: "2026-11-19T14:00:00.000Z" }
+  const newer = {
+    ...ITEM,
+    sessionID: "ses_2",
+    title: "Review of the Terraform module change",
+    issueNumber: 40,
+    issueUrl: "https://github.com/empiric-earth/almeida-slack-intake/issues/40",
+    flaggedAt: "2026-11-19T14:30:00.000Z",
+  }
+  const fake = fakeTuiContext({ items: [older, newer], confirmAnswer: undefined })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+
+  // The older item sits second; the user selects it.
+  modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
+  assert.equal(markedItem(renderDialog(fake.dialogs)), ITEM.title)
+
+  // A refresh reorders the rows while the confirm is open, and the marker
+  // follows the identity rather than the position.
+  const opened = fake.dialogs.length
+  primaryClick(renderDialog(fake.dialogs), 0)
+  assert.equal(fake.dialogs.length, opened, "the overview is closed while the confirm is up")
+  await tick()
+  assert.equal(fake.confirms.length, 1)
+  fake.setItems([{ ...older, flaggedAt: "2026-11-19T14:45:00.000Z" }, newer])
+  fake.eventHandlers.find(([name]) => name === "updated")[1]()
+  await tick()
+
+  assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the cancel")
+  const restored = renderDialog(fake.dialogs)
+  assert.equal(markedItem(restored), ITEM.title, "the captured item is marked at its new position")
+  assert.deepEqual(fake.doneInputs, [], "a cancel sends no request")
+})
+
+test("only a yes sends one Done request, for the captured item, and the row stays until its record leaves", async () => {
+  const fake = fakeTuiContext({ confirmAnswer: true })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+  modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
+
+  const opened = fake.dialogs.length
+  primaryClick(renderDialog(fake.dialogs), 1)
+  await tick()
+  assert.deepEqual(fake.doneInputs, [{ sessionID: SECOND.sessionID }], "one request, for the captured item")
+  assert.equal(fake.calls.filter((name) => name === "done").length, 1, "and only once")
+  assert.equal(fake.dialogs.length, opened + 1, "the overview comes back without waiting for the deletion")
+
+  const restored = renderDialog(fake.dialogs)
+  assert.equal(rowLines(restored).length, 2, "the acknowledgment removes no row")
+  assert.equal(markedItem(restored), SECOND.title, "and the captured item stays marked")
+
+  // The record leaves only when the close completes; the marker hands over then.
+  fake.setItems([ITEM])
+  fake.eventHandlers.find(([name]) => name === "updated")[1]()
+  await tick()
+  const after = renderDialog(fake.dialogs)
+  assert.equal(rowLines(after).length, 1, "the removed row is gone")
+  assert.equal(markedItem(after), ITEM.title, "the surviving neighbor takes the marker")
+})
+
+test("a refusal keeps the item visible with the watcher's reason, and restores the overview", async () => {
+  const fake = fakeTuiContext({ confirmAnswer: true })
+  const base = fake.context.client.rpc
+  fake.context.client.rpc = (definition) => ({
+    ...base(definition),
+    async done(input) {
+      fake.eventHandlers.find(([name]) => name === "closeRefused")[1]({
+        sessionID: input.sessionID,
+        reason: "the session is running — try again when it is idle",
+      })
+      return {}
+    },
+  })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+  modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
+
+  const opened = fake.dialogs.length
+  primaryClick(renderDialog(fake.dialogs), 1)
+  await tick()
+  assert.equal(fake.toasts.at(-1).variant, "error", "a refusal is an error")
+  assert.match(fake.toasts.at(-1).message, /try again when it is idle/, "the reason and its recovery advice are shown")
+  assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the refusal")
+  const restored = renderDialog(fake.dialogs)
+  assert.equal(markedItem(restored), SECOND.title, "the still-listed item stays marked")
+  assert.equal(rowLines(restored).length, 2, "and its row stays visible")
+})
+
+test("a failed Done request shows the error and restores the overview, so the user can retry", async () => {
+  const fake = fakeTuiContext({ confirmAnswer: true })
+  const base = fake.context.client.rpc
+  fake.context.client.rpc = (definition) => ({
+    ...base(definition),
+    async done() {
+      throw new Error("RPC is unavailable: slack-director")
+    },
+  })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+
+  const opened = fake.dialogs.length
+  primaryClick(renderDialog(fake.dialogs), 0)
+  await tick()
+  assert.equal(fake.toasts.at(-1).variant, "error")
+  assert.match(fake.toasts.at(-1).message, /RPC is unavailable/, "the returned error is shown")
+  assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the failed request")
+  const restored = renderDialog(fake.dialogs)
+  assert.equal(markedItem(restored), ITEM.title, "the overview is back on the captured item")
+
+  // Retry through the confirm: a second press asks a second confirm and sends the request.
+  primaryClick(renderDialog(fake.dialogs), 0)
+  await tick()
+  assert.equal(fake.confirms.length, 2, "the retry asks the confirm again")
+})
+
+test("the restored overview answers one keypress once", async () => {
+  const fake = fakeTuiContext({ confirmAnswer: undefined })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+  modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
+
+  const opened = fake.dialogs.length
+  primaryClick(renderDialog(fake.dialogs), 0)
+  await tick()
+  assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the cancel")
+  const restored = renderDialog(fake.dialogs)
+  assert.equal(markedItem(restored), SECOND.title, "the restore marks the captured item")
+  assert.equal(liveModalLayers(fake).length, 1, "exactly one modal layer answers after the restore")
+  assert.equal(fake.dropped.length, 1, "the overview's earlier keys were dropped once")
+
+  liveModalLayers(fake)[0].commands.find((command) => command.bind === "down").run()
+  assert.equal(markedItem(restored), ITEM.title, "one keypress moves the marker exactly once")
+})
+
+test("a completion after the user left the overview never reopens it", async () => {
+  const fake = fakeTuiContext({ confirmAnswer: true })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+
+  primaryClick(renderDialog(fake.dialogs), 0)
+  await tick()
+  const opened = fake.dialogs.length
+  fake.dialogs.at(-1).onClose()
+  fake.setItems([SECOND])
+  fake.eventHandlers.find(([name]) => name === "updated")[1]()
+  await tick()
+  assert.equal(fake.dialogs.length, opened, "the later completion opens no dialog")
+})
+
+test("a delayed Done answer never reopens an overview the user has left", async () => {
+  const fake = fakeTuiContext({ confirmAnswer: true })
+  let settleDone
+  const base = fake.context.client.rpc
+  fake.context.client.rpc = (definition) => ({
+    ...base(definition),
+    done(input) {
+      fake.calls.push("done")
+      fake.doneInputs.push(input)
+      return new Promise((resolve) => {
+        settleDone = resolve
+      })
+    },
+  })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+  modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
+
+  // The user confirms the close of the marked item; its answer is still pending.
+  const before = fake.dialogs.length
+  primaryClick(renderDialog(fake.dialogs), 1)
+  await tick()
+  assert.deepEqual(fake.doneInputs, [{ sessionID: SECOND.sessionID }], "one request, for the captured item")
+  assert.equal(fake.dialogs.length, before + 1, "the overview comes back before the answer settles")
+
+  // While the answer is pending the user leaves that overview, opens a new one
+  // and moves its marker.
+  fake.dialogs.at(-1).onClose()
+  await fake.layers[0].commands[0].run()
+  const opened = fake.dialogs.length
+  renderDialog(fake.dialogs)
+  liveModalLayers(fake)[0].commands.find((command) => command.bind === "down").run()
+  assert.equal(markedItem(renderDialog(fake.dialogs)), SECOND.title, "the user's own selection is the marked one")
+  fake.dialogs.at(-1).onClose()
+
+  // The stale answer settles: it must not reopen the overview, nor move the marker.
+  settleDone({})
+  await tick()
+  assert.equal(fake.dialogs.length, opened, "the late answer opens no dialog")
+  assert.equal(markedItem(renderDialog(fake.dialogs)), SECOND.title, "and leaves the user's own selection where it was")
+})
+
+test("with no rows the Done hint asks no confirm and sends no request", async () => {
+  const fake = fakeTuiContext({ items: [], confirmAnswer: true })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  const view = renderDialog(fake.dialogs)
+
+  assert.deepEqual(clickables(view).map((child) => child.props.content), ["d", " done"], "the hint is still drawn")
+  primaryClick(view, 0)
+  await tick()
+  assert.equal(fake.confirms.length, 0, "no item, no confirm")
+  assert.deepEqual(fake.doneInputs, [], "no item, no request")
+  assert.equal(fake.dialogs.length, 1, "and the overview stays open")
+})
+
+test("deleting the last item leaves the empty overview with nothing to act on", async () => {
+  const fake = fakeTuiContext({ items: [ITEM], confirmAnswer: true })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+
+  const opened = fake.dialogs.length
+  primaryClick(renderDialog(fake.dialogs), 0)
+  await tick()
+  assert.deepEqual(fake.doneInputs, [{ sessionID: ITEM.sessionID }])
+  assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the confirmation")
+
+  fake.setItems([])
+  fake.eventHandlers.find(([name]) => name === "updated")[1]()
+  await tick()
+  const empty = renderDialog(fake.dialogs)
+  assert.equal(rowLines(empty).length, 0, "no row is drawn")
+  assert.equal(markedItem(empty), undefined, "and no row is marked")
+
+  primaryClick(empty, 0)
+  await tick()
+  assert.equal(fake.confirms.length, 1, "with nothing selected, the hint asks no further confirm")
+  assert.deepEqual(fake.doneInputs, [{ sessionID: ITEM.sessionID }], "and sends no further request")
 })
 
 test("a rejected call becomes a toast rather than a crash", async () => {

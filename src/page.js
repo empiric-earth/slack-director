@@ -32,8 +32,17 @@ export const AGE_WARNING_MINUTES = 4 * 60
 /** The widths the row's columns take, so long values are shortened with an ellipsis. */
 export const ROW_WIDTHS = { item: 44, asker: 15, channel: 16, issue: 6, age: 4 }
 
-/** One part of a line: its text, the colour role it takes, and whether it is bold. */
-const part = (text, role = "none", bold = false) => ({ text, role, bold })
+/**
+ * One part of a line: its text, the colour role it takes, whether it is bold,
+ * and — for a part a primary click runs — the name of the action it carries.
+ * The action is left out of every part that carries none, so a plain part's
+ * shape is unchanged.
+ */
+const part = (text, role = "none", bold = false, action) => {
+  const entry = { text, role, bold }
+  if (action !== undefined) entry.action = action
+  return entry
+}
 
 /** A line's parts as the one string a person reads. */
 export const partsText = (parts) => (parts ?? []).map((entry) => entry.text).join("")
@@ -90,6 +99,42 @@ export function moveSelection(index, count, step) {
 export function selectedItem(rows, index) {
   const row = (rows ?? [])[index ?? 0]
   return row?.item
+}
+
+/**
+ * The identity of every row, in display order: the item's own session id. The
+ * marker follows an identity, not a position, so a refresh that reorders the
+ * rows keeps the same item selected.
+ */
+export function rowIDs(rows) {
+  return (rows ?? []).map((row) => row.item?.sessionID)
+}
+
+/**
+ * The index the marker takes once the rows change. The selected identity wins
+ * while it still has a row. When it is gone, the next row that survives in the
+ * previous display order takes the marker, then the one before it, and when
+ * neither survives the first remaining row. An empty table has no row to mark,
+ * so no item is selected and no action can act on one.
+ */
+export function reconcileSelection(rows, selectedID, previousOrder = []) {
+  const list = rows ?? []
+  if (list.length === 0) return 0
+  const ids = rowIDs(list)
+  const still = ids.indexOf(selectedID)
+  if (still !== -1) return still
+  const from = (previousOrder ?? []).indexOf(selectedID)
+  if (from !== -1) {
+    for (let step = from + 1; step < previousOrder.length; step += 1) {
+      const found = ids.indexOf(previousOrder[step])
+      if (found !== -1) return found
+    }
+    for (let step = from - 1; step >= 0; step -= 1) {
+      const found = ids.indexOf(previousOrder[step])
+      if (found !== -1) return found
+    }
+  }
+  return 0
 }
 
 /** How long ago the flag was made, in the units the mock uses: minutes, then hours, then days. */
@@ -273,7 +318,11 @@ export function todayText(status) {
   return partsText(todayParts(status))
 }
 
-/** The footer: each key in base text, bold, then its muted label. */
+/**
+ * The footer: each key in base text, bold, then its muted label. The `d` key
+ * and its label carry the `done` action, so a primary click on the Done hint
+ * runs the same close the key does; every other part carries none.
+ */
 export function footerParts() {
   const keys = [
     ["↵", "session"],
@@ -281,13 +330,13 @@ export function footerParts() {
     ["s", "slack"],
     ["r", "refresh"],
     ["e", "settings"],
-    ["d", "done"],
+    ["d", "done", "done"],
   ]
   const parts = []
-  for (const [index, [key, label]] of keys.entries()) {
+  for (const [index, [key, label, action]] of keys.entries()) {
     if (index > 0) parts.push(part("   ", "muted"))
-    parts.push(part(key, "base", true))
-    parts.push(part(` ${label}`, "muted"))
+    parts.push(part(key, "base", true, action))
+    parts.push(part(` ${label}`, "muted", false, action))
   }
   return parts
 }

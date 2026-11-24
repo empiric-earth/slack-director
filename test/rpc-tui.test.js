@@ -16,12 +16,15 @@ import {
   PAGE_TITLE,
   STATE_MARK,
   countsText,
+  footerParts,
   footerText,
   headerText,
   moveSelection,
   pageRows,
+  partsText,
   rowText,
   sidebarText,
+  titleParts,
   todayText,
 } from "../src/page.js"
 import tui, { COMMAND_ID, SETTINGS_COMMAND_ID, createTui, dialogView, roleColour, selectedBackground } from "../tui.js"
@@ -253,6 +256,20 @@ function recordedTui(spawned) {
   })
 }
 
+/**
+ * The TUI part with both the stub renderer and the recorded opener, so a test
+ * can read the drawn tree and see what a click opened.
+ */
+function renderedRecordedTui(spawned) {
+  return createTui({
+    renderer: stubRenderer(),
+    spawnProcess: (command, args, options) => {
+      spawned.push({ command, args, options })
+      return { on: () => {}, unref: () => {} }
+    },
+  })
+}
+
 /** The host's element factory, replaced by a recorder with a plain memo. */
 function stubRenderer() {
   return {
@@ -327,6 +344,25 @@ function primaryClick(view, index = 0) {
   part.props.onMouseDown(mouseEvent())
   part.props.onMouseUp(mouseEvent())
 }
+
+/** The text of every clickable part, in the order it is drawn. */
+const clickableTexts = (view) => clickables(view).map((child) => child.props.content)
+
+/**
+ * A primary click on the one clickable part whose text is exactly `content`, so
+ * a test names the control it clicks instead of counting parts. Fails when no
+ * part reads that text, and when more than one does.
+ */
+function clickPart(view, content) {
+  const found = clickables(view).filter((child) => child.props.content === content)
+  assert.equal(found.length, 1, `exactly one clickable part reads ${JSON.stringify(content)}`)
+  found[0].props.onMouseDown(mouseEvent())
+  found[0].props.onMouseUp(mouseEvent())
+  return found[0]
+}
+
+/** A primary click on the footer's Done hint. */
+const clickDone = (view) => clickPart(view, "d")
 
 /** The ITEM cell of the row the marker is on, or undefined when no row is marked. */
 function markedItem(view) {
@@ -798,13 +834,13 @@ test("the Done hint is clickable: a primary click asks one confirm for the marke
   const view = renderDialog(fake.dialogs)
 
   assert.deepEqual(
-    clickables(view).map((child) => child.props.content),
-    ["d", " done"],
-    "only the Done key and its label carry a click handler",
+    clickableTexts(view),
+    ["esc", "↵", " session", "i", " issue", "s", " slack", "r", " refresh", "e", " settings", "d", " done"],
+    "the esc hint and every footer key and its label carry a click handler",
   )
 
   // A non-primary press runs nothing, and a press alone is not yet a click.
-  const part = clickables(view)[0]
+  const part = clickables(view).find((child) => child.props.content === "d")
   part.props.onMouseDown(mouseEvent(2))
   part.props.onMouseUp(mouseEvent(2))
   part.props.onMouseDown(mouseEvent(0))
@@ -812,11 +848,133 @@ test("the Done hint is clickable: a primary click asks one confirm for the marke
   assert.equal(fake.confirms.length, 0, "a press alone, and another button, ask no confirm")
 
   modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
-  primaryClick(renderDialog(fake.dialogs), 1)
+  clickDone(renderDialog(fake.dialogs))
   await tick()
   assert.equal(fake.confirms.length, 1, "one click asks one confirm")
   assert.match(fake.confirms[0].message, /Review of the Terraform module change/, "the confirm names the marked row")
   assert.equal(fake.cleared.length > 0, true, "the overview closes behind the confirm, so its commands cannot fire")
+})
+
+test("every footer control is one target: its glyph and its label carry the same action", () => {
+  const carried = footerParts().filter((entry) => entry.action !== undefined)
+  assert.deepEqual(
+    carried.map((entry) => [entry.text, entry.action]),
+    [
+      ["↵", "session"],
+      [" session", "session"],
+      ["i", "issue"],
+      [" issue", "issue"],
+      ["s", "slack"],
+      [" slack", "slack"],
+      ["r", "refresh"],
+      [" refresh", "refresh"],
+      ["e", "settings"],
+      [" settings", "settings"],
+      ["d", "done"],
+      [" done", "done"],
+    ],
+    "each key glyph and its label carry that key's own action",
+  )
+  assert.deepEqual(
+    footerParts()
+      .filter((entry) => entry.text === "   ")
+      .map((entry) => "action" in entry),
+    [false, false, false, false, false],
+    "the spacers between the controls carry no action",
+  )
+  assert.equal("action" in titleParts()[0], false, "the dialog's name is not a control")
+  assert.equal(titleParts()[1].action, "close", "the esc hint carries the close action")
+})
+
+test("a click on Issue, Slack or Refresh does what its shortcut does, on the marked row", async () => {
+  const spawned = []
+  const fake = fakeTuiContext()
+  await renderedRecordedTui(spawned).setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+  // The marked row is the second one, so a click must act on that row's own
+  // values and never on the first row's.
+  modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
+
+  clickPart(renderDialog(fake.dialogs), "i")
+  assert.deepEqual(spawned.at(-1).args, [SECOND.issueUrl], "a click on the Issue key opens the marked row's intake issue")
+  clickPart(renderDialog(fake.dialogs), " issue")
+  assert.deepEqual(spawned.at(-1).args, [SECOND.issueUrl], "a click on the Issue label opens the same issue")
+
+  clickPart(renderDialog(fake.dialogs), "s")
+  assert.deepEqual(spawned.at(-1).args, [SECOND.permalink], "a click on the Slack key opens the marked row's message")
+  clickPart(renderDialog(fake.dialogs), " slack")
+  assert.deepEqual(spawned.at(-1).args, [SECOND.permalink], "a click on the Slack label opens the same message")
+  assert.notEqual(SECOND.issueUrl, SECOND.permalink, "the two targets differ, so a swap between them is visible")
+
+  const polls = () => fake.calls.filter((name) => name === "pollNow").length
+  const before = polls()
+  clickPart(renderDialog(fake.dialogs), "r")
+  await tick()
+  assert.equal(polls(), before + 1, "a click on Refresh runs exactly one poll")
+  assert.equal(fake.dialogs.length, 1, "and leaves the overview open")
+})
+
+test("a click on Session, Settings or the esc hint runs its shortcut's own operation", async () => {
+  // Session: a click closes the overview and opens the marked row's session.
+  const session = fakeTuiContext()
+  await renderedTui().setup(session.context)
+  await session.layers[0].commands[0].run()
+  renderDialog(session.dialogs)
+  modalLayer(session.layers).commands.find((command) => command.bind === "down").run()
+  clickPart(renderDialog(session.dialogs), "↵")
+  await tick()
+  assert.deepEqual(session.opened, [{ sessionID: SECOND.sessionID }], "a click on Session marks the marked row read")
+  assert.deepEqual(session.navigations, [{ type: "session", sessionID: SECOND.sessionID }], "and opens its session")
+  assert.equal(session.cleared.length > 0, true, "the overview closes behind it")
+
+  // Settings: a click closes the overview and opens the settings dialog.
+  const settings = fakeTuiContext({ selectAnswer: undefined })
+  await renderedTui().setup(settings.context)
+  await settings.layers[0].commands[0].run()
+  renderDialog(settings.dialogs)
+  clickPart(renderDialog(settings.dialogs), "e")
+  await tick()
+  assert.equal(settings.selections.length, 1, "a click on Settings opens the settings dialog")
+  assert.equal(settings.cleared.length > 0, true, "the overview closes behind it")
+
+  // The esc hint: a click closes the overview and takes its keys with it, as
+  // the host's own Escape does.
+  const hint = fakeTuiContext()
+  await renderedTui().setup(hint.context)
+  await hint.layers[0].commands[0].run()
+  renderDialog(hint.dialogs)
+  assert.equal(liveModalLayers(hint).length, 1, "the overview's keys hold while it is open")
+  clickPart(renderDialog(hint.dialogs), "esc")
+  await tick()
+  assert.equal(hint.cleared.length > 0, true, "a click on the esc hint closes the overview")
+  assert.equal(hint.dropped.length, 1, "and its own keys go with it")
+  assert.equal(liveModalLayers(hint).length, 0, "so no modal layer answers afterwards")
+})
+
+test("a click in a gap between two controls runs nothing", async () => {
+  const spawned = []
+  const fake = fakeTuiContext({ selectAnswer: undefined })
+  await renderedRecordedTui(spawned).setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  const view = renderDialog(fake.dialogs)
+
+  // Every part that is not a control — the spacers between the footer controls,
+  // the dialog's name and its headings — carries no handler, so a press there
+  // reaches no action.
+  const footer = drawnLines(view).at(-2)
+  const spacers = lineChildren(footer).filter((child) => child.props.content === "   ")
+  assert.equal(spacers.length, 5, "a spacer sits between each pair of controls")
+  for (const spacer of spacers) assert.equal("onMouseUp" in spacer.props, false, "a gap cell carries no handler")
+  assert.equal("onMouseUp" in childWith(drawnLines(view)[0], PAGE_TITLE).props, false, "the dialog's name is not a control")
+  assert.equal("onMouseUp" in childWith(drawnLines(view)[5], "Waiting for you").props, false, "a heading is not a control")
+
+  // Nothing happened: no link opened, no session opened, no poll, no dialog.
+  assert.deepEqual(spawned, [], "no link was opened")
+  assert.deepEqual(fake.navigations, [], "no session was opened")
+  assert.deepEqual(fake.doneInputs, [], "no close was requested")
+  assert.equal(fake.calls.includes("pollNow"), false, "no poll ran")
+  assert.deepEqual(fake.selections, [], "no dialog opened")
 })
 
 test("cancel restores the overview on the captured item, by identity, after its position moved", async () => {
@@ -841,7 +999,7 @@ test("cancel restores the overview on the captured item, by identity, after its 
   // A refresh reorders the rows while the confirm is open, and the marker
   // follows the identity rather than the position.
   const opened = fake.dialogs.length
-  primaryClick(renderDialog(fake.dialogs), 0)
+  clickDone(renderDialog(fake.dialogs))
   assert.equal(fake.dialogs.length, opened, "the overview is closed while the confirm is up")
   await tick()
   assert.equal(fake.confirms.length, 1)
@@ -863,7 +1021,7 @@ test("only a yes sends one Done request, for the captured item, and the row stay
   modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
 
   const opened = fake.dialogs.length
-  primaryClick(renderDialog(fake.dialogs), 1)
+  clickDone(renderDialog(fake.dialogs))
   await tick()
   assert.deepEqual(fake.doneInputs, [{ sessionID: SECOND.sessionID }], "one request, for the captured item")
   assert.equal(fake.calls.filter((name) => name === "done").length, 1, "and only once")
@@ -901,7 +1059,7 @@ test("a refusal keeps the item visible with the watcher's reason, and restores t
   modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
 
   const opened = fake.dialogs.length
-  primaryClick(renderDialog(fake.dialogs), 1)
+  clickDone(renderDialog(fake.dialogs))
   await tick()
   assert.equal(fake.toasts.at(-1).variant, "error", "a refusal is an error")
   assert.match(fake.toasts.at(-1).message, /try again when it is idle/, "the reason and its recovery advice are shown")
@@ -925,7 +1083,7 @@ test("a failed Done request shows the error and restores the overview, so the us
   renderDialog(fake.dialogs)
 
   const opened = fake.dialogs.length
-  primaryClick(renderDialog(fake.dialogs), 0)
+  clickDone(renderDialog(fake.dialogs))
   await tick()
   assert.equal(fake.toasts.at(-1).variant, "error")
   assert.match(fake.toasts.at(-1).message, /RPC is unavailable/, "the returned error is shown")
@@ -934,7 +1092,7 @@ test("a failed Done request shows the error and restores the overview, so the us
   assert.equal(markedItem(restored), ITEM.title, "the overview is back on the captured item")
 
   // Retry through the confirm: a second press asks a second confirm and sends the request.
-  primaryClick(renderDialog(fake.dialogs), 0)
+  clickDone(renderDialog(fake.dialogs))
   await tick()
   assert.equal(fake.confirms.length, 2, "the retry asks the confirm again")
 })
@@ -947,7 +1105,7 @@ test("the restored overview answers one keypress once", async () => {
   modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
 
   const opened = fake.dialogs.length
-  primaryClick(renderDialog(fake.dialogs), 0)
+  clickDone(renderDialog(fake.dialogs))
   await tick()
   assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the cancel")
   const restored = renderDialog(fake.dialogs)
@@ -965,7 +1123,7 @@ test("a completion after the user left the overview never reopens it", async () 
   await fake.layers[0].commands[0].run()
   renderDialog(fake.dialogs)
 
-  primaryClick(renderDialog(fake.dialogs), 0)
+  clickDone(renderDialog(fake.dialogs))
   await tick()
   const opened = fake.dialogs.length
   fake.dialogs.at(-1).onClose()
@@ -996,7 +1154,7 @@ test("a delayed Done answer never reopens an overview the user has left", async 
 
   // The user confirms the close of the marked item; its answer is still pending.
   const before = fake.dialogs.length
-  primaryClick(renderDialog(fake.dialogs), 1)
+  clickDone(renderDialog(fake.dialogs))
   await tick()
   assert.deepEqual(fake.doneInputs, [{ sessionID: SECOND.sessionID }], "one request, for the captured item")
   assert.equal(fake.dialogs.length, before + 1, "the overview comes back before the answer settles")
@@ -1024,8 +1182,12 @@ test("with no rows the Done hint asks no confirm and sends no request", async ()
   await fake.layers[0].commands[0].run()
   const view = renderDialog(fake.dialogs)
 
-  assert.deepEqual(clickables(view).map((child) => child.props.content), ["d", " done"], "the hint is still drawn")
-  primaryClick(view, 0)
+  assert.deepEqual(
+    clickableTexts(view).slice(-2),
+    ["d", " done"],
+    "the Done hint is still drawn",
+  )
+  clickDone(view)
   await tick()
   assert.equal(fake.confirms.length, 0, "no item, no confirm")
   assert.deepEqual(fake.doneInputs, [], "no item, no request")
@@ -1039,7 +1201,7 @@ test("deleting the last item leaves the empty overview with nothing to act on", 
   renderDialog(fake.dialogs)
 
   const opened = fake.dialogs.length
-  primaryClick(renderDialog(fake.dialogs), 0)
+  clickDone(renderDialog(fake.dialogs))
   await tick()
   assert.deepEqual(fake.doneInputs, [{ sessionID: ITEM.sessionID }])
   assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the confirmation")
@@ -1051,7 +1213,7 @@ test("deleting the last item leaves the empty overview with nothing to act on", 
   assert.equal(rowLines(empty).length, 0, "no row is drawn")
   assert.equal(markedItem(empty), undefined, "and no row is marked")
 
-  primaryClick(empty, 0)
+  clickDone(empty)
   await tick()
   assert.equal(fake.confirms.length, 1, "with nothing selected, the hint asks no further confirm")
   assert.deepEqual(fake.doneInputs, [{ sessionID: ITEM.sessionID }], "and sends no further request")
@@ -1128,12 +1290,67 @@ test("the dialog draws the title, the header, the counts, the sections, the rows
     DIALOG_INSET,
     "and the row's mark aligns with it",
   )
-  assert.equal(childWith(lines[7], "Idle") !== undefined, true, "the idle section follows, with no empty section")
-  assert.equal(lineText(lines[8]), rowText(rows[1], { selected: false, now: NOW, hours: HOURS }))
-  assert.equal(lineText(lines[10]), todayText(STATUS))
-  assert.equal(lineText(lines[12]), footerText())
-  assert.equal(lines.length, 14)
-  assert.equal(lineText(lines[13]), "", "a blank margin line sits below the footer")
+  assert.equal(lineText(lines[7]), "", "exactly one blank line separates the two visible groups")
+  assert.equal(childWith(lines[8], "Idle") !== undefined, true, "the idle section follows, with no empty section")
+  assert.equal(lineText(lines[9]), rowText(rows[1], { selected: false, now: NOW, hours: HOURS }))
+  assert.equal(lineText(lines[11]), todayText(STATUS))
+  assert.equal(lineText(lines[13]), footerText())
+  assert.equal(lines.length, 15)
+  assert.equal(lineText(lines[14]), "", "a blank margin line sits below the footer")
+})
+
+test("exactly one blank line separates two visible groups, and none sits under a heading", () => {
+  const rowOf = (state, sessionID) => ({ item: { ...ITEM, sessionID }, state })
+  const texts = (view) => drawnLines(view).map((line) => lineText(line))
+
+  // Three groups shown: one blank line between each pair, and each heading's
+  // next line is its first row, never a blank.
+  const waiting = rowOf("waiting", "ses_1")
+  const working = rowOf("working", "ses_2")
+  const idle = rowOf("idle", "ses_3")
+  const three = viewOf([waiting, working, idle])
+  const threeTexts = texts(three)
+  assert.deepEqual(threeTexts, [
+    partsText(titleParts()),
+    headerText(STATUS),
+    "",
+    countsText([waiting, working, idle]),
+    "",
+    "Waiting for you",
+    rowText(waiting, { selected: true, now: NOW, hours: HOURS }),
+    "",
+    "Working",
+    rowText(working, { selected: false, now: NOW, hours: HOURS }),
+    "",
+    "Idle",
+    rowText(idle, { selected: false, now: NOW, hours: HOURS }),
+    "",
+    todayText(STATUS),
+    "",
+    footerText(),
+    "",
+  ])
+
+  // One group: its heading is followed by its first row and nothing separates a
+  // group from itself, so the layout carries no extra blank.
+  const single = viewOf([idle])
+  assert.deepEqual(texts(single).slice(4, 9), ["", "Idle", rowText(idle, { selected: true, now: NOW, hours: HOURS }), "", todayText(STATUS)])
+
+  // Two groups that are not adjacent — waiting and idle, with working absent —
+  // still take exactly one blank line between them.
+  const apart = viewOf([waiting, idle])
+  const apartTexts = texts(apart)
+  assert.deepEqual(apartTexts.slice(4, 9), [
+    "",
+    "Waiting for you",
+    rowText(waiting, { selected: true, now: NOW, hours: HOURS }),
+    "",
+    "Idle",
+  ])
+
+  // No group at all: no separator is drawn for a group that is not shown.
+  const none = viewOf([])
+  assert.deepEqual(texts(none).slice(3, 8), [countsText([]), "", "", todayText(STATUS), ""])
 })
 
 test("a failing workspace's mark takes the warning colour, and the rest of the header is muted", () => {

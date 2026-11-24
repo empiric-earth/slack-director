@@ -392,20 +392,32 @@ test("the marker follows an identity through a reordering, and a removed item ha
   assert.equal(reconcileSelection(ids(["a"]), "gone", []), 0, "an identity no order knows falls back to the first row")
 })
 
-test("the footer's Done hint carries the done action and no other part carries one", () => {
+test("every footer control carries its own action, and the esc hint carries close", () => {
   const carried = footerParts().filter((entry) => entry.action !== undefined)
   assert.deepEqual(
     carried.map((entry) => [entry.text, entry.action]),
     [
+      ["↵", "session"],
+      [" session", "session"],
+      ["i", "issue"],
+      [" issue", "issue"],
+      ["s", "slack"],
+      [" slack", "slack"],
+      ["r", "refresh"],
+      [" refresh", "refresh"],
+      ["e", "settings"],
+      [" settings", "settings"],
       ["d", "done"],
       [" done", "done"],
     ],
-    "the key and its label are the Done hint's two clickable parts",
+    "each key and its label are one control, with that key's own action",
   )
   assert.ok(
     footerParts().filter((entry) => entry.action === undefined).every((entry) => !("action" in entry)),
     "a part with no action keeps its plain shape",
   )
+  assert.equal("action" in titleParts()[0], false, "the dialog's name carries no action")
+  assert.equal(titleParts()[1].action, "close", "the esc hint carries the close action")
 })
 
 test("the age counts from the flag, in minutes, then hours, then days", () => {

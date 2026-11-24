@@ -11,7 +11,6 @@ import assert from "node:assert/strict"
 import {
   AGE_WARNING_MINUTES,
   DIALOG_INSET,
-  DIALOG_LIST_INSET,
   PAGE_TITLE,
   ROW_WIDTHS,
   SECTION_TITLE,
@@ -273,7 +272,7 @@ test("one row is the bar, the mark, then ITEM, ASKER, CHANNEL, the issue and AGE
   const rows = pageRows(ITEMS, liveOf)
   const parts = rowParts(rows[0], { selected: true, now: NOW, hours: HOURS })
 
-  assert.equal(parts[0].text, " ".repeat(DIALOG_LIST_INSET - 2), "the row starts at its inset")
+  assert.equal(parts[0].text, " ".repeat(DIALOG_INSET - 2), "the row starts at its inset")
   assert.equal(parts[1].text, "┃", "the selected row draws the bar")
   assert.equal(parts[1].role, "bar")
   assert.equal(parts[3].text, STATE_MARK.waiting)
@@ -411,8 +410,7 @@ test("a workspace's name drops the Slack MCP server's own prefix", () => {
 
 test("the dialog's title is the layout's own", () => {
   assert.equal(PAGE_TITLE, "Slack Director")
-  assert.equal(DIALOG_INSET, 3, "the host's own side inset")
-  assert.equal(DIALOG_LIST_INSET, 4, "the host's own list inset")
+  assert.equal(DIALOG_INSET, 3, "the one side inset every line takes")
 })
 
 test("the URL opener runs the system's opener for http and https, and refuses every other URL", () => {

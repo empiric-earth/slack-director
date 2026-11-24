@@ -14,11 +14,8 @@ export const PAGE_TITLE = "Slack Director"
 /** The dialog's size, as the host's own dialog sizes name it. */
 export const DIALOG_SIZE = "xlarge"
 
-/** The side inset the host's own list dialog gives its title, header and footer lines. */
+/** The side inset every line of the dialog takes, so the title, the section headers and the rows share one left edge. */
 export const DIALOG_INSET = 3
-
-/** The inset the host's own list dialog gives its rows and section headers. */
-export const DIALOG_LIST_INSET = 4
 
 /** The mark each state shows, and the only place a state colour is used. */
 export const STATE_MARK = { waiting: "●", working: "◐", idle: "○" }
@@ -328,7 +325,7 @@ export function rowParts(row, options = {}) {
   const now = options.now ?? Date.now()
   const itemRole = state === "idle" ? "muted" : "base"
   return [
-    part(" ".repeat(DIALOG_LIST_INSET - 2)),
+    part(" ".repeat(DIALOG_INSET - 2)),
     part(selected ? "┃" : " ", selected ? "bar" : "none"),
     part(" "),
     part(STATE_MARK[state] ?? " ", `state-${state}`),

@@ -358,9 +358,15 @@ export function createWatcher({
     return candidates
   }
 
-  /** Whether an error means the session is gone rather than unreadable. */
+  /**
+   * Whether an error means the session is gone rather than unreadable. The host
+   * throws a missing session as an `Error` tagged `Session.NotFoundError`, with
+   * an empty message and no code.
+   */
   const notFound = (error) =>
-    error?.code === "NOT_FOUND" || /not found|no such session/i.test(messageOf(error))
+    error?._tag === "Session.NotFoundError" ||
+    error?.code === "NOT_FOUND" ||
+    /not found|no such session/i.test(messageOf(error))
 
   /**
    * Whether a session's run times show a busy period that has not ended. The

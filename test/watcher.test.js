@@ -141,6 +141,18 @@ function earlierRecord({
 /** The run times of a session that has been idle and unchanged past the stale age. */
 const quietTimes = (now) => ({ busy: now - 3_600_000, idle: now - 3_500_000, updated: now - 20 * 60_000 })
 
+/**
+ * The error the host throws for a session read, prompt or remove on a missing
+ * session: an `Error` with an empty message, no code, and the own keys `_tag`
+ * and `sessionID`.
+ */
+function hostNotFound(sessionID) {
+  const error = new Error("")
+  error._tag = "Session.NotFoundError"
+  error.sessionID = sessionID
+  return error
+}
+
 /** Age one reissue claim and commit pair past the stale age. */
 function ageReissue(h, hash) {
   const old = new Date(h.now() - STALE_MS - 60_000)
@@ -304,7 +316,7 @@ function harness({
       const seeded = sessions.get(sessionID)
       if (seeded?.error) throw seeded.error
       if (seeded) return { id: sessionID, time: structuredClone(seeded.time) }
-      throw new Error(`session not found: ${sessionID}`)
+      throw hostNotFound(sessionID)
     },
     async context({ sessionID }) {
       return structuredClone(contexts.get(sessionID) ?? [])
@@ -2645,6 +2657,99 @@ test("done on a record whose session the host reports gone drops the record, sen
   }
 })
 
+test("the host's real not-found error has an empty message and no code, only its tag", () => {
+  const error = hostNotFound("ses_x")
+  assert.equal(error.message, "")
+  assert.equal(error.code, undefined)
+  assert.deepEqual(Object.keys(error).sort(), ["_tag", "sessionID"])
+  assert.equal(error._tag, "Session.NotFoundError")
+})
+
+test("a session read that throws the host's not-found error drops the record, sends no prompt and logs the issue was not closed", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    h.sessions.set(sessionID, { error: hostNotFound(sessionID) })
+    await h.watcher.done({ sessionID })
+    assert.equal(h.items()[link], undefined, "the record is dropped")
+    assert.equal(h.prompts.length, 1, "no close prompt is sent")
+    assert.deepEqual(h.removed, [], "no remove call is made")
+    assert.ok(
+      h.logs.some((line) => line.includes("record dropped — session gone, issue not closed")),
+      "the log says the intake issue was not closed",
+    )
+    assert.ok(
+      h.logs.every((line) => !/could not be read/.test(line)),
+      "the gone session is not misread as unreadable",
+    )
+  } finally {
+    h.clean()
+  }
+})
+
+test("a close prompt call that throws the host's not-found error drops the record", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    h.session.onPrompt = async () => {
+      throw hostNotFound(sessionID)
+    }
+    await h.watcher.done({ sessionID })
+    assert.equal(h.items()[link], undefined, "the record is dropped")
+    assert.equal(h.prompts.length, 1, "no close prompt was admitted")
+    assert.deepEqual(h.removed, [], "nothing is removed")
+    assert.ok(h.logs.some((line) => line.includes("record dropped — session gone, issue not closed")))
+  } finally {
+    h.clean()
+  }
+})
+
+test("a remove that throws the host's not-found error after a successful close turn drops the record", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    await h.watcher.done({ sessionID })
+    const admitted = h.prompts.at(-1).id
+    h.session.onRemove = async () => {
+      throw hostNotFound(sessionID)
+    }
+    h.contexts.set(sessionID, [...beforeClose(), closeMessage(admitted), replyMessage(`Closed: ${issue}`)])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.equal(h.items()[link], undefined, "a session that is already gone leaves its record dropped")
+    assert.ok(closeLogs(h).some((line) => line.endsWith("— removed")), "the close names the outcome")
+  } finally {
+    h.clean()
+  }
+})
+
+test("an error with an empty message and no tag or code is not a not-found error", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    h.sessions.set(sessionID, { error: new Error("") })
+    await h.watcher.done({ sessionID })
+    assert.ok(h.items()[link], "the record stays")
+    assert.equal(h.prompts.length, 1, "no close prompt is sent")
+    assert.deepEqual(h.removed, [], "no remove call is made")
+  } finally {
+    h.clean()
+  }
+})
+
+test("an earlier build's session that the host reports with its not-found error is quiet, so the record is reissued", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    h.setItems({
+      [link]: earlierRecord({ link, ts, sessionID: "ses_gone", flaggedAt: new Date(h.now()).toISOString() }),
+    })
+    h.setSeen([link])
+    // No seeded session: the harness host answers the missing session with its not-found error.
+    await h.watcher.poll()
+    assert.equal(h.created.length, 1, "a session the host reports gone lets the record be reissued")
+  } finally {
+    h.clean()
+  }
+})
+
 test("done on a record whose session read fails for another reason keeps the record and calls nothing", async () => {
   const { h, link, sessionID } = await closeableItem()
   try {
@@ -2793,7 +2898,7 @@ test("a no-issue record whose session is already gone still counts as removed", 
   const { h, link, sessionID } = await closeableItem({ issueUrl: null })
   try {
     h.session.onRemove = async () => {
-      throw new Error(`session not found: ${sessionID}`)
+      throw hostNotFound(sessionID)
     }
     await h.watcher.done({ sessionID })
     assert.equal(h.items()[link], undefined, "a session that is already gone leaves its record dropped")

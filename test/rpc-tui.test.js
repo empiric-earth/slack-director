@@ -711,6 +711,46 @@ test("a close the watcher refuses reaches the dialog as an error toast with what
   assert.match(toasts.at(-1).message, /try again/, "and what to do next")
 })
 
+test("a refusal event that arrives before the done answer is not overwritten by the closing toast", async () => {
+  const { context, layers, dialogs, toasts, eventHandlers } = fakeTuiContext({ confirmAnswer: true })
+  const base = context.client.rpc
+  context.client.rpc = (definition) => ({
+    ...base(definition),
+    async done(input) {
+      const refused = eventHandlers.find(([name]) => name === "closeRefused")
+      refused[1]({ sessionID: input.sessionID, reason: "the session is running — try again when it is idle" })
+      return {}
+    },
+  })
+  await tui.setup(context)
+  await layers[0].commands[0].run()
+  renderDialog(dialogs)
+  modalLayer(layers).commands.find((command) => command.bind === "d").run()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(toasts.at(-1).variant, "error", "the refusal stays the last toast")
+  assert.match(toasts.at(-1).message, /try again/, "and it still says what to do next")
+  assert.equal(toasts.some((toast) => /closing/.test(toast.message)), false, "no closing toast follows a refusal")
+})
+
+test("a refusal for another session does not hide the closing toast", async () => {
+  const { context, layers, dialogs, toasts, eventHandlers } = fakeTuiContext({ confirmAnswer: true })
+  const base = context.client.rpc
+  context.client.rpc = (definition) => ({
+    ...base(definition),
+    async done() {
+      const refused = eventHandlers.find(([name]) => name === "closeRefused")
+      refused[1]({ sessionID: "ses_other", reason: "the session is running — try again when it is idle" })
+      return {}
+    },
+  })
+  await tui.setup(context)
+  await layers[0].commands[0].run()
+  renderDialog(dialogs)
+  modalLayer(layers).commands.find((command) => command.bind === "d").run()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.match(toasts.at(-1).message, /closing/, "a refusal of another close leaves this close's toast")
+})
+
 test("a rejected call becomes a toast rather than a crash", async () => {
   const { context, toasts, layers, dialogs } = fakeTuiContext({ rejection: new Error("RPC is unavailable: slack-director") })
   await tui.setup(context)

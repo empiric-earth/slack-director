@@ -321,6 +321,10 @@ async function setup(context, spawnProcess, rendererOverride) {
       }
     }
 
+    // Sessions whose close the watcher refused by event; `closeItem` reads it
+    // so a refusal that beats the RPC answer is not overwritten.
+    const refusedSessions = new Set()
+
     /**
      * Close one item for good, on the user's `d`: the confirm names the item and
      * what the delete takes with it, and only a yes calls `done`. The plugin
@@ -342,8 +346,11 @@ async function setup(context, spawnProcess, rendererOverride) {
       }
       if (confirmed !== true) return
       try {
+        refusedSessions.delete(item.sessionID)
         await rpc().done({ sessionID: item.sessionID })
-        toast(`${PAGE_TITLE}: closing “${item.title}”`)
+        // A refusal that arrived before the answer already told the user why;
+        // "closing" would overwrite it.
+        if (!refusedSessions.delete(item.sessionID)) toast(`${PAGE_TITLE}: closing “${item.title}”`)
       } catch (error) {
         toast(`${PAGE_TITLE}: ${messageOf(error)}`, "error")
       }
@@ -501,6 +508,7 @@ async function setup(context, spawnProcess, rendererOverride) {
     // A close the watcher refuses reaches the dialog here, so the user is not
     // left waiting for a close that never ran: the reason says what to do next.
     const unsubscribeRefused = context.client.rpc(SlackDirectorRpc).events.on("closeRefused", (notice) => {
+      if (notice?.sessionID) refusedSessions.add(notice.sessionID)
       toast(`${PAGE_TITLE}: ${notice?.reason ?? "the close was refused"}`, "error")
     })
     void refresh()

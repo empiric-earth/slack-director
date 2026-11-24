@@ -251,9 +251,13 @@ export function workspaceLabel(name) {
   return text.startsWith("slack_") ? text.slice("slack_".length) : text
 }
 
-/** The title row: the dialog's name in base text, and `esc` in muted text. */
+/**
+ * The title row: the dialog's name in base text, and `esc` in muted text. The
+ * `esc` hint carries the `close` action, so a primary click on it closes the
+ * overview as the host's own Escape does; the name carries none.
+ */
 export function titleParts() {
-  return [part(PAGE_TITLE, "title", true), part("esc", "muted")]
+  return [part(PAGE_TITLE, "title", true), part("esc", "muted", false, "close")]
 }
 
 /**
@@ -319,17 +323,19 @@ export function todayText(status) {
 }
 
 /**
- * The footer: each key in base text, bold, then its muted label. The `d` key
- * and its label carry the `done` action, so a primary click on the Done hint
- * runs the same close the key does; every other part carries none.
+ * The footer: each key in base text, bold, then its muted label. Every key and
+ * its label carry that key's own action — `session`, `issue`, `slack`,
+ * `refresh`, `settings` or `done` — so a primary click on either part runs
+ * exactly what the key runs. The spacers between the controls carry no action,
+ * so a click in a gap runs nothing.
  */
 export function footerParts() {
   const keys = [
-    ["↵", "session"],
-    ["i", "issue"],
-    ["s", "slack"],
-    ["r", "refresh"],
-    ["e", "settings"],
+    ["↵", "session", "session"],
+    ["i", "issue", "issue"],
+    ["s", "slack", "slack"],
+    ["r", "refresh", "refresh"],
+    ["e", "settings", "settings"],
     ["d", "done", "done"],
   ]
   const parts = []

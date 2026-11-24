@@ -213,7 +213,9 @@ function plainLine(renderer, content) {
  * Every line of the dialog's body, in the order the mock lays them out: the
  * title row, the header line, the counts line, one section per state that has
  * rows — each a bold muted header, then its rows — the today line and the
- * footer, one blank line between each block.
+ * footer, one blank line between each block. Two sections that are both shown
+ * take exactly one blank line between them, and a section's header is followed
+ * by its first row with no blank between.
  */
 function bodyLines({ renderer, rows, status, selected, now, hours, theme, actions }) {
   const lines = [
@@ -221,13 +223,17 @@ function bodyLines({ renderer, rows, status, selected, now, hours, theme, action
       paddingLeft: DIALOG_INSET,
       paddingRight: DIALOG_INSET,
       justifyContent: "space-between",
+      actions,
     }),
     rowBox(renderer, headerParts(read(status)), theme, { paddingLeft: DIALOG_INSET }),
     blankLine(renderer),
     rowBox(renderer, countsParts(read(rows)), theme, { paddingLeft: DIALOG_INSET }),
     blankLine(renderer),
   ]
-  for (const section of sections(read(rows))) {
+  for (const [position, section] of sections(read(rows)).entries()) {
+    // One blank line between two visible groups, and none before the first one
+    // and none between a heading and its first row.
+    if (position > 0) lines.push(blankLine(renderer))
     lines.push(
       rowBox(renderer, [{ text: section.title, role: "muted", bold: true }], theme, { paddingLeft: DIALOG_INSET }),
     )
@@ -492,6 +498,27 @@ async function setup(context, spawnProcess, rendererOverride) {
       }
     }
 
+    /**
+     * The operations the overview's keys and its clickable parts both run, so a
+     * click on a control and its shortcut can never drift apart. Each one acts on
+     * the row the marker is on at that moment; a click with no row to act on runs
+     * the same no-op the key does.
+     */
+    const closeOverview = () => closeDialog()
+    const openSelected = () => {
+      const item = current()
+      closeDialog()
+      void openItem(item)
+    }
+    const openSelectedIssue = () => openUrl(current()?.issueUrl)
+    const openSelectedSlack = () => openUrl(current()?.permalink)
+    const pollNowFromOverview = () => void pollNow()
+    const openSettingsFromOverview = () => {
+      closeDialog()
+      void openSettings()
+    }
+    const closeSelectedItem = () => void closeItem(current())
+
     /** The overview's own keys, as one modal layer its dialog owns. */
     function overviewKeys() {
       return context.keymap.layer(() => ({
@@ -502,44 +529,37 @@ async function setup(context, spawnProcess, rendererOverride) {
             id: `${COMMAND_ID}.open`,
             title: "Open the item's session",
             bind: "return",
-            run: () => {
-              const item = current()
-              closeDialog()
-              void openItem(item)
-            },
+            run: openSelected,
           },
           {
             id: `${COMMAND_ID}.issue`,
             title: "Open the intake issue",
             bind: "i",
-            run: () => openUrl(current()?.issueUrl),
+            run: openSelectedIssue,
           },
           {
             id: `${COMMAND_ID}.slack`,
             title: "Open the message in Slack",
             bind: "s",
-            run: () => openUrl(current()?.permalink),
+            run: openSelectedSlack,
           },
           {
             id: `${COMMAND_ID}.poll`,
             title: "Poll now",
             bind: "r",
-            run: () => void pollNow(),
+            run: pollNowFromOverview,
           },
           {
             id: `${COMMAND_ID}.settings`,
             title: "Settings",
             bind: "e",
-            run: () => {
-              closeDialog()
-              void openSettings()
-            },
+            run: openSettingsFromOverview,
           },
           {
             id: `${COMMAND_ID}.done`,
             title: "Close the item and delete its session",
             bind: "d",
-            run: () => void closeItem(current()),
+            run: closeSelectedItem,
           },
           { id: `${COMMAND_ID}.up`, title: "Move up", bind: "up", run: () => move(-1) },
           { id: `${COMMAND_ID}.down`, title: "Move down", bind: "down", run: () => move(1) },
@@ -548,12 +568,20 @@ async function setup(context, spawnProcess, rendererOverride) {
     }
 
     /**
-     * The click actions the dialog's parts carry. The Done hint runs the same
-     * close the `d` key runs, on the row the marker is on at the click; the
-     * click's own two events are consumed, so one physical click runs it once.
+     * The click actions the dialog's parts carry, one per control: the `esc` hint
+     * closes the overview, and each footer key and its label run that key's own
+     * operation. Every one is wrapped so a physical primary click runs it once —
+     * on the release, with both events consumed, so the release never reaches the
+     * dialog's backdrop. A part with no action carries no handler at all.
      */
     const dialogActions = () => ({
-      done: primaryClick(() => void closeItem(current())),
+      close: primaryClick(closeOverview),
+      session: primaryClick(openSelected),
+      issue: primaryClick(openSelectedIssue),
+      slack: primaryClick(openSelectedSlack),
+      refresh: primaryClick(pollNowFromOverview),
+      settings: primaryClick(openSettingsFromOverview),
+      done: primaryClick(closeSelectedItem),
     })
 
     /** Open the overview as a floating dialog over the current screen. */

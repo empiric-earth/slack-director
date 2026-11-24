@@ -35,6 +35,35 @@ the command palette:
 - the today line carries the day's counts;
 - the footer names the keys.
 
+The dialog's shape, with one blank line between two groups that are shown:
+
+```
+Slack Director                                                                            esc
+last poll 14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps
+
+● 2 waiting for you   ◐ 1 working   ○ 1 idle
+
+Waiting for you
+ ┃ ● Access to the staging dashboards             Maria Costa     #platform-help   —      12m
+   ● Review of the Terraform module change        João Pereira    DM               —      1h
+
+Working
+   ◐ Why the nightly export job fails             Ana Silva       #data-eng        —      2m
+
+Idle
+   ○ Budget numbers for Q1 infra                  Rui Santos      GDM              —      1d
+
+today  4 flagged · 3 next steps posted
+
+↵ session   i issue   s slack   r refresh   e settings   d done
+```
+
+The issue cell shows `—` until the item's first turn has named its issue. A
+heading sits directly above its first row, and no blank line is drawn for a
+group that is not shown.
+
+Click an action or use its shortcut. The Esc hint closes the overview.
+
 There is no table header, and no state column of its own: the section a row
 sits under is its state, and the mark repeats it. The dialog follows OpenCode's
 own list dialog: an inset panel, a bold title, a bold muted section header, and

@@ -53,10 +53,10 @@ permissions:
     effect: deny
 ---
 
-The plugin starts one session per flagged Slack message on this agent, so the
-session you are in is already the agent that acts on the item. Load the
-`slack-director` skill before any Slack work: it holds the intake issue format,
-the first turn and the rules.
+The plugin starts one session per Slack message the user flags by reacting to it
+with the flag emoji, on this agent, so the session you are in is already the
+agent that acts on the item. Load the `slack-director` skill before any Slack
+work: it holds the intake issue format, the first turn and the rules.
 
 A flagged item's first turn finds or creates its intake issue, reads the thread
 and posts the findings and proposed next steps, then stops and waits for you.

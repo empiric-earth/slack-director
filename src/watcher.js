@@ -539,6 +539,7 @@ export function createWatcher({
       fetch,
       url: server.url,
       token: credential.access,
+      emoji: config.flag_emoji,
       timeoutMs: requestTimeoutMs,
       isSeen,
     })
@@ -549,6 +550,7 @@ export function createWatcher({
         fetch,
         url: server.url,
         token: credential.access,
+        emoji: config.flag_emoji,
         timeoutMs: requestTimeoutMs,
         isSeen,
       })

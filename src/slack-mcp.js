@@ -52,8 +52,10 @@ const CHANNEL_LINE = /^Channel:[ \t]*(.*)$/m
 const FROM_LINE = /^From:[ \t]*(.*)$/m
 const CURSOR_LINE = /cursor[^`\n]*`([^`]+)`/i
 
-/** The flag filter: the user's own Save-for-later list in each workspace. */
-export const SEARCH_FILTER = "is:saved"
+/** The flag filter: the messages the user reacted to with the flag emoji. */
+export function searchFilter(emoji) {
+  return `hasmy::${emoji}:`
+}
 
 /** The JSON-RPC body of an answer, from a JSON body or from an SSE body. */
 export function payloadOf(text) {
@@ -303,6 +305,7 @@ export async function searchFlagged({
   fetch,
   url = SLACK_MCP_URL,
   token,
+  emoji,
   limit = PAGE_LIMIT,
   timeoutMs = REQUEST_TIMEOUT_MS,
   isSeen = () => false,
@@ -360,7 +363,7 @@ export async function searchFlagged({
   }
 
   const argsFor = (cursor, size) => {
-    const args = { [SEARCH_FILTER_ARGUMENT]: SEARCH_FILTER, sort: SORT_BY, sort_dir: "desc", limit: size }
+    const args = { [SEARCH_FILTER_ARGUMENT]: searchFilter(emoji), sort: SORT_BY, sort_dir: "desc", limit: size }
     if (cursor) args.cursor = cursor
     return args
   }

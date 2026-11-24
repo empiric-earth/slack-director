@@ -63,18 +63,30 @@ export function normalizeWorkHours(value) {
   return { days: [...value.days], start: value.start, end: value.end, time_zone: value.time_zone }
 }
 
+/** The formatter each zone is read with, built once and reused. */
+const FORMATTERS = new Map()
+
+function formatterFor(zone) {
+  let formatter = FORMATTERS.get(zone)
+  if (formatter === undefined) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: zone,
+      weekday: "short",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    })
+    FORMATTERS.set(zone, formatter)
+  }
+  return formatter
+}
+
 /** The weekday, the calendar date and the minutes since midnight of an instant, in one zone. */
 function partsIn(zone, at) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone,
-    weekday: "short",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(new Date(at))
+  const parts = formatterFor(zone).formatToParts(new Date(at))
   const part = (type) => parts.find((entry) => entry.type === type)?.value
   return {
     day: part("weekday"),
@@ -104,16 +116,34 @@ function zoneOffsetMs(zone, at) {
   return asUTC - at
 }
 
+const MINUTE_MS = 60000
+const HOUR_MS = 3600000
+const DAY_MINUTES = 1440
+
 /**
- * The instant a wall-clock time on a local calendar date names in one zone. The
- * offset is read twice around the guess, so a zone whose offset changes near the
- * target still lands on the right minute.
+ * The next instant at or after `at` and below `limit` where the zone's offset
+ * changes, or `limit` when it does not. An hourly probe finds the change and a
+ * binary search lands on its own minute; no zone changes its offset twice within
+ * an hour.
  */
-function wallClockInstant(zone, year, month, date, minutes) {
-  const guess = Date.UTC(year, month - 1, date, Math.floor(minutes / 60), minutes % 60)
-  let instant = guess
-  for (let pass = 0; pass < 2; pass += 1) instant = guess - zoneOffsetMs(zone, instant)
-  return instant
+function transitionAfter(zone, at, limit) {
+  const offset = zoneOffsetMs(zone, at)
+  let probe = at
+  while (probe < limit) {
+    const next = Math.min(probe + HOUR_MS, limit)
+    if (zoneOffsetMs(zone, next) !== offset) {
+      let low = probe
+      let high = next
+      while (high - low > MINUTE_MS) {
+        const mid = low + Math.floor((high - low) / (2 * MINUTE_MS)) * MINUTE_MS
+        if (zoneOffsetMs(zone, mid) === offset) low = mid
+        else high = mid
+      }
+      return high
+    }
+    probe = next
+  }
+  return limit
 }
 
 /** The length of one day's window in minutes: `end` − `start`. */
@@ -125,40 +155,39 @@ export function workingDayMinutes(hours) {
 
 /**
  * The working minutes between two instants: the minutes of `[from, to]` that fall
- * in the window — a listed day, from `start` up to `end` — summed over each local
- * calendar day in the zone. Time outside the window, on a day the window does not
- * list, and after `to` or before `from` is not counted. Both instants are read at
- * whole-minute resolution, and `to` at or before `from` is zero minutes.
+ * in the window — a listed local day, from `start` up to `end` — counted in the
+ * zone's own clock. The interval is cut at each offset change and each local
+ * midnight, so a daylight-saving jump or repeat counts exactly the minutes the
+ * window's own `inWorkHours` predicate accepts, and a window time that does not
+ * exist on that day counts nothing. Time outside the window and on a day the
+ * window does not list is not counted; both instants are read at whole-minute
+ * resolution, and `to` at or before `from` is zero minutes.
  */
 export function workingMinutesBetween(hours, from, to) {
   const start = minutesOf(hours?.start)
   const end = minutesOf(hours?.end)
   if (start === undefined || end === undefined || end <= start) return 0
   const zone = hours.time_zone
-  const first = Math.floor(from / 60000) * 60000
-  const last = Math.floor(to / 60000) * 60000
+  const first = Math.floor(from / MINUTE_MS) * MINUTE_MS
+  const last = Math.floor(to / MINUTE_MS) * MINUTE_MS
   if (!(last > first)) return 0
-  const dayKey = (p) => p.year * 10000 + p.month * 100 + p.date
-  const startParts = partsIn(zone, first)
-  const lastKey = dayKey(partsIn(zone, last))
-  let year = startParts.year
-  let month = startParts.month
-  let date = startParts.date
+  const listed = hours.days ?? []
   let total = 0
-  // The loop advances one local calendar day at a time, so it ends; the guard
-  // only bounds a zone whose calendar arithmetic misbehaves.
-  for (let guard = 0; guard < 4000; guard += 1) {
-    if (year * 10000 + month * 100 + date > lastKey) break
-    const weekday = DAY_NAMES[(new Date(Date.UTC(year, month - 1, date)).getUTCDay() + 6) % 7]
-    if (hours.days.includes(weekday)) {
-      const windowStart = wallClockInstant(zone, year, month, date, start)
-      const windowEnd = wallClockInstant(zone, year, month, date, end)
-      total += Math.max(0, Math.min(last, windowEnd) - Math.max(first, windowStart))
+  let cursor = first
+  while (cursor < last) {
+    const segmentEnd = transitionAfter(zone, cursor, last)
+    let at = cursor
+    while (at < segmentEnd) {
+      const { day, minutes } = partsIn(zone, at)
+      const midnight = at + (DAY_MINUTES - minutes) * MINUTE_MS
+      const pieceEnd = midnight < segmentEnd ? midnight : segmentEnd
+      if (listed.includes(day)) {
+        const length = (pieceEnd - at) / MINUTE_MS
+        total += Math.max(0, Math.min(minutes + length, end) - Math.max(minutes, start))
+      }
+      at = pieceEnd
     }
-    const next = new Date(Date.UTC(year, month - 1, date) + 86400000)
-    year = next.getUTCFullYear()
-    month = next.getUTCMonth() + 1
-    date = next.getUTCDate()
+    cursor = segmentEnd
   }
-  return total / 60000
+  return total
 }

@@ -262,7 +262,7 @@ export function sections(rows) {
   })).filter((section) => section.entries.length > 0)
 }
 
-/** The today line: the day's counts, without the skipped hits the dialog no longer shows. */
+/** The today line: the day's counts. */
 export function todayParts(status) {
   const today = status?.today ?? {}
   return [

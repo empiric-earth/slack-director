@@ -162,6 +162,13 @@ function blankLine(renderer) {
   return element
 }
 
+/** One plain line of text, in the host's own default colour. */
+function plainLine(renderer, content) {
+  const element = renderer.createElement("text")
+  renderer.spread(element, { content })
+  return element
+}
+
 /**
  * Every line of the dialog's body, in the order the mock lays them out: the
  * title row, the header line, the counts line, one section per state that has
@@ -209,10 +216,12 @@ export function dialogView({ renderer, rows, status, selected, now = Date.now, h
 
 /**
  * The TUI part. The process spawner the URL opener uses is a parameter, so the
- * suite drives the keys with a recorder and never opens a browser.
+ * suite drives the keys with a recorder and never opens a browser; the renderer
+ * the host serves is one too, so the suite drives the sidebar and the dialog
+ * with a stub where no TUI is running.
  */
-async function setup(context, spawnProcess) {
-    const renderer = await loadRenderer()
+async function setup(context, spawnProcess, rendererOverride) {
+    const renderer = rendererOverride ?? (await loadRenderer())
     const [items, setItems] = signalOf(renderer, [])
     const [status, setStatus] = signalOf(renderer, undefined)
     const [hours, setHours] = signalOf(renderer, undefined)
@@ -415,7 +424,7 @@ async function setup(context, spawnProcess) {
 
     const unregisterSidebar = context.ui.slot({
       append: "sidebar.content",
-      render: () => line(renderer, sidebarText(rows())),
+      render: () => plainLine(renderer, sidebarText(rows())),
     })
 
     context.keymap.layer(() => ({
@@ -455,8 +464,8 @@ async function setup(context, spawnProcess) {
 }
 
 /** The plugin the TUI host loads, over the operating system's own opener. */
-export function createTui({ spawnProcess = spawn } = {}) {
-  return { id: "slack-director.tui", setup: (context) => setup(context, spawnProcess) }
+export function createTui({ spawnProcess = spawn, renderer } = {}) {
+  return { id: "slack-director.tui", setup: (context) => setup(context, spawnProcess, renderer) }
 }
 
 export default createTui()

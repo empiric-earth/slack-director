@@ -782,6 +782,15 @@ test("the sidebar line carries the counts", async () => {
   assert.equal(typeof slots[0].render, "function")
 })
 
+test("the sidebar slot renders its line, so the host never hits a missing helper", async () => {
+  const { context, slots } = fakeTuiContext()
+  await createTui({ renderer: stubRenderer() }).setup(context)
+  await new Promise((resolve) => setImmediate(resolve))
+  const element = slots[0].render()
+  assert.equal(element.type, "text")
+  assert.equal(element.props.content, sidebarText(pageRows([ITEM, SECOND], () => ({ running: false, pending: 0 }))))
+})
+
 test("the dialog shows no Slack message text and no permalink", () => {
   const view = viewOf(pageRows([ITEM], () => ({ running: false, pending: 0 })))
   for (const line of drawnLines(view)) {

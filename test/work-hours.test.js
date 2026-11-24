@@ -54,3 +54,38 @@ test("the window's own predicate still holds", () => {
   assert.equal(inWorkHours(HOURS, at("2026-11-21T10:00:00Z")), false, "a day the window does not list")
   assert.equal(validateWorkHours(HOURS), undefined, "the window this suite uses is valid")
 })
+
+test("a window time that does not exist on a spring-forward day counts only the minutes that do", () => {
+  // 2026-03-08 is a Sunday, and America/New_York jumps 02:00 to 03:00, so the
+  // window's own 02:30 start does not exist; the window admits 03:00 to 04:00.
+  const spring = { days: ["Sun"], start: "02:30", end: "04:00", time_zone: "America/New_York" }
+  assert.equal(workingMinutesBetween(spring, at("2026-03-08T06:00:00Z"), at("2026-03-08T09:00:00Z")), 60)
+})
+
+test("a window wholly inside a spring-forward gap counts nothing", () => {
+  const gap = { days: ["Sun"], start: "02:15", end: "02:45", time_zone: "America/New_York" }
+  assert.equal(workingMinutesBetween(gap, at("2026-03-08T06:00:00Z"), at("2026-03-08T09:00:00Z")), 0)
+})
+
+test("a window in the repeated hour of a fall-back day counts both passes", () => {
+  // 2026-11-01 is a Sunday, and America/New_York repeats 01:00 to 02:00, so the
+  // window's own 01:30 to 01:45 runs twice and counts thirty minutes.
+  const fall = { days: ["Sun"], start: "01:30", end: "01:45", time_zone: "America/New_York" }
+  assert.equal(workingMinutesBetween(fall, at("2026-11-01T04:00:00Z"), at("2026-11-01T09:00:00Z")), 30)
+})
+
+test("the counted minutes match the window's own predicate across a daylight-saving week", () => {
+  const windows = [
+    { days: ["Sun"], start: "02:30", end: "04:00", time_zone: "America/New_York" },
+    { days: ["Mon", "Tue", "Wed", "Thu", "Fri"], start: "09:00", end: "18:00", time_zone: "America/New_York" },
+  ]
+  for (const window of windows) {
+    const from = at("2026-03-06T00:00:00Z")
+    const to = at("2026-03-11T00:00:00Z")
+    let brute = 0
+    for (let t = Math.floor(from / 60000) * 60000; t < to; t += 60000) {
+      if (inWorkHours(window, t)) brute += 1
+    }
+    assert.equal(workingMinutesBetween(window, from, to), brute, JSON.stringify(window))
+  }
+})

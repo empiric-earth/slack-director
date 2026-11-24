@@ -137,7 +137,7 @@ export function selectedBackground(theme) {
 /**
  * One part of a line, as the host's text element. A part that carries an action
  * takes that action's mouse handlers, so the host's own mouse routing is what
- * decides a press landed on it.
+ * decides which part a press hits.
  */
 function textEl(renderer, segment, theme, press) {
   const element = renderer.createElement("text")

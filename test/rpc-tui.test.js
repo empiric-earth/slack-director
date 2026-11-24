@@ -603,6 +603,7 @@ test("d asks the confirm dialog once, naming the item and the delete, and a no a
   assert.match(confirms[0].message, /intake issue/i, "it says the intake issue will be closed")
   assert.match(confirms[0].message, /child sessions/i, "it says the session and its child sessions are deleted")
   assert.ok(cleared.length > 0, "the overview closes behind the confirm")
+  assert.equal(dialogs.length, 2, "the key's own cancel brings the overview back")
   assert.equal(calls.length, before, "a no answer calls no RPC method")
   assert.equal(calls.includes("done"), false)
 })
@@ -839,13 +840,16 @@ test("cancel restores the overview on the captured item, by identity, after its 
 
   // A refresh reorders the rows while the confirm is open, and the marker
   // follows the identity rather than the position.
+  const opened = fake.dialogs.length
   primaryClick(renderDialog(fake.dialogs), 0)
+  assert.equal(fake.dialogs.length, opened, "the overview is closed while the confirm is up")
   await tick()
   assert.equal(fake.confirms.length, 1)
   fake.setItems([{ ...older, flaggedAt: "2026-11-19T14:45:00.000Z" }, newer])
   fake.eventHandlers.find(([name]) => name === "updated")[1]()
   await tick()
 
+  assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the cancel")
   const restored = renderDialog(fake.dialogs)
   assert.equal(markedItem(restored), ITEM.title, "the captured item is marked at its new position")
   assert.deepEqual(fake.doneInputs, [], "a cancel sends no request")
@@ -858,10 +862,12 @@ test("only a yes sends one Done request, for the captured item, and the row stay
   renderDialog(fake.dialogs)
   modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
 
+  const opened = fake.dialogs.length
   primaryClick(renderDialog(fake.dialogs), 1)
   await tick()
   assert.deepEqual(fake.doneInputs, [{ sessionID: SECOND.sessionID }], "one request, for the captured item")
   assert.equal(fake.calls.filter((name) => name === "done").length, 1, "and only once")
+  assert.equal(fake.dialogs.length, opened + 1, "the overview comes back without waiting for the deletion")
 
   const restored = renderDialog(fake.dialogs)
   assert.equal(rowLines(restored).length, 2, "the acknowledgment removes no row")
@@ -894,10 +900,12 @@ test("a refusal keeps the item visible with the watcher's reason, and restores t
   renderDialog(fake.dialogs)
   modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
 
+  const opened = fake.dialogs.length
   primaryClick(renderDialog(fake.dialogs), 1)
   await tick()
   assert.equal(fake.toasts.at(-1).variant, "error", "a refusal is an error")
   assert.match(fake.toasts.at(-1).message, /try again when it is idle/, "the reason and its recovery advice are shown")
+  assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the refusal")
   const restored = renderDialog(fake.dialogs)
   assert.equal(markedItem(restored), SECOND.title, "the still-listed item stays marked")
   assert.equal(rowLines(restored).length, 2, "and its row stays visible")
@@ -916,10 +924,12 @@ test("a failed Done request shows the error and restores the overview, so the us
   await fake.layers[0].commands[0].run()
   renderDialog(fake.dialogs)
 
+  const opened = fake.dialogs.length
   primaryClick(renderDialog(fake.dialogs), 0)
   await tick()
   assert.equal(fake.toasts.at(-1).variant, "error")
   assert.match(fake.toasts.at(-1).message, /RPC is unavailable/, "the returned error is shown")
+  assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the failed request")
   const restored = renderDialog(fake.dialogs)
   assert.equal(markedItem(restored), ITEM.title, "the overview is back on the captured item")
 
@@ -936,8 +946,10 @@ test("the restored overview answers one keypress once", async () => {
   renderDialog(fake.dialogs)
   modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
 
+  const opened = fake.dialogs.length
   primaryClick(renderDialog(fake.dialogs), 0)
   await tick()
+  assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the cancel")
   const restored = renderDialog(fake.dialogs)
   assert.equal(markedItem(restored), SECOND.title, "the restore marks the captured item")
   assert.equal(liveModalLayers(fake).length, 1, "exactly one modal layer answers after the restore")
@@ -983,9 +995,11 @@ test("deleting the last item leaves the empty overview with nothing to act on", 
   await fake.layers[0].commands[0].run()
   renderDialog(fake.dialogs)
 
+  const opened = fake.dialogs.length
   primaryClick(renderDialog(fake.dialogs), 0)
   await tick()
   assert.deepEqual(fake.doneInputs, [{ sessionID: ITEM.sessionID }])
+  assert.equal(fake.dialogs.length, opened + 1, "the overview is shown again after the confirmation")
 
   fake.setItems([])
   fake.eventHandlers.find(([name]) => name === "updated")[1]()

@@ -1652,7 +1652,7 @@ test("no item record, status value or config field holds the token or a message'
   }
 })
 
-test("the watcher acts on the turn-end and permission events, and on no other", async () => {
+test("the watcher acts on the turn-end, permission and session-lifecycle events, and on no other", async () => {
   const ts = message(60)
   const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
   try {
@@ -1662,6 +1662,8 @@ test("the watcher acts on the turn-end and permission events, and on no other", 
       "session.execution.interrupted",
       "permission.asked",
       "permission.replied",
+      "session.deleted",
+      "session.archived",
     ])
     await h.watcher.poll()
     const sessionID = h.created[0].id
@@ -2085,5 +2087,234 @@ test("a poll reconciles a reissue commit whose holder stopped before the replace
     } finally {
       h.clean()
     }
+  }
+})
+
+/**
+ * Hold the next read of the item map, so a test can run a removal between one
+ * update path's read of a record and that path's own write of it.
+ */
+function parkNextItemsRead(h) {
+  const realGet = h.storage.get.bind(h.storage)
+  let held = false
+  let release
+  const gate = new Promise((resolve) => (release = resolve))
+  let reads = 0
+  h.storage.get = async (key) => {
+    const value = await realGet(key)
+    if (key === KEYS.items && !held) {
+      held = true
+      reads += 1
+      await gate
+    }
+    return value
+  }
+  return { release, reads: () => reads }
+}
+
+test("a session.deleted event removes the item record of that session and sends the change notice once", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    assert.ok(h.items()[link], "the item record is there before the event")
+    h.changes.length = 0
+    await h.watcher.observe({ type: "session.deleted", data: { sessionID } })
+    assert.equal(h.items()[link], undefined, "the record is gone from the item map")
+    assert.deepEqual((await h.watcher.items()).items, [], "and gone from the answer the dialog reads")
+    assert.equal(h.changes.length, 1, "the change notice is sent once")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a session.archived event removes the item record of that session and sends the change notice once", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    assert.ok(h.items()[link], "the item record is there before the event")
+    h.changes.length = 0
+    await h.watcher.observe({ type: "session.archived", data: { sessionID } })
+    assert.equal(h.items()[link], undefined, "the record is gone from the item map")
+    assert.equal(h.changes.length, 1, "the change notice is sent once")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a removed record keeps its permalink in the seen-set, so a later poll never picks the message up again", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    assert.deepEqual(h.seen(), [link], "the poll recorded the permalink")
+    await h.watcher.observe({ type: "session.deleted", data: { sessionID } })
+    assert.equal(h.items()[link], undefined, "the record is gone")
+    assert.deepEqual(h.seen(), [link], "the seen-set still holds the permalink")
+    h.clock.ms += h.config.poll_seconds * 1000
+    await h.watcher.poll()
+    assert.equal(h.created.length, 1, "the next poll creates no session")
+    assert.equal(h.prompts.length, 1, "and sends no prompt")
+    assert.equal(h.items()[link], undefined, "and writes no record back")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a deleted or archived event for a session no record names changes nothing", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const before = JSON.stringify(h.items())
+    h.changes.length = 0
+    for (const type of ["session.deleted", "session.archived"]) {
+      await h.watcher.observe({ type, data: { sessionID: "ses_not_ours" } })
+    }
+    assert.equal(JSON.stringify(h.items()), before, "the item map is unchanged")
+    assert.deepEqual(h.changes, [], "and no change notice is sent")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a removal is never undone by a same-item update that read the record before it", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const issue = "https://github.com/empiric-earth/almeida-slack-intake/issues/41"
+  const pages = { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] }
+  const paths = [
+    {
+      name: "the user opened the item",
+      run: (h, sessionID) => h.watcher.markOpened({ sessionID }),
+    },
+    {
+      name: "a permission request arrived",
+      run: (h, sessionID) => h.watcher.observe({ type: "permission.asked", data: { id: "per_1", sessionID } }),
+    },
+    {
+      name: "a permission request was answered",
+      prepare: async (h, sessionID) => {
+        await h.watcher.observe({ type: "permission.asked", data: { id: "per_1", sessionID } })
+      },
+      run: (h, sessionID) =>
+        h.watcher.observe({ type: "permission.replied", data: { sessionID, requestID: "per_1", reply: "once" } }),
+    },
+    {
+      name: "a first turn ended with an issue",
+      prepare: async (h, sessionID) => {
+        h.contexts.set(sessionID, [
+          {
+            type: "assistant",
+            content: [{ type: "text", text: `Findings.\n\nIntake issue: ${issue}\nTitle: Access to the staging dashboards` }],
+          },
+        ])
+      },
+      run: (h, sessionID) => h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } }),
+    },
+  ]
+  for (const item of paths) {
+    const h = harness({ servers: [NEXAR], pages })
+    try {
+      await h.watcher.poll()
+      const sessionID = h.created[0].id
+      if (item.prepare) await item.prepare(h, sessionID)
+      assert.ok(h.items()[link], `${item.name}: the record is there before the path`)
+      const park = parkNextItemsRead(h)
+      const path = item.run(h, sessionID)
+      await waitFor(() => park.reads() === 1, `${item.name}: the path to read the item map`)
+      await h.watcher.dropSessionRecord(sessionID)
+      assert.equal(h.items()[link], undefined, `${item.name}: the removal left no record`)
+      h.changes.length = 0
+      park.release()
+      await path
+      assert.equal(h.items()[link], undefined, `${item.name}: the stale write does not bring the record back`)
+      assert.deepEqual(h.changes, [], `${item.name}: the stale write sends no change notice`)
+      assert.deepEqual(h.retitles, [], `${item.name}: no session is retitled`)
+    } finally {
+      h.clean()
+    }
+  }
+})
+
+test("a removal and a write for another item that run at the same time both survive", async () => {
+  const tsA = message(60)
+  const tsB = message(120)
+  const linkA = permalinkOf("C0AAAAAAAA", tsA)
+  const linkB = permalinkOf("C0BBBBBBBB", tsB)
+  const h = harness({
+    servers: [NEXAR],
+    pages: { "tok-nexar": rowsPages([hitRow("C0AAAAAAAA", tsA, "#a"), hitRow("C0BBBBBBBB", tsB, "#b")]) },
+  })
+  try {
+    await h.watcher.poll()
+    assert.equal(h.created.length, 2, "each item got its session")
+    const [sesA, sesB] = h.created.map((session) => session.id)
+    await Promise.all([h.watcher.dropSessionRecord(sesA), h.watcher.markOpened({ sessionID: sesB })])
+    assert.equal(h.items()[linkA], undefined, "the removed item's record is gone")
+    assert.ok(h.items()[linkB], "the other item's record survives")
+    assert.equal(typeof h.items()[linkB].openedAt, "string", "and takes the other path's write")
+  } finally {
+    h.clean()
+  }
+})
+
+test("an update whose record now names another session writes nothing", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    await h.watcher.poll()
+    const sessionID = h.created[0].id
+    const park = parkNextItemsRead(h)
+    const path = h.watcher.markOpened({ sessionID })
+    await waitFor(() => park.reads() === 1, "the path to read the item map")
+    // A reissue replaced the record with one naming another session.
+    h.setItems({ [link]: { ...h.items()[link], sessionID: "ses_reissued" } })
+    h.changes.length = 0
+    park.release()
+    await path
+    assert.equal(h.items()[link].sessionID, "ses_reissued", "the record still names the other session")
+    assert.equal(h.items()[link].openedAt, null, "and takes none of the stale write's field changes")
+    assert.deepEqual(h.changes, [], "and no change notice is sent")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a reissue whose record was removed before its update removes the session it made and prompts nothing", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  try {
+    const record = earlierRecord({ link, ts, sessionID: "ses_old", flaggedAt: new Date(h.now()).toISOString() })
+    h.setItems({ [link]: record })
+    h.setSeen([link])
+    h.sessions.set("ses_old", { time: quietTimes(h.now()) })
+    const realCommit = h.reissue.commit
+    let release
+    h.reissue.commit = async (hash, value) => {
+      await new Promise((resolve) => (release = resolve))
+      return realCommit(hash, value)
+    }
+    const poll = h.watcher.poll()
+    await waitFor(() => release !== undefined, "the reissue to reach its commit")
+    await h.watcher.dropSessionRecord("ses_old")
+    release()
+    await poll
+    assert.equal(h.created.length, 1, "the reissue created one session")
+    assert.ok(h.removed.includes(h.created[0].id), "the session it made is removed")
+    assert.equal(h.prompts.length, 0, "and no prompt is sent to it")
+    assert.equal(h.items()[link], undefined, "the record stays removed")
+  } finally {
+    h.clean()
   }
 })

@@ -23,6 +23,11 @@
 // request. OpenCode declares `session.idle` but never publishes it, so a turn's
 // end arrives as `session.execution.succeeded`, `.failed` or `.interrupted`.
 //
+// A session that is deleted or archived takes its item record with it, so the
+// row leaves the dialog for good. Every later update of the same item is
+// conditional on the record still naming the session its caller read, so a
+// write already under way never brings a removed record back.
+//
 // The completion binds to the first execution: only a turn of a session this
 // instance started may complete the item, and only the first one to end, and
 // only when its reply names the issue it made. A turn that ended in error, a
@@ -64,6 +69,8 @@ export const SESSION_EVENT_TYPES = [
   "session.execution.interrupted",
   "permission.asked",
   "permission.replied",
+  "session.deleted",
+  "session.archived",
 ]
 
 /** The execution events that end a turn, and whether each one failed. */
@@ -239,14 +246,48 @@ export function createWatcher({
     changed()
   }
 
-  /** Replace one item record, one writer at a time. */
-  async function updateItem(record) {
-    await serializedWrite(async () => {
+  /**
+   * Replace one item record, one writer at a time, and only while the map still
+   * holds a record for the permalink that still names the session the caller
+   * read. The record is re-read inside the queue, so a removal or a replacement
+   * that happened after the caller's read is never undone: the caller's field
+   * changes are applied to the record read here. A record that is gone, or that
+   * names another session, writes nothing and sends no change notice. Answers
+   * whether the write happened.
+   */
+  function updateItem(permalink, sessionID, changes) {
+    return serializedWrite(async () => {
       const items = await readItems()
-      items[record.permalink] = record
+      const current = items[permalink]
+      if (!current || current.sessionID !== sessionID) return false
+      items[permalink] = { ...current, ...changes }
       await storage.set(KEYS.items, items)
+      changed()
+      return true
     })
-    changed()
+  }
+
+  /**
+   * Remove every item record that names one session, one writer at a time, and
+   * send the change notice. The seen-set and the claim files are not touched, so
+   * the permalink is never picked up again. Answers whether a record was
+   * removed.
+   */
+  function dropSessionRecord(sessionID) {
+    if (typeof sessionID !== "string" || sessionID === "") return Promise.resolve(false)
+    return serializedWrite(async () => {
+      const items = await readItems()
+      let removed = false
+      for (const [permalink, record] of Object.entries(items)) {
+        if (record?.sessionID !== sessionID) continue
+        delete items[permalink]
+        removed = true
+      }
+      if (!removed) return false
+      await storage.set(KEYS.items, items)
+      changed()
+      return true
+    })
   }
 
   /** The item record one session belongs to, if it is one of ours. */
@@ -396,7 +437,23 @@ export function createWatcher({
       return
     }
     firstTurns.add(created.id)
-    await updateItem(next)
+    const written = await updateItem(record.permalink, record.sessionID, {
+      sessionID: created.id,
+      title,
+      // An earlier build's record carries no asker; the search result has it.
+      asker: record.asker || hit.asker || "",
+      firstTurnEndedAt: null,
+      firstTurnFailed: true,
+      permissionPending: false,
+      recordFormat: RECORD_FORMAT,
+    })
+    if (!written) {
+      // The record left the map after this reissue read it: the session it made
+      // is unprompted and goes with it.
+      firstTurns.delete(created.id)
+      await removeSession(created.id)
+      return
+    }
     try {
       await session.prompt({ sessionID: created.id, text: itemFirstPrompt(hitOfRecord(next), config.intake_repo) })
     } catch (error) {
@@ -419,8 +476,7 @@ export function createWatcher({
       const record = (await readItems())[commit.permalink]
       if (!record || record.recordFormat !== undefined) continue
       if (record.sessionID !== commit.replaces) continue
-      await updateItem({
-        ...record,
+      await updateItem(commit.permalink, record.sessionID, {
         sessionID: commit.sessionID,
         firstTurnFailed: true,
         recordFormat: RECORD_FORMAT,
@@ -748,7 +804,7 @@ export function createWatcher({
     if (typeof sessionID !== "string") return {}
     const record = await itemOf(sessionID)
     if (!record) return {}
-    await updateItem({ ...record, openedAt: new Date(now()).toISOString() })
+    await updateItem(record.permalink, sessionID, { openedAt: new Date(now()).toISOString() })
     return {}
   }
 
@@ -791,22 +847,20 @@ export function createWatcher({
     // that names the issue it made. An errorless reply with no issue URL leaves
     // the item waiting.
     if (!reply || !reply.issueUrl) return
-    const next = {
-      ...record,
+    const written = await updateItem(record.permalink, sessionID, {
       firstTurnEndedAt: new Date(now()).toISOString(),
       firstTurnFailed: false,
       title: reply.title,
       issueUrl: reply.issueUrl,
       issueNumber: reply.issueNumber,
-    }
-    await updateItem(next)
-    await renameSession(sessionID, reply.title)
+    })
+    if (written) await renameSession(sessionID, reply.title)
   }
 
   async function permissionChanged(sessionID, pending) {
     const record = await itemOf(sessionID)
     if (!record || record.permissionPending === pending) return
-    await updateItem({ ...record, permissionPending: pending })
+    await updateItem(record.permalink, sessionID, { permissionPending: pending })
   }
 
   /** One event of the server's stream, for the sessions this plugin started. */
@@ -816,6 +870,10 @@ export function createWatcher({
     if (typeof sessionID !== "string" || sessionID === "") return
     if (Object.hasOwn(TURN_ENDED, type)) {
       await firstTurnEnded(sessionID, TURN_ENDED[type])
+      return
+    }
+    if (type === "session.deleted" || type === "session.archived") {
+      await dropSessionRecord(sessionID)
       return
     }
     if (type === "permission.asked") await permissionChanged(sessionID, true)
@@ -832,5 +890,5 @@ export function createWatcher({
     await storage.set(KEYS.suspended, {})
   }
 
-  return { poll, pollNow, status, items, getConfig, setConfig, markOpened, observe, start }
+  return { poll, pollNow, status, items, getConfig, setConfig, markOpened, observe, start, dropSessionRecord }
 }

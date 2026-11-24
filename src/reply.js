@@ -10,7 +10,9 @@
 // The close prompt asks for one `Closed:` line. The close reads it only out of
 // the assistant messages that follow the close prompt's own admitted user
 // message, after the boundary the close noted, so a line from an earlier turn
-// never decides a delete.
+// never decides a delete. Every assistant message after that admitted message
+// must be a finished one and carry no error: one unfinished or errored message
+// is not proof that the turn closed the item, so the whole context is refused.
 
 const INTAKE_LINE = /^Intake issue:[ \t]*(.*)$/gm
 const TITLE_LINE = /^Title:[ \t]*(.*)$/gm
@@ -65,39 +67,45 @@ function finished(message) {
  * The close turn's reply, bound to the turn the close itself started: the URL of
  * the last `Closed:` line in the text of the finished, errorless assistant
  * messages after the user message `admittedID` names, when that message is the
- * only user message after the boundary. `refused` names the first reason the
- * binding fails, and the close removes nothing then.
+ * only user message after the boundary. Every assistant message after the
+ * admitted message must be finished and errorless: one unfinished or errored
+ * message refuses the whole context, so an incomplete reply never authorizes a
+ * delete. `refused` names the first reason the binding fails, and the close
+ * removes nothing then. Each reason is written for the user: the dialog shows it.
  */
 export function closeReply(messages, { boundaryID, admittedID } = {}) {
   const list = contextMessages(messages)
   if (typeof admittedID !== "string" || admittedID === "") {
-    return { refused: "the close prompt's admitted id was not read" }
+    return { refused: "the close prompt's admission could not be read — try again" }
   }
   let boundary = -1
   if (typeof boundaryID === "string" && boundaryID !== "") {
     boundary = list.findIndex((message) => message?.id === boundaryID)
-    if (boundary < 0) return { refused: "the boundary message is gone" }
+    if (boundary < 0) return { refused: "the session's context changed under the close — try again" }
   }
   const after = list.slice(boundary + 1)
   const users = after.filter((message) => message?.type === "user")
   const admitted = users.findIndex((message) => message?.id === admittedID)
-  if (admitted < 0) return { refused: "the close prompt is not in the context" }
-  if (users.length > 1) return { refused: "a second user message follows the boundary" }
+  if (admitted < 0) return { refused: "the session's reply could not be matched to the close — try again" }
+  if (users.length > 1) return { refused: "another message arrived in the session during the close — try again" }
   const reply = after.slice(after.indexOf(users[admitted]) + 1)
-  if (reply.some((message) => message?.type === "assistant" && message.error != null)) {
-    return { refused: "an assistant message after the close prompt carries an error" }
+  const assistant = reply.filter((message) => message?.type === "assistant")
+  if (assistant.some((message) => message.error != null || message?.finish === "error")) {
+    return { refused: "the session's reply carried an error — try again" }
   }
-  const text = reply
-    .filter((message) => message?.type === "assistant" && finished(message))
+  if (assistant.some((message) => !finished(message))) {
+    return { refused: "the session's reply was not finished — try again" }
+  }
+  const text = assistant
     .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
     .filter((part) => part?.type === "text" && typeof part.text === "string")
     .map((part) => part.text)
     .join("\n")
     .trim()
-  if (text === "") return { refused: "no assistant text follows the close prompt" }
+  if (text === "") return { refused: "the session's reply was empty — try again" }
   const closed = lastLine(text, CLOSED_LINE)
   const url = closed === undefined ? undefined : URL.exec(closed)?.[0]
-  if (url === undefined) return { refused: "the reply carries no Closed: line" }
+  if (url === undefined) return { refused: "the session's reply did not name the item's issue as closed — try again" }
   return { url }
 }
 

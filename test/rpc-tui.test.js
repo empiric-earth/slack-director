@@ -299,7 +299,7 @@ const modalLayer = (layers) => layers.find((layer) => layer.mode === "modal")
  */
 const renderDialog = (dialogs) => dialogs.at(-1).render()
 
-test("the RPC contract defines every method and the updated event with an input and an output schema", () => {
+test("the RPC contract defines every method and every event with a schema", () => {
   assert.equal(SlackDirectorRpc.id, "slack-director")
   assert.deepEqual(Object.keys(SlackDirectorRpc.methods).sort(), [
     "done",
@@ -310,7 +310,13 @@ test("the RPC contract defines every method and the updated event with an input 
     "setConfig",
     "status",
   ])
-  assert.deepEqual(Object.keys(SlackDirectorRpc.events), ["updated"])
+  assert.deepEqual(Object.keys(SlackDirectorRpc.events), ["updated", "closeRefused"])
+  assert.equal(SlackDirectorRpc.events.updated.schema, SlackDirectorRpc.methods.pollNow.output)
+  const refusal = SlackDirectorRpc.events.closeRefused.schema
+  assert.deepEqual(refusal.required, ["sessionID", "reason"])
+  assert.equal(refusal.additionalProperties, false, "a refusal notice carries no other field")
+  assert.equal(schemaProblem(refusal, { sessionID: "ses_1", reason: "the session is running — try again when it is idle" }), undefined)
+  assert.match(schemaProblem(refusal, { sessionID: "ses_1" }), /has no reason/)
   for (const [name, method] of Object.entries(SlackDirectorRpc.methods)) {
     assert.equal(method.input.type, "object", `${name} takes an object`)
     assert.equal(method.output.type, "object", `${name} answers an object`)
@@ -687,11 +693,22 @@ test("a rejection that is not an Error still shows its message", async () => {
 test("the item map follows the contract's updated event", async () => {
   const { context, eventHandlers, calls } = fakeTuiContext()
   await tui.setup(context)
-  assert.deepEqual(eventHandlers.map(([name]) => name), ["updated"])
+  assert.deepEqual(eventHandlers.map(([name]) => name), ["updated", "closeRefused"])
   const before = calls.length
   eventHandlers[0][1]()
   await new Promise((resolve) => setImmediate(resolve))
   assert.equal(calls.length, before + 3, "the dialog reads the items, the status and the config again")
+})
+
+test("a close the watcher refuses reaches the dialog as an error toast with what to do next", async () => {
+  const { context, eventHandlers, toasts } = fakeTuiContext()
+  await tui.setup(context)
+  const refused = eventHandlers.find(([name]) => name === "closeRefused")
+  assert.ok(refused, "the dialog follows the contract's refusal event")
+  refused[1]({ sessionID: "ses_1", reason: "the session is running — try again when it is idle" })
+  assert.equal(toasts.at(-1).variant, "error", "a refusal is an error, not a success")
+  assert.match(toasts.at(-1).message, /the session is running/, "the toast carries the reason")
+  assert.match(toasts.at(-1).message, /try again/, "and what to do next")
 })
 
 test("a rejected call becomes a toast rather than a crash", async () => {

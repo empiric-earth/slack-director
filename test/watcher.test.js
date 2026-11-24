@@ -225,6 +225,7 @@ function harness({
   // throws instead when a test seeds one.
   const sessions = new Map()
   const changes = []
+  const refusals = []
   const configWrites = []
   const tokens = credentials ?? { slack_nexar: { access: "tok-nexar", expires: 0 }, slack_nauto: { access: "tok-nauto", expires: 0 } }
   const config = {
@@ -342,6 +343,7 @@ function harness({
         return { config }
       },
       onChange: () => changes.push(now()),
+      onRefused: (notice) => refusals.push(notice),
       mcpServers: async () => {
         if (serverError) throw serverError
         return servers
@@ -370,6 +372,7 @@ function harness({
     contexts,
     sessions,
     changes,
+    refusals,
     configWrites,
     tokens,
     config,
@@ -2717,5 +2720,194 @@ test("after the watcher stops, a waiting close makes no remove and logs the clos
     assert.ok(h.items()[link], "the record stays")
   } finally {
     h.clean()
+  }
+})
+
+test("an unload during the record read leaves the close unstarted, so nothing is removed", async () => {
+  const { h, link, sessionID } = await closeableItem({ issueUrl: null })
+  try {
+    let release
+    let parked = false
+    // The record read is held open, so the unload lands between the single-flight
+    // guard and the close's first host call.
+    const parkedStorage = {
+      get: async (key) => {
+        if (key === KEYS.items && !parked) {
+          parked = true
+          await new Promise((resolve) => {
+            release = resolve
+          })
+        }
+        return h.storage.get(key)
+      },
+      set: (key, value) => h.storage.set(key, value),
+      remove: (key) => h.storage.remove(key),
+    }
+    const w = h.newWatcher(parkedStorage)
+    const pending = w.done({ sessionID })
+    assert.equal(parked, true, "the record read is in flight")
+    w.stop()
+    release()
+    await pending
+    assert.deepEqual(h.removed, [], "a close never starts after the unload")
+    assert.ok(h.items()[link], "the record stays")
+    assert.deepEqual(closeLogs(h), [], "no close line is written: no close began")
+  } finally {
+    h.clean()
+  }
+})
+
+test("two done calls in the same instant start one close and send one close prompt", async () => {
+  const { h, sessionID } = await closeableItem()
+  try {
+    await Promise.all([h.watcher.done({ sessionID }), h.watcher.done({ sessionID })])
+    assert.equal(h.prompts.length, 2, "the first prompt and exactly one close prompt")
+    assert.equal(h.logs.filter((line) => line.includes("already in flight")).length, 1, "the second done is refused")
+    assert.equal(closeLogs(h).filter((line) => line.startsWith("close started")).length, 1, "one close started")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a no-issue record whose session removal fails keeps the record and never claims it was removed", async () => {
+  const { h, link, sessionID } = await closeableItem({ issueUrl: null })
+  try {
+    h.session.onRemove = async () => {
+      throw new Error("the host refused the delete")
+    }
+    await h.watcher.done({ sessionID })
+    assert.deepEqual(h.removed, [], "the failed remove removes nothing")
+    assert.ok(h.items()[link], "the record stays, so its row and its retry path stay")
+    assert.equal(
+      closeLogs(h).some((line) => line.endsWith("— removed")),
+      false,
+      "no close claims the item was removed",
+    )
+    assert.ok(closeLogs(h).some((line) => line.includes("refused")), "the close refused and said so")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a no-issue record whose session is already gone still counts as removed", async () => {
+  const { h, link, sessionID } = await closeableItem({ issueUrl: null })
+  try {
+    h.session.onRemove = async () => {
+      throw new Error(`session not found: ${sessionID}`)
+    }
+    await h.watcher.done({ sessionID })
+    assert.equal(h.items()[link], undefined, "a session that is already gone leaves its record dropped")
+    assert.ok(closeLogs(h).some((line) => line.endsWith("— removed")), "the close names the outcome")
+  } finally {
+    h.clean()
+  }
+})
+
+test("an unfinished assistant message after the close prompt refuses the delete, even with a matching line", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    await h.watcher.done({ sessionID })
+    const admitted = h.prompts.at(-1).id
+    // The reply carries the line, and a later assistant message is still streaming.
+    h.contexts.set(sessionID, [
+      ...beforeClose(),
+      closeMessage(admitted),
+      replyMessage(`Closed: ${issue}`),
+      { type: "assistant", id: "msg_partial", time: { created: NOW }, content: [{ type: "text", text: "still writing" }] },
+    ])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.deepEqual(h.removed, [], "an incomplete reply is not proof of a close")
+    assert.ok(h.items()[link], "the record stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a turn end delivered before the close prompt's admission decides the close, so a retry can start", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    h.session.onPrompt = async () => {
+      // The close turn ends before the host returns the admitted id.
+      await h.watcher.observe({ type: "session.execution.failed", data: { sessionID } })
+    }
+    await h.watcher.done({ sessionID })
+    assert.ok(
+      closeLogs(h).some((line) => line.includes("the close turn did not succeed")),
+      "the early turn end decided the close",
+    )
+    assert.deepEqual(h.removed, [], "a failed turn removes nothing")
+    assert.ok(h.items()[link], "the record stays")
+    // The close left the map, so the user may try again.
+    h.session.onPrompt = null
+    await h.watcher.done({ sessionID })
+    assert.equal(h.prompts.length, 3, "a retry sends a new close prompt")
+  } finally {
+    h.clean()
+  }
+})
+
+test("every refused close writes a start line and one end line", async () => {
+  for (const [label, options] of [
+    ["a busy session", { times: { busy: NOW, idle: null, updated: NOW } }],
+    ["a pending permission", { permissionPending: true }],
+    ["an unreadable session", {}],
+  ]) {
+    const { h, sessionID } = await closeableItem(options)
+    try {
+      if (label === "an unreadable session") h.sessions.set(sessionID, { error: new Error("the host is unreadable") })
+      await h.watcher.done({ sessionID })
+      const lines = closeLogs(h)
+      assert.equal(lines.filter((line) => line.startsWith("close started")).length, 1, `${label}: one start line`)
+      assert.equal(lines.filter((line) => line.startsWith("close ended")).length, 1, `${label}: one end line`)
+      assert.ok(lines.some((line) => line.includes("refused")), `${label}: the refusal is named`)
+    } finally {
+      h.clean()
+    }
+  }
+})
+
+test("a close the host reports gone writes a start line and one end line too", async () => {
+  const { h, sessionID } = await closeableItem()
+  try {
+    h.sessions.delete(sessionID)
+    await h.watcher.done({ sessionID })
+    const lines = closeLogs(h)
+    assert.equal(lines.filter((line) => line.startsWith("close started")).length, 1, "one start line")
+    assert.equal(lines.filter((line) => line.startsWith("close ended")).length, 1, "one end line")
+    assert.ok(lines.some((line) => line.includes("record dropped — session gone, issue not closed")))
+  } finally {
+    h.clean()
+  }
+})
+
+test("a refused close reaches the dialog as a refusal with what to do next", async () => {
+  const busy = await closeableItem({ times: { busy: NOW, idle: null, updated: NOW } })
+  try {
+    await busy.h.watcher.done({ sessionID: busy.sessionID })
+    assert.deepEqual(busy.h.refusals.map((notice) => notice.sessionID), [busy.sessionID])
+    assert.match(busy.h.refusals[0].reason, /try again/i, "the notice says what to do next")
+    assert.equal(
+      busy.h.refusals.some((notice) => notice.reason.includes("/")),
+      false,
+      "the notice carries no path",
+    )
+  } finally {
+    busy.h.clean()
+  }
+  const held = await closeableItem({ permissionPending: true })
+  try {
+    await held.h.watcher.done({ sessionID: held.sessionID })
+    assert.match(held.h.refusals[0].reason, /permission/i, "a pending permission names itself")
+  } finally {
+    held.h.clean()
+  }
+  const gone = await closeableItem()
+  try {
+    gone.h.sessions.delete(gone.sessionID)
+    await gone.h.watcher.done({ sessionID: gone.sessionID })
+    assert.match(gone.h.refusals[0].reason, /not closed/i, "a gone session says the issue was not closed")
+  } finally {
+    gone.h.clean()
   }
 })

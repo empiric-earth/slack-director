@@ -45,6 +45,7 @@ function fakeContext() {
   const commands = []
   const prompts = []
   const rpcRegistrations = []
+  const rpcEvents = []
   const storage = new Map()
   const calls = { skill: 0, command: 0, rpc: 0 }
   const domains = {
@@ -85,7 +86,14 @@ function fakeContext() {
       async register(definition, handlers) {
         calls.rpc += 1
         rpcRegistrations.push({ definition, handlers })
-        return { async dispose() {}, events: { async emit() {} } }
+        return {
+          async dispose() {},
+          events: {
+            async emit(name, payload) {
+              rpcEvents.push([name, payload])
+            },
+          },
+        }
       },
     },
     storage: {
@@ -134,7 +142,7 @@ function fakeContext() {
       return target[key]
     },
   })
-  return { ctx, skills, commands, prompts, rpcRegistrations, storage, calls }
+  return { ctx, skills, commands, prompts, rpcRegistrations, rpcEvents, storage, calls }
 }
 
 /** Every path under `dir`, relative and sorted; a file's text as its value. */
@@ -666,6 +674,48 @@ test("the plugin's unload stops the watcher, so a close started after it is refu
       )
     } finally {
       console.warn = warn
+    }
+  })
+})
+
+test("a close the watcher refuses reaches the dialog as the closeRefused event", async () => {
+  await withConfigHome(async (configFile) => {
+    writeConfig(configFile)
+    const { ctx, rpcRegistrations, storage, rpcEvents } = fakeContext()
+    // A busy period that has not ended: the close refuses without prompting.
+    ctx.session.get = async () => ({ id: "ses_item", time: { busy: 1_000, idle: null } })
+    storage.set("item/items", {
+      p1: {
+        permalink: "p1",
+        workspace: "slack_nexar",
+        channel: "#platform-help",
+        channelID: "C0PLATFORM",
+        ts: "1795194443.137219",
+        asker: "",
+        flaggedAt: "2026-11-19T14:30:00.000Z",
+        title: "An item",
+        sessionID: "ses_item",
+        issueNumber: 41,
+        issueUrl: "https://github.com/empiric-earth/almeida-slack-intake/issues/41",
+        firstTurnEndedAt: null,
+        firstTurnFailed: false,
+        permissionPending: false,
+        openedAt: null,
+        recordFormat: 2,
+      },
+    })
+    const dispose = await plugin.setup(ctx)
+    try {
+      const { handlers } = rpcRegistrations[0]
+      const context = { error: (name, message, data) => ({ error: { name, message, data } }) }
+      await handlers.done({ sessionID: "ses_item" }, context)
+      await new Promise((resolve) => setImmediate(resolve))
+      const refusal = rpcEvents.find(([name]) => name === "closeRefused")
+      assert.ok(refusal, "the refusal reaches the dialog")
+      assert.equal(refusal[1].sessionID, "ses_item")
+      assert.match(refusal[1].reason, /try again/, "the notice says what to do next")
+    } finally {
+      await dispose()
     }
   })
 })

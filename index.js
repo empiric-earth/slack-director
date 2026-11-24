@@ -80,8 +80,9 @@ export default {
 
     const config = createConfigReader()
     // The watcher's change notice goes out through the RPC registration, which
-    // is created after it: the holder is filled in as soon as that returns.
+    // is created after it: the holders are filled in as soon as that returns.
     let emitUpdated = () => {}
+    let emitRefused = () => {}
     const watcher = createWatcher({
       storage: ctx.storage,
       claims: createClaims({ dir: claimsDir(), randomID: () => randomUUID() }),
@@ -92,6 +93,7 @@ export default {
       readConfig: () => config.read(),
       writeConfig: (field, value) => config.write(field, value),
       onChange: () => emitUpdated(),
+      onRefused: (notice) => emitRefused(notice),
       mcpServers: () => mcpServers(ctx),
       resolveCredential: (name) => resolveCredential(ctx, name),
       session: ctx.session,
@@ -124,6 +126,13 @@ export default {
     })
     emitUpdated = () => {
       rpcRegistration.events.emit("updated", {}).catch((error) => log(`the update notice failed: ${messageOf(error)}`))
+    }
+    // A close the watcher refuses reaches the dialog, so the user is not left
+    // waiting for a close that never ran.
+    emitRefused = (notice) => {
+      rpcRegistration.events
+        .emit("closeRefused", notice)
+        .catch((error) => log(`the refusal notice failed: ${messageOf(error)}`))
     }
     await watcher.start()
 

@@ -144,12 +144,14 @@ stays.
   before it names the item and says the delete cannot be restored.
 - A session that is running, or one with a permission request pending, refuses
   the close and keeps its row: the close turn must be the only turn in the
-  session.
+  session. The dialog says the close was refused, and what to do next.
 - A record whose session is already gone is dropped from the list, and its
   intake issue stays open: the plugin cannot prompt a session that no longer
-  exists, so it closes nothing and says so in its log.
+  exists, so it closes nothing, and both its log and the dialog say so.
 - Every close writes two lines to the plugin's log — one when it starts and one
-  when it ends, with the outcome — so a close still in flight can be found.
+  when it ends, with the outcome — so a close still in flight can be found. A
+  close the watcher refuses reaches the dialog as well, with the reason and what
+  to do next.
 - An item session's transcript holds the thread text it read. It lives in your
   local OpenCode database, and deleting the session deletes it.
 - The message you flag is read by the item session and reaches the model. That

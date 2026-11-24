@@ -498,10 +498,16 @@ async function setup(context, spawnProcess, rendererOverride) {
 
     // The item map follows its own changes, and the dialog follows the item map.
     const unsubscribe = context.client.rpc(SlackDirectorRpc).events.on("updated", () => void refresh())
+    // A close the watcher refuses reaches the dialog here, so the user is not
+    // left waiting for a close that never ran: the reason says what to do next.
+    const unsubscribeRefused = context.client.rpc(SlackDirectorRpc).events.on("closeRefused", (notice) => {
+      toast(`${PAGE_TITLE}: ${notice?.reason ?? "the close was refused"}`, "error")
+    })
     void refresh()
 
     return () => {
       unsubscribe()
+      unsubscribeRefused()
       unregisterSidebar()
     }
 }

@@ -10,7 +10,9 @@
 // settings dialog reads and writes the config through `getConfig` and
 // `setConfig`. The overview's `d` key closes one item with `done`: the item's
 // own session closes its intake issue, and the plugin deletes the session on the
-// close turn's own proof. The live state of an item's session — whether it is
+// close turn's own proof, and a close it refuses reaches the dialog as the
+// `closeRefused` event, so the user is not left waiting for one that never ran.
+// The live state of an item's session — whether it is
 // running and whether it waits on a permission — is not here: the TUI reads that
 // from its own session data.
 
@@ -178,5 +180,15 @@ export const SlackDirectorRpc = {
   },
   events: {
     updated: { schema: emptyObject },
+    // A close the watcher refused before it removed anything: the dialog shows
+    // the reason, so the user is not left waiting for a close that never ran.
+    closeRefused: {
+      schema: {
+        type: "object",
+        properties: { sessionID: { type: "string" }, reason: { type: "string" } },
+        required: ["sessionID", "reason"],
+        additionalProperties: false,
+      },
+    },
   },
 }

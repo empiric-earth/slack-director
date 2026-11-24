@@ -80,8 +80,9 @@ export default {
 
     const config = createConfigReader()
     // The watcher's change notice goes out through the RPC registration, which
-    // is created after it: the holder is filled in as soon as that returns.
+    // is created after it: the holders are filled in as soon as that returns.
     let emitUpdated = () => {}
+    let emitRefused = () => {}
     const watcher = createWatcher({
       storage: ctx.storage,
       claims: createClaims({ dir: claimsDir(), randomID: () => randomUUID() }),
@@ -92,6 +93,7 @@ export default {
       readConfig: () => config.read(),
       writeConfig: (field, value) => config.write(field, value),
       onChange: () => emitUpdated(),
+      onRefused: (notice) => emitRefused(notice),
       mcpServers: () => mcpServers(ctx),
       resolveCredential: (name) => resolveCredential(ctx, name),
       session: ctx.session,
@@ -113,10 +115,24 @@ export default {
         void watcher.pollNow().catch((error) => log(`poll now failed: ${messageOf(error)}`))
         return {}
       },
+      // A close can wait on a sparta approval in the item session, so the call
+      // starts it and answers at once; the close's outcome reaches the dialog as
+      // the item's record leaving.
+      done: async (input) => {
+        void watcher.done(input).catch((error) => log(`the close failed: ${messageOf(error)}`))
+        return {}
+      },
       markOpened: (input) => watcher.markOpened(input),
     })
     emitUpdated = () => {
       rpcRegistration.events.emit("updated", {}).catch((error) => log(`the update notice failed: ${messageOf(error)}`))
+    }
+    // A close the watcher refuses reaches the dialog, so the user is not left
+    // waiting for a close that never ran.
+    emitRefused = (notice) => {
+      rpcRegistration.events
+        .emit("closeRefused", notice)
+        .catch((error) => log(`the refusal notice failed: ${messageOf(error)}`))
     }
     await watcher.start()
 
@@ -164,6 +180,9 @@ export default {
       stopped = true
       clearTimeout(timer)
       controller.abort()
+      // The watcher stops first: a close still in flight is abandoned before it
+      // can remove anything the next install would not know about.
+      watcher.stop()
       await rpcRegistration.dispose()
       await skillRegistration.dispose()
     }

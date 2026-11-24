@@ -28,6 +28,16 @@
 // conditional on the record still naming the session its caller read, so a
 // write already under way never brings a removed record back.
 //
+// The `done` RPC starts a close for one item: the item's own session closes its
+// intake issue, and the plugin deletes the session only when the close turn the
+// plugin started ends well and the reply bound to that turn names the record's
+// own issue as closed. Nothing is removed without that proof, and a session the
+// host reports gone drops its record without closing its issue. Every close
+// writes one log line when it starts and one when it ends; a close that refuses
+// also reaches the dialog, so the user is never left waiting for one that never
+// ran. The plugin's unload stops the watcher, and every close still in flight is
+// abandoned before it can remove anything.
+//
 // The completion binds to the first execution: only a turn of a session this
 // instance started may complete the item, and only the first one to end, and
 // only when its reply names the issue it made. A turn that ended in error, a
@@ -39,8 +49,8 @@
 import { randomUUID } from "node:crypto"
 import { permalinkHash, STALE_MS } from "./claims.js"
 import { DEFAULT_POLL_SECONDS } from "./config.js"
-import { itemFirstPrompt, refreshPrompt } from "./first-prompt.js"
-import { parseReply, replyText } from "./reply.js"
+import { itemFirstPrompt, closePrompt, refreshPrompt } from "./first-prompt.js"
+import { closeReply, contextMessages, parseReply, replyText } from "./reply.js"
 import { REQUEST_TIMEOUT_MS, searchFlagged, SLACK_MCP_URL } from "./slack-mcp.js"
 import { KEYS } from "./state.js"
 import { inWorkHours } from "./work-hours.js"
@@ -148,6 +158,7 @@ export function createWatcher({
   readConfig,
   writeConfig = () => ({ error: { field: null, message: "the config file is not writable" } }),
   onChange = () => {},
+  onRefused = () => {},
   mcpServers,
   resolveCredential,
   session,
@@ -163,6 +174,17 @@ export function createWatcher({
   // waiting on. A turn-end event completes the item only for one of these, so a
   // later turn, or a turn whose start this instance never saw, cannot.
   const firstTurns = new Set()
+  // The closes in flight, by session id: one close per session at a time. Each
+  // holds the record it closes, the boundary it noted, the admitted close
+  // prompt's id once the host returned it, and whether it was abandoned.
+  const closes = new Map()
+  // The `done` calls whose record is still being read. The entry is taken before
+  // the first await, so a second `done` for the same session starts nothing, and
+  // an unload during the read abandons the call before any close begins.
+  const pendingDone = new Set()
+  // The plugin's unload stops the watcher: a close still in flight after that
+  // makes no further host call, in particular no remove.
+  let closesStopped = false
   // The one scan in flight, if any: a request that arrives while it runs joins
   // it rather than starting a second.
   let scanning = null
@@ -341,6 +363,13 @@ export function createWatcher({
     error?.code === "NOT_FOUND" || /not found|no such session/i.test(messageOf(error))
 
   /**
+   * Whether a session's run times show a busy period that has not ended. The
+   * close turn must be the only turn in the session, so a close refuses one.
+   */
+  const busyNow = (times) =>
+    times?.busy !== undefined && times?.busy !== null && !(typeof times.idle === "number" && times.idle >= times.busy)
+
+  /**
    * Whether an earlier build's session is quiet, by the run times every process
    * reads: no busy period that has not ended, and no change for the stale age.
    * A session that is gone is quiet too. Anything else is an unknown outcome —
@@ -363,10 +392,8 @@ export function createWatcher({
       return { quiet: false, reason: `the session was not read: ${messageOf(error)}` }
     }
     if (!times || typeof times !== "object") return { quiet: false, reason: "the session's run times were not read" }
-    if (times.busy !== undefined && times.busy !== null) {
-      if (!(typeof times.idle === "number" && times.idle >= times.busy)) {
-        return { quiet: false, reason: `a busy period that began at ${times.busy} has not ended` }
-      }
+    if (busyNow(times)) {
+      return { quiet: false, reason: `a busy period that began at ${times.busy} has not ended` }
     }
     if (typeof times.updated !== "number") return { quiet: false, reason: "the session's update time was not read" }
     if (now() - times.updated <= staleMs) {
@@ -808,6 +835,269 @@ export function createWatcher({
     return {}
   }
 
+  /** The intake repo the close prompt names, as the config holds it now. */
+  function intakeRepo() {
+    try {
+      return readConfig()?.config?.intake_repo ?? ""
+    } catch {
+      return ""
+    }
+  }
+
+  /** The issue a close names, or `none` while its record names none. */
+  const closeIssue = (close) =>
+    typeof close.record?.issueUrl === "string" && close.record.issueUrl !== "" ? close.record.issueUrl : "none"
+
+  /** The one line a close writes when it starts, so a close in flight is visible. */
+  const logCloseStart = (close) => log(`close started: session ${close.sessionID} — issue ${closeIssue(close)}`)
+
+  /** The one line a close writes when it ends, with its outcome. */
+  const logCloseEnd = (close, outcome) =>
+    log(`close ended: session ${close.sessionID} — issue ${closeIssue(close)} — ${outcome}`)
+
+  /** Tell the dialog a close did not run, so the user is not left waiting for it. */
+  function notifyRefused(sessionID, reason) {
+    try {
+      onRefused({ sessionID, reason })
+    } catch (error) {
+      log(`the refusal notice failed: ${messageOf(error)}`)
+    }
+  }
+
+  /**
+   * Refuse one close: its end line, the dialog's notice, and its map entry, so a
+   * later `done` for the same item may try again. `detail` stays in the log; the
+   * reason is what the dialog shows, and says what to do next.
+   */
+  function refuseClose(close, reason, detail) {
+    logCloseEnd(close, detail ? `refused — ${reason} (${detail})` : `refused — ${reason}`)
+    closes.delete(close.sessionID)
+    notifyRefused(close.sessionID, reason)
+  }
+
+  /**
+   * Drop the record of a close whose session the host reports gone. The issue is
+   * left open: the plugin cannot prompt a session that no longer exists, so it
+   * closed nothing, and both the log line and the dialog's notice say so.
+   */
+  async function closeSessionGone(close) {
+    logCloseEnd(close, "record dropped — session gone, issue not closed")
+    closes.delete(close.sessionID)
+    notifyRefused(close.sessionID, "the session was gone — its intake issue was not closed")
+    await dropSessionRecord(close.sessionID)
+  }
+
+  /**
+   * The close flow of one item, in the order the close needs: the session is
+   * read from the host first, its record is dropped only when the host reports
+   * it gone, a session that is running or waits on a permission request refuses,
+   * and otherwise the close notes the boundary, sends the close prompt and waits
+   * for the session's next turn end. Nothing is removed here; the turn end
+   * decides, in `decideCloseTurn`.
+   */
+  async function runClose(close) {
+    const { sessionID, record } = close
+    // Authoritative absence first: a session the host reports gone can never be
+    // prompted, so only its record goes, and its intake issue stays open.
+    let found
+    try {
+      found = await session.get({ sessionID })
+    } catch (error) {
+      if (close.abandoned) return
+      if (notFound(error)) return closeSessionGone(close)
+      return refuseClose(close, "the session could not be read — try again", messageOf(error))
+    }
+    if (close.abandoned) return
+    if (found === undefined || found === null) return closeSessionGone(close)
+    if (record.permissionPending === true) {
+      return refuseClose(close, "the session waits on a permission request — answer it, then try again")
+    }
+    if (busyNow(found.time)) {
+      return refuseClose(close, "the session is running — try again when it is idle")
+    }
+    // A record with no intake issue has nothing to close: its session goes now.
+    // The removal is read here rather than through `removeSession`, so a host
+    // refusal that is not "already gone" keeps the record and its retry path.
+    if (typeof record.issueUrl !== "string" || record.issueUrl === "") {
+      try {
+        await session.remove({ sessionID })
+      } catch (error) {
+        if (close.abandoned) return
+        if (!notFound(error)) {
+          return refuseClose(close, "the session could not be deleted — try again", messageOf(error))
+        }
+      }
+      if (close.abandoned) return
+      logCloseEnd(close, "removed")
+      closes.delete(sessionID)
+      await dropSessionRecord(sessionID)
+      return
+    }
+    // The boundary: the last message the session's context holds now. The close
+    // reply is read only after it, so an earlier turn's line never decides.
+    let list
+    try {
+      list = contextMessages(await session.context({ sessionID }))
+    } catch (error) {
+      if (close.abandoned) return
+      return refuseClose(close, "the session's context could not be read — try again", messageOf(error))
+    }
+    if (close.abandoned) return
+    close.boundaryID = list.length > 0 ? (list[list.length - 1]?.id ?? null) : null
+    let admitted
+    // The prompt is in flight: a turn end that arrives now is held, because the
+    // admitted id that binds the close turn is not known yet.
+    close.awaitingAdmission = true
+    try {
+      admitted = await session.prompt({ sessionID, text: closePrompt(record.issueUrl, intakeRepo()) })
+    } catch (error) {
+      close.awaitingAdmission = false
+      if (close.abandoned) return
+      if (notFound(error)) return closeSessionGone(close)
+      return refuseClose(close, "the close prompt could not be sent — try again", messageOf(error))
+    }
+    close.awaitingAdmission = false
+    if (close.abandoned) return
+    // The host admits a prompt and answers its id at once; the close now waits
+    // for this session's next turn end, bound to that admitted message.
+    close.admittedID = admitted?.id ?? admitted?.data?.id
+    if (typeof close.admittedID !== "string" || close.admittedID === "") {
+      return refuseClose(close, "the close prompt's admission could not be read — try again")
+    }
+    // A turn end held while the admission was in flight is this close's next
+    // turn end: decide it now, so no event is lost and the close never sticks.
+    if (close.pendingTurnEnd !== undefined) {
+      const failed = close.pendingTurnEnd
+      close.pendingTurnEnd = undefined
+      await decideCloseTurn(close, failed)
+    }
+  }
+
+  /**
+   * One turn end for a close whose prompt was admitted: the close is decided by
+   * this turn alone, and by nothing else.
+   */
+  async function decideCloseTurn(close, failed) {
+    const { sessionID } = close
+    if (close.abandoned) return
+    if (failed) return refuseClose(close, "the close turn did not succeed — try again")
+    let list
+    try {
+      list = contextMessages(await session.context({ sessionID }))
+    } catch (error) {
+      if (close.abandoned) return
+      return refuseClose(close, "the session's context could not be read — try again", messageOf(error))
+    }
+    if (close.abandoned) return
+    const reply = closeReply(list, { boundaryID: close.boundaryID, admittedID: close.admittedID })
+    if (reply.refused) return refuseClose(close, reply.refused)
+    if (reply.url !== close.record.issueUrl) {
+      return refuseClose(close, "the session's reply named another issue — try again")
+    }
+    // The reply names this record's own issue: remove the session, then drop the
+    // record, so the row leaves even when the delete event is missed.
+    try {
+      await session.remove({ sessionID })
+    } catch (error) {
+      if (close.abandoned) return
+      if (!notFound(error)) {
+        return refuseClose(close, "the session could not be deleted — try again", messageOf(error))
+      }
+    }
+    if (close.abandoned) return
+    logCloseEnd(close, "removed")
+    closes.delete(sessionID)
+    await dropSessionRecord(sessionID)
+  }
+
+  /**
+   * One turn-end event for a session with a close waiting. Answers whether a
+   * close was waiting, so the first-turn path never reads the same event. A turn
+   * end that arrives while the close prompt's admission is still in flight is
+   * held, not dropped, and decided as soon as the admitted id is known.
+   */
+  async function closeTurnEnded(sessionID, failed) {
+    const close = closes.get(sessionID)
+    if (!close) return false
+    if (close.abandoned) return true
+    if (close.admittedID === undefined) {
+      if (close.awaitingAdmission === true && close.pendingTurnEnd === undefined) close.pendingTurnEnd = failed
+      return true
+    }
+    await decideCloseTurn(close, failed)
+    return true
+  }
+
+  /**
+   * Close one item for good: its own session closes its intake issue, and the
+   * session is deleted only on the close turn's own proof. The call starts the
+   * close and answers once it has started or refused it; the close itself runs
+   * on in the background and is decided by the session's next turn end.
+   */
+  async function done(input = {}) {
+    const sessionID = input?.sessionID
+    if (typeof sessionID !== "string" || sessionID === "") return {}
+    if (closesStopped) {
+      log(`a close for session ${sessionID} was refused: the watcher has stopped`)
+      return {}
+    }
+    // One close per session, taken before the first await: a second `done` in the
+    // same instant starts nothing, and an unload during the record read abandons
+    // this call before any close begins.
+    if (closes.has(sessionID) || pendingDone.has(sessionID)) {
+      log(`a close for session ${sessionID} is already in flight`)
+      notifyRefused(sessionID, "a close for this item is already in flight")
+      return {}
+    }
+    pendingDone.add(sessionID)
+    try {
+      const record = await itemOf(sessionID)
+      if (closesStopped) {
+        log(`a close for session ${sessionID} was refused: the watcher has stopped`)
+        return {}
+      }
+      if (!record) {
+        log(`a close for session ${sessionID} found no item record`)
+        notifyRefused(sessionID, "this item is no longer in the list")
+        return {}
+      }
+      const close = {
+        sessionID,
+        record,
+        boundaryID: undefined,
+        admittedID: undefined,
+        awaitingAdmission: false,
+        pendingTurnEnd: undefined,
+        abandoned: false,
+      }
+      closes.set(sessionID, close)
+      logCloseStart(close)
+      await runClose(close)
+    } catch (error) {
+      const close = closes.get(sessionID)
+      if (close) refuseClose(close, "the close failed — try again", messageOf(error))
+      else log(`the close of session ${sessionID} failed: ${messageOf(error)}`)
+    } finally {
+      pendingDone.delete(sessionID)
+    }
+    return {}
+  }
+
+  /**
+   * Stop the watcher: every close still in flight is abandoned. It makes no
+   * further host call — in particular no remove — and each abandoned close
+   * writes one log line. A `done` still reading its record is abandoned too: it
+   * starts no close. The plugin's unload calls this.
+   */
+  function stop() {
+    closesStopped = true
+    for (const close of closes.values()) {
+      close.abandoned = true
+      logCloseEnd(close, "abandoned")
+    }
+    closes.clear()
+  }
+
   /** The text the session's own reply ends with, or undefined. */
   async function readReply(sessionID) {
     try {
@@ -869,6 +1159,8 @@ export function createWatcher({
     const sessionID = event?.data?.sessionID
     if (typeof sessionID !== "string" || sessionID === "") return
     if (Object.hasOwn(TURN_ENDED, type)) {
+      // A close waiting for this session is decided by this turn alone.
+      if (await closeTurnEnded(sessionID, TURN_ENDED[type])) return
       await firstTurnEnded(sessionID, TURN_ENDED[type])
       return
     }
@@ -890,5 +1182,5 @@ export function createWatcher({
     await storage.set(KEYS.suspended, {})
   }
 
-  return { poll, pollNow, status, items, getConfig, setConfig, markOpened, observe, start, dropSessionRecord }
+  return { poll, pollNow, status, items, getConfig, setConfig, markOpened, done, stop, observe, start, dropSessionRecord }
 }

@@ -281,6 +281,7 @@ export function footerParts() {
     ["s", "slack"],
     ["r", "refresh"],
     ["e", "settings"],
+    ["d", "done"],
   ]
   const parts = []
   for (const [index, [key, label]] of keys.entries()) {

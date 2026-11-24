@@ -45,6 +45,7 @@ function fakeContext() {
   const commands = []
   const prompts = []
   const rpcRegistrations = []
+  const rpcEvents = []
   const storage = new Map()
   const calls = { skill: 0, command: 0, rpc: 0 }
   const domains = {
@@ -85,7 +86,14 @@ function fakeContext() {
       async register(definition, handlers) {
         calls.rpc += 1
         rpcRegistrations.push({ definition, handlers })
-        return { async dispose() {}, events: { async emit() {} } }
+        return {
+          async dispose() {},
+          events: {
+            async emit(name, payload) {
+              rpcEvents.push([name, payload])
+            },
+          },
+        }
       },
     },
     storage: {
@@ -111,6 +119,9 @@ function fakeContext() {
       },
       async remove() {},
       async wait() {},
+      async get() {
+        return { id: "ses_fixture", time: { updated: 0 } }
+      },
       async context() {
         return []
       },
@@ -131,7 +142,7 @@ function fakeContext() {
       return target[key]
     },
   })
-  return { ctx, skills, commands, prompts, rpcRegistrations, storage, calls }
+  return { ctx, skills, commands, prompts, rpcRegistrations, rpcEvents, storage, calls }
 }
 
 /** Every path under `dir`, relative and sorted; a file's text as its value. */
@@ -601,6 +612,7 @@ test("every RPC handler answers what the contract's own schema for it describes"
         getConfig: {},
         setConfig: { field: "poll_seconds", value: 90 },
         pollNow: {},
+        done: { sessionID: "ses_fixture" },
         markOpened: { sessionID: "ses_fixture" },
       }
       for (const [name, method] of Object.entries(definition.methods)) {
@@ -619,6 +631,137 @@ test("every RPC handler answers what the contract's own schema for it describes"
       const unknown = await handlers.setConfig({ field: "not_a_field", value: 1 }, context)
       assert.equal(unknown.error.name, "invalid")
       assert.equal(unknown.error.data.field, null, "a field that does not exist has no name to carry")
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+/** The config file a plugin setup reads, as a valid one. */
+function writeConfig(configFile) {
+  mkdirSync(dirname(configFile), { recursive: true })
+  writeFileSync(
+    configFile,
+    JSON.stringify({
+      flag_emoji: "magic_wand",
+      intake_repo: "empiric-earth/almeida-slack-intake",
+      session_directory: "/home/someone/notes",
+      poll_seconds: 60,
+      work_hours: { days: ["Mon", "Fri"], start: "09:00", end: "18:00", time_zone: "UTC" },
+      session_agent: "slack-director",
+    }),
+  )
+}
+
+test("the plugin's unload stops the watcher, so a close started after it is refused", async () => {
+  await withConfigHome(async (configFile) => {
+    writeConfig(configFile)
+    const { ctx, rpcRegistrations } = fakeContext()
+    const lines = []
+    const warn = console.warn
+    console.warn = (message) => lines.push(String(message))
+    try {
+      const dispose = await plugin.setup(ctx)
+      const { handlers } = rpcRegistrations[0]
+      const context = { error: (name, message, data) => ({ error: { name, message, data } }) }
+      await dispose()
+      lines.length = 0
+      await handlers.done({ sessionID: "ses_fixture" }, context)
+      await new Promise((resolve) => setImmediate(resolve))
+      assert.ok(
+        lines.some((line) => line.includes("the watcher has stopped")),
+        "the unload stopped the watcher, so a close started after it is refused",
+      )
+    } finally {
+      console.warn = warn
+    }
+  })
+})
+
+test("a close the watcher refuses reaches the dialog as the closeRefused event", async () => {
+  await withConfigHome(async (configFile) => {
+    writeConfig(configFile)
+    const { ctx, rpcRegistrations, storage, rpcEvents } = fakeContext()
+    // A busy period that has not ended: the close refuses without prompting.
+    ctx.session.get = async () => ({ id: "ses_item", time: { busy: 1_000, idle: null } })
+    storage.set("item/items", {
+      p1: {
+        permalink: "p1",
+        workspace: "slack_nexar",
+        channel: "#platform-help",
+        channelID: "C0PLATFORM",
+        ts: "1795194443.137219",
+        asker: "",
+        flaggedAt: "2026-11-19T14:30:00.000Z",
+        title: "An item",
+        sessionID: "ses_item",
+        issueNumber: 41,
+        issueUrl: "https://github.com/empiric-earth/almeida-slack-intake/issues/41",
+        firstTurnEndedAt: null,
+        firstTurnFailed: false,
+        permissionPending: false,
+        openedAt: null,
+        recordFormat: 2,
+      },
+    })
+    const dispose = await plugin.setup(ctx)
+    try {
+      const { handlers } = rpcRegistrations[0]
+      const context = { error: (name, message, data) => ({ error: { name, message, data } }) }
+      await handlers.done({ sessionID: "ses_item" }, context)
+      await new Promise((resolve) => setImmediate(resolve))
+      const refusal = rpcEvents.find(([name]) => name === "closeRefused")
+      assert.ok(refusal, "the refusal reaches the dialog")
+      assert.equal(refusal[1].sessionID, "ses_item")
+      assert.match(refusal[1].reason, /try again/, "the notice says what to do next")
+    } finally {
+      await dispose()
+    }
+  })
+})
+
+test("the done RPC handler answers before the item session's turn ends", async () => {
+  await withConfigHome(async (configFile) => {
+    writeConfig(configFile)
+    const { ctx, rpcRegistrations, storage } = fakeContext()
+    let released = false
+    ctx.session.get = async () => ({ id: "ses_item", time: { updated: 0 } })
+    ctx.session.context = async () => []
+    // The close turn's prompt is admitted long after the call answers.
+    ctx.session.prompt = () =>
+      new Promise((resolve) => {
+        setTimeout(() => {
+          released = true
+          resolve({ id: "msg_1" })
+        }, 60)
+      })
+    storage.set("item/items", {
+      p1: {
+        permalink: "p1",
+        workspace: "slack_nexar",
+        channel: "#platform-help",
+        channelID: "C0PLATFORM",
+        ts: "1795194443.137219",
+        asker: "",
+        flaggedAt: "2026-11-19T14:30:00.000Z",
+        title: "An item",
+        sessionID: "ses_item",
+        issueNumber: 41,
+        issueUrl: "https://github.com/empiric-earth/almeida-slack-intake/issues/41",
+        firstTurnEndedAt: null,
+        firstTurnFailed: false,
+        permissionPending: false,
+        openedAt: null,
+        recordFormat: 2,
+      },
+    })
+    const dispose = await plugin.setup(ctx)
+    try {
+      const { handlers } = rpcRegistrations[0]
+      const context = { error: (name, message, data) => ({ error: { name, message, data } }) }
+      const answer = await handlers.done({ sessionID: "ses_item" }, context)
+      assert.deepEqual(answer, {}, "the handler answers an empty object")
+      assert.equal(released, false, "the handler answered before the close prompt was admitted")
     } finally {
       await dispose()
     }

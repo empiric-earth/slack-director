@@ -42,6 +42,7 @@ intake repo the first prompt names. Nothing else, and never another repo:
   `POST repos/<intake_repo>/issues/<n>/comments`. `PATCH
   repos/<intake_repo>/issues/<n>` and the close form belong to a later turn the
   user drives.
+- The plugin's close prompt, sent on the user's `d`, is the user's own ask to close the issue, in the close form above.
 - List the issues with a projection of number, title, state and the permalink
   line, and follow every page of that listing (`--paginate`). One response
   stops at 100 issues; an older request and its permalink fall outside the

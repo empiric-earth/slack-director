@@ -58,3 +58,26 @@ export function refreshPrompt(workspace) {
     "Make no other change.",
   ].join("\n")
 }
+
+/**
+ * The close prompt of an item session, sent when the user presses `d` in the
+ * overview. The user's own key is the ask, so the session closes its intake
+ * issue as the skill's close form says, and the reply's one fixed line lets the
+ * plugin bind the close to the turn it started before it deletes the session.
+ */
+export function closePrompt(issueUrl, intakeRepo) {
+  return [
+    "The user marked this item done.",
+    "",
+    `Intake issue: ${issueUrl}`,
+    `Intake repo: ${intakeRepo}`,
+    "",
+    "Post one comment on that issue holding the one-line reason the item is done, then close the issue as completed — `state` and `state_reason` — with one `sparta_exec` call.",
+    "",
+    "End your reply with exactly this line:",
+    "",
+    `Closed: ${issueUrl}`,
+    "",
+    "Then stop, and take no other action.",
+  ].join("\n")
+}

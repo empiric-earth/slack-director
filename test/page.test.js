@@ -177,7 +177,8 @@ test("the title row, the header line, the counts line, the today line and the fo
   assert.equal(countsText([]), "● 0 waiting for you   ◐ 0 working   ○ 0 idle")
   assert.equal(todayText(STATUS), "today  5 flagged · 3 next steps posted", "the skipped hits are gone")
   assert.equal(todayText(undefined), "today  0 flagged · 0 next steps posted")
-  assert.equal(footerText(), "↵ session   i issue   s slack   r refresh   e settings")
+  assert.equal(footerText(), "↵ session   i issue   s slack   r refresh   e settings   d done")
+  assert.ok(footerText().includes("d done"), "the footer names the d key")
   assert.equal(sidebarText(rows), "Slack Director  2 waiting · 1 working")
 })
 
@@ -263,6 +264,9 @@ test("the colour roles name the mark, the text and the bar each part takes", () 
       ["   ", "muted", false],
       ["e", "base", true],
       [" settings", "muted", false],
+      ["   ", "muted", false],
+      ["d", "base", true],
+      [" done", "muted", false],
     ],
   )
   assert.deepEqual(todayParts(STATUS).map((entry) => entry.role), ["muted", "muted"])

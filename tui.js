@@ -321,6 +321,41 @@ async function setup(context, spawnProcess, rendererOverride) {
       }
     }
 
+    // Sessions whose close the watcher refused by event; `closeItem` reads it
+    // so a refusal that beats the RPC answer is not overwritten.
+    const refusedSessions = new Set()
+
+    /**
+     * Close one item for good, on the user's `d`: the confirm names the item and
+     * what the delete takes with it, and only a yes calls `done`. The plugin
+     * closes the intake issue in the item's own session and deletes the
+     * session on the close turn's own proof, so the row leaves only then.
+     */
+    async function closeItem(item) {
+      if (!item) return
+      let confirmed
+      try {
+        confirmed = await context.ui.dialog.confirm({
+          title: PAGE_TITLE,
+          message: `Close the intake issue of “${item.title}” and delete its session? The session and its child sessions are deleted, any turn in them stops, and this cannot be restored.`,
+          label: { confirm: "Close and delete", cancel: "Cancel" },
+        })
+      } catch (error) {
+        toast(`${PAGE_TITLE}: ${messageOf(error)}`, "error")
+        return
+      }
+      if (confirmed !== true) return
+      try {
+        refusedSessions.delete(item.sessionID)
+        await rpc().done({ sessionID: item.sessionID })
+        // A refusal that arrived before the answer already told the user why;
+        // "closing" would overwrite it.
+        if (!refusedSessions.delete(item.sessionID)) toast(`${PAGE_TITLE}: closing “${item.title}”`)
+      } catch (error) {
+        toast(`${PAGE_TITLE}: ${messageOf(error)}`, "error")
+      }
+    }
+
     /** The config fields, one prompt per value, saved through the RPC contract. */
     async function openSettings() {
       let config
@@ -402,6 +437,16 @@ async function setup(context, spawnProcess, rendererOverride) {
               void openSettings()
             },
           },
+          {
+            id: `${COMMAND_ID}.done`,
+            title: "Close the item and delete its session",
+            bind: "d",
+            run: () => {
+              const item = current()
+              closeDialog()
+              void closeItem(item)
+            },
+          },
           { id: `${COMMAND_ID}.up`, title: "Move up", bind: "up", run: () => move(-1) },
           { id: `${COMMAND_ID}.down`, title: "Move down", bind: "down", run: () => move(1) },
         ],
@@ -460,10 +505,17 @@ async function setup(context, spawnProcess, rendererOverride) {
 
     // The item map follows its own changes, and the dialog follows the item map.
     const unsubscribe = context.client.rpc(SlackDirectorRpc).events.on("updated", () => void refresh())
+    // A close the watcher refuses reaches the dialog here, so the user is not
+    // left waiting for a close that never ran: the reason says what to do next.
+    const unsubscribeRefused = context.client.rpc(SlackDirectorRpc).events.on("closeRefused", (notice) => {
+      if (notice?.sessionID) refusedSessions.add(notice.sessionID)
+      toast(`${PAGE_TITLE}: ${notice?.reason ?? "the close was refused"}`, "error")
+    })
     void refresh()
 
     return () => {
       unsubscribe()
+      unsubscribeRefused()
       unregisterSidebar()
     }
 }

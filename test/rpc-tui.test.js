@@ -975,6 +975,49 @@ test("a completion after the user left the overview never reopens it", async () 
   assert.equal(fake.dialogs.length, opened, "the later completion opens no dialog")
 })
 
+test("a delayed Done answer never reopens an overview the user has left", async () => {
+  const fake = fakeTuiContext({ confirmAnswer: true })
+  let settleDone
+  const base = fake.context.client.rpc
+  fake.context.client.rpc = (definition) => ({
+    ...base(definition),
+    done(input) {
+      fake.calls.push("done")
+      fake.doneInputs.push(input)
+      return new Promise((resolve) => {
+        settleDone = resolve
+      })
+    },
+  })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+  modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
+
+  // The user confirms the close of the marked item; its answer is still pending.
+  const before = fake.dialogs.length
+  primaryClick(renderDialog(fake.dialogs), 1)
+  await tick()
+  assert.deepEqual(fake.doneInputs, [{ sessionID: SECOND.sessionID }], "one request, for the captured item")
+  assert.equal(fake.dialogs.length, before + 1, "the overview comes back before the answer settles")
+
+  // While the answer is pending the user leaves that overview, opens a new one
+  // and moves its marker.
+  fake.dialogs.at(-1).onClose()
+  await fake.layers[0].commands[0].run()
+  const opened = fake.dialogs.length
+  renderDialog(fake.dialogs)
+  liveModalLayers(fake)[0].commands.find((command) => command.bind === "down").run()
+  assert.equal(markedItem(renderDialog(fake.dialogs)), SECOND.title, "the user's own selection is the marked one")
+  fake.dialogs.at(-1).onClose()
+
+  // The stale answer settles: it must not reopen the overview, nor move the marker.
+  settleDone({})
+  await tick()
+  assert.equal(fake.dialogs.length, opened, "the late answer opens no dialog")
+  assert.equal(markedItem(renderDialog(fake.dialogs)), SECOND.title, "and leaves the user's own selection where it was")
+})
+
 test("with no rows the Done hint asks no confirm and sends no request", async () => {
   const fake = fakeTuiContext({ items: [], confirmAnswer: true })
   await renderedTui().setup(fake.context)

@@ -401,7 +401,9 @@ async function setup(context, spawnProcess, rendererOverride) {
      * own session and deletes the session on the close turn's own proof, so the
      * row leaves only then. The overview closes behind the confirm and comes
      * back on the captured item whatever the answer: a cancel, a refusal or a
-     * failed request leaves the item visible and the overview usable.
+     * failed request leaves the item visible and the overview usable. It comes
+     * back as soon as the user answers, not when the close settles, so a late
+     * answer can never reopen a view the user has left.
      */
     async function closeItem(item) {
       if (!item) return
@@ -423,6 +425,12 @@ async function setup(context, spawnProcess, rendererOverride) {
         restoreOverview(captured.sessionID)
         return
       }
+      // The overview comes back on the user's yes, before the close is sent and
+      // without waiting for it: the answer settles on its own time, and a late
+      // answer, a refusal or a failure only adds a notice. Nothing in that
+      // continuation touches the dialog, so a stale one can never reopen a view
+      // the user has since left, or move its selection.
+      restoreOverview(captured.sessionID)
       try {
         refusedSessions.delete(captured.sessionID)
         await rpc().done({ sessionID: captured.sessionID })
@@ -434,7 +442,6 @@ async function setup(context, spawnProcess, rendererOverride) {
       }
       // The row leaves only when the item's record does: the close's own
       // completion refreshes the list, and never reopens the overview.
-      restoreOverview(captured.sessionID)
     }
 
     /**

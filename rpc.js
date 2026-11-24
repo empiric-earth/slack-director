@@ -8,9 +8,11 @@
 //
 // The overview dialog reads `status`, `items` and the `updated` event, and the
 // settings dialog reads and writes the config through `getConfig` and
-// `setConfig`. The live state of an item's session — whether it is running and
-// whether it waits on a permission — is not here: the TUI reads that from its
-// own session data.
+// `setConfig`. The overview's `d` key closes one item with `done`: the item's
+// own session closes its intake issue, and the plugin deletes the session on the
+// close turn's own proof. The live state of an item's session — whether it is
+// running and whether it waits on a permission — is not here: the TUI reads that
+// from its own session data.
 
 const emptyObject = { type: "object", properties: {}, additionalProperties: false }
 const nullableString = { type: ["string", "null"] }
@@ -155,6 +157,15 @@ export const SlackDirectorRpc = {
       },
     },
     pollNow: { input: emptyObject, output: emptyObject },
+    done: {
+      input: {
+        type: "object",
+        properties: { sessionID: { type: "string" } },
+        required: ["sessionID"],
+        additionalProperties: false,
+      },
+      output: emptyObject,
+    },
     markOpened: {
       input: {
         type: "object",

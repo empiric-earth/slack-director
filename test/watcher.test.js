@@ -279,6 +279,7 @@ function harness({
   const session = {
     onCreate: null,
     onPrompt: null,
+    onRemove: null,
     async create(input) {
       if (session.onCreate) await session.onCreate(input)
       const id = `ses_${created.length + 1}`
@@ -287,10 +288,12 @@ function harness({
     },
     async prompt(input) {
       if (session.onPrompt) await session.onPrompt(input)
-      prompts.push(input)
-      return {}
+      const id = `msg_${prompts.length + 1}`
+      prompts.push({ id, ...input })
+      return { id }
     },
     async remove({ sessionID }) {
+      if (session.onRemove) await session.onRemove({ sessionID })
       removed.push(sessionID)
     },
     async wait({ sessionID }) {
@@ -2314,6 +2317,404 @@ test("a reissue whose record was removed before its update removes the session i
     assert.ok(h.removed.includes(h.created[0].id), "the session it made is removed")
     assert.equal(h.prompts.length, 0, "and no prompt is sent to it")
     assert.equal(h.items()[link], undefined, "the record stays removed")
+  } finally {
+    h.clean()
+  }
+})
+
+// --- The `d` close flow ------------------------------------------------------
+//
+// `done` closes one item: the item's own session closes its intake issue, and
+// the plugin deletes the session only on the close turn's own proof — the turn
+// the close itself started ends without error, and the reply bound to the
+// admitted close prompt's own user message names the record's own issue. Every
+// test below drives the watcher with the harness's fake session and context.
+
+/** The messages a session holds before a close: the first turn's own two. */
+const beforeClose = () => [
+  { type: "user", id: "msg_1", text: "A Slack message was flagged for triage." },
+  {
+    type: "assistant",
+    id: "msg_before",
+    time: { created: NOW - 60_000, completed: NOW - 59_000 },
+    content: [{ type: "text", text: "Findings and proposed next steps." }],
+  },
+]
+
+/** The close prompt's own admitted user message, as the host's id names it. */
+const closeMessage = (id) => ({ type: "user", id, text: "The user marked this item done." })
+
+/** One finished assistant message carrying `text`. */
+const replyMessage = (text, over = {}) => ({
+  type: "assistant",
+  id: "msg_reply",
+  time: { created: NOW - 1_000, completed: NOW },
+  content: [{ type: "text", text }],
+  ...over,
+})
+
+/** The close's own log lines, in order. */
+const closeLogs = (h) => h.logs.filter((line) => line.startsWith("close "))
+
+/**
+ * One item whose session is seeded quiet, with the issue its record names and
+ * the first turn's own context. The session's run times are quiet, so the close
+ * may start.
+ */
+async function closeableItem({
+  issueUrl = "https://github.com/empiric-earth/almeida-slack-intake/issues/41",
+  permissionPending = false,
+  times = quietTimes(NOW),
+} = {}) {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([hitRow("C0PLATFORM", ts, "#platform-help")], null)] } })
+  await h.watcher.poll()
+  const sessionID = h.created[0].id
+  h.setItems({ [link]: { ...h.items()[link], issueUrl, issueNumber: issueUrl ? 41 : null, permissionPending } })
+  h.sessions.set(sessionID, { time: times })
+  h.contexts.set(sessionID, beforeClose())
+  return { h, link, sessionID }
+}
+
+test("done sends one close prompt to the item's idle session, naming the issue and the Closed: line", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    await h.watcher.done({ sessionID })
+    assert.equal(h.prompts.length, 2, "the first prompt and one close prompt")
+    const close = h.prompts.at(-1)
+    assert.equal(close.sessionID, sessionID)
+    assert.ok(close.text.includes(issue), "the prompt names the record's issue")
+    assert.ok(close.text.includes(`Closed: ${issue}`), "the prompt asks for the Closed: line")
+    assert.ok(close.text.includes(h.config.intake_repo), "the prompt names the intake repo")
+    assert.match(close.text, /marked this item done/i, "the prompt says the user marked it done")
+    assert.deepEqual(h.removed, [], "nothing is removed before the turn ends")
+    assert.ok(closeLogs(h).some((line) => line.startsWith("close started")), "the close is visible in the log")
+    await h.watcher.observe({ type: "session.execution.failed", data: { sessionID } })
+  } finally {
+    h.clean()
+  }
+})
+
+test("a succeeded close turn whose bound reply names the record's issue removes the session once and drops the record", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    await h.watcher.done({ sessionID })
+    const admitted = h.prompts.at(-1).id
+    h.contexts.set(sessionID, [
+      ...beforeClose(),
+      closeMessage(admitted),
+      replyMessage(`Closing the item.\n\nClosed: ${issue}`),
+    ])
+    h.changes.length = 0
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.deepEqual(h.removed, [sessionID], "the session is removed once")
+    assert.equal(h.items()[link], undefined, "the record leaves the map")
+    assert.deepEqual((await h.watcher.items()).items, [], "and the answer the dialog reads")
+    assert.ok(h.changes.length > 0, "the change notice fired")
+    assert.ok(
+      h.logs.includes(`close ended: session ${sessionID} — issue ${issue} — removed`),
+      "the close's end line names the outcome",
+    )
+  } finally {
+    h.clean()
+  }
+})
+
+test("a succeeded close turn removes nothing when its reply carries no Closed: line", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    await h.watcher.done({ sessionID })
+    const admitted = h.prompts.at(-1).id
+    h.contexts.set(sessionID, [...beforeClose(), closeMessage(admitted), replyMessage("Closing the item, done.")])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.deepEqual(h.removed, [], "no session is removed")
+    assert.ok(h.items()[link], "the record stays, so the row stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a succeeded close turn removes nothing when its reply's Closed: URL names another issue", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    await h.watcher.done({ sessionID })
+    const admitted = h.prompts.at(-1).id
+    const other = "https://github.com/empiric-earth/almeida-slack-intake/issues/99"
+    h.contexts.set(sessionID, [...beforeClose(), closeMessage(admitted), replyMessage(`Closed: ${other}`)])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.deepEqual(h.removed, [], "another issue's close never deletes this session")
+    assert.ok(h.items()[link], "the record stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a close prompt call that throws a non-not-found error removes nothing and keeps the record", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    h.session.onPrompt = async () => {
+      throw new Error("the host refused the prompt")
+    }
+    await h.watcher.done({ sessionID })
+    assert.equal(h.prompts.length, 1, "no close prompt was admitted")
+    assert.deepEqual(h.removed, [], "nothing is removed")
+    assert.ok(h.items()[link], "the record stays")
+    assert.ok(closeLogs(h).some((line) => line.includes("refused")), "the close refused and said so")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a remove that throws a non-not-found error keeps the record and removes nothing", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    await h.watcher.done({ sessionID })
+    const admitted = h.prompts.at(-1).id
+    h.session.onRemove = async () => {
+      throw new Error("the host refused the delete")
+    }
+    h.contexts.set(sessionID, [...beforeClose(), closeMessage(admitted), replyMessage(`Closed: ${issue}`)])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.deepEqual(h.removed, [], "the failed remove removes nothing")
+    assert.ok(h.items()[link], "the record stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a close turn that ends failed or interrupted removes nothing, even with a matching line before the boundary", async () => {
+  for (const type of ["session.execution.failed", "session.execution.interrupted"]) {
+    const { h, link, sessionID } = await closeableItem()
+    try {
+      const issue = h.items()[link].issueUrl
+      // The matching line is already in the session, before the boundary.
+      h.contexts.set(sessionID, [...beforeClose(), replyMessage(`An earlier close.\n\nClosed: ${issue}`)])
+      await h.watcher.done({ sessionID })
+      await h.watcher.observe({ type, data: { sessionID } })
+      assert.deepEqual(h.removed, [], `${type}: no session is removed`)
+      assert.ok(h.items()[link], `${type}: the record stays`)
+    } finally {
+      h.clean()
+    }
+  }
+})
+
+test("a succeeded close turn with no assistant text after the boundary removes nothing, even with a matching line before it", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    h.contexts.set(sessionID, [...beforeClose(), replyMessage(`An earlier close.\n\nClosed: ${issue}`)])
+    await h.watcher.done({ sessionID })
+    const admitted = h.prompts.at(-1).id
+    // The close prompt is admitted, and no assistant text follows it.
+    h.contexts.set(sessionID, [...beforeClose(), replyMessage(`An earlier close.\n\nClosed: ${issue}`), closeMessage(admitted)])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.deepEqual(h.removed, [], "a line from before the boundary never decides")
+    assert.ok(h.items()[link], "the record stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a matching line after the boundary does not count when the turn then ends interrupted", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    await h.watcher.done({ sessionID })
+    const admitted = h.prompts.at(-1).id
+    h.contexts.set(sessionID, [...beforeClose(), closeMessage(admitted), replyMessage(`Closed: ${issue}`)])
+    await h.watcher.observe({ type: "session.execution.interrupted", data: { sessionID } })
+    assert.deepEqual(h.removed, [], "an interrupted turn deletes nothing")
+    assert.ok(h.items()[link], "the record stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a competing user message admitted before the close prompt refuses the delete, even when its reply carries the line", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    // A competing turn is admitted between the boundary read and the close
+    // prompt: the boundary was noted before it, so it lands after the boundary.
+    h.session.onPrompt = async () => {
+      h.contexts.set(sessionID, [...beforeClose(), { type: "user", id: "msg_competing", text: "another turn" }])
+    }
+    await h.watcher.done({ sessionID })
+    // The context the close turn ends on: the competing turn is the only user
+    // message after the boundary, and its own reply carries the matching line.
+    h.contexts.set(sessionID, [
+      ...beforeClose(),
+      { type: "user", id: "msg_competing", text: "another turn" },
+      replyMessage(`Done.\n\nClosed: ${issue}`, { id: "msg_competing_reply" }),
+    ])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.deepEqual(h.removed, [], "a competing turn never authorizes the delete")
+    assert.ok(h.items()[link], "the record stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a close turn whose context holds no user message with the admitted id refuses the delete", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    await h.watcher.done({ sessionID })
+    h.contexts.set(sessionID, [...beforeClose(), replyMessage(`Closed: ${issue}`)])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.deepEqual(h.removed, [], "the admitted prompt's own turn is what binds")
+    assert.ok(h.items()[link], "the record stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a second user message after the admitted close prompt refuses the delete", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    await h.watcher.done({ sessionID })
+    const admitted = h.prompts.at(-1).id
+    h.contexts.set(sessionID, [
+      ...beforeClose(),
+      closeMessage(admitted),
+      { type: "user", id: "msg_third", text: "a later ask" },
+      replyMessage(`Closed: ${issue}`),
+    ])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.deepEqual(h.removed, [], "a later turn's context refuses the delete")
+    assert.ok(h.items()[link], "the record stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("an assistant message with an error after the close prompt refuses the delete", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    await h.watcher.done({ sessionID })
+    const admitted = h.prompts.at(-1).id
+    h.contexts.set(sessionID, [
+      ...beforeClose(),
+      closeMessage(admitted),
+      replyMessage(`Closed: ${issue}`, { error: { message: "the turn failed" } }),
+    ])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.deepEqual(h.removed, [], "an errored reply never decides")
+    assert.ok(h.items()[link], "the record stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a turn-end event for an item session with no close waiting changes nothing", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const before = JSON.stringify(h.items())
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.equal(JSON.stringify(h.items()), before, "the item map is unchanged")
+    assert.deepEqual(h.removed, [], "nothing is removed")
+  } finally {
+    h.clean()
+  }
+})
+
+test("done on a record whose session the host reports gone drops the record, sends no prompt and removes nothing", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    h.sessions.delete(sessionID)
+    await h.watcher.done({ sessionID })
+    assert.equal(h.items()[link], undefined, "the record is dropped")
+    assert.equal(h.prompts.length, 1, "no close prompt is sent")
+    assert.deepEqual(h.removed, [], "no remove call is made")
+    assert.ok(
+      h.logs.some((line) => line.includes("record dropped — session gone, issue not closed")),
+      "the log says the intake issue was not closed",
+    )
+  } finally {
+    h.clean()
+  }
+})
+
+test("done on a record whose session read fails for another reason keeps the record and calls nothing", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    h.sessions.set(sessionID, { error: new Error("the host is unreadable") })
+    await h.watcher.done({ sessionID })
+    assert.ok(h.items()[link], "the record stays")
+    assert.equal(h.prompts.length, 1, "no close prompt is sent")
+    assert.deepEqual(h.removed, [], "no remove call is made")
+  } finally {
+    h.clean()
+  }
+})
+
+test("done on a record with no intake issue removes its session at once and drops the record", async () => {
+  const { h, link, sessionID } = await closeableItem({ issueUrl: null })
+  try {
+    await h.watcher.done({ sessionID })
+    assert.equal(h.prompts.length, 1, "no close prompt is sent")
+    assert.deepEqual(h.removed, [sessionID], "the session is removed at once")
+    assert.equal(h.items()[link], undefined, "the record leaves the map")
+    assert.deepEqual((await h.watcher.items()).items, [])
+  } finally {
+    h.clean()
+  }
+})
+
+test("done on a busy session or one with a permission request pending sends no prompt and removes nothing", async () => {
+  const busy = await closeableItem({ times: { busy: NOW, idle: null, updated: NOW } })
+  try {
+    await busy.h.watcher.done({ sessionID: busy.sessionID })
+    assert.equal(busy.h.prompts.length, 1, "a busy session is never prompted")
+    assert.deepEqual(busy.h.removed, [], "and nothing is removed")
+    assert.ok(busy.h.items()[busy.link], "the record stays")
+  } finally {
+    busy.h.clean()
+  }
+  const held = await closeableItem({ permissionPending: true })
+  try {
+    await held.h.watcher.done({ sessionID: held.sessionID })
+    assert.equal(held.h.prompts.length, 1, "a held session is never prompted")
+    assert.deepEqual(held.h.removed, [], "and nothing is removed")
+    assert.ok(held.h.items()[held.link], "the record stays")
+  } finally {
+    held.h.clean()
+  }
+})
+
+test("a second done for the same session while its close waits sends no second prompt", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    await h.watcher.done({ sessionID })
+    const prompts = h.prompts.length
+    await h.watcher.done({ sessionID })
+    assert.equal(h.prompts.length, prompts, "no second close prompt")
+    assert.ok(h.logs.some((line) => line.includes("already in flight")), "the second done is refused")
+    assert.ok(h.items()[link], "the record stays until the turn decides")
+  } finally {
+    h.clean()
+  }
+})
+
+test("after the watcher stops, a waiting close makes no remove and logs the close as abandoned", async () => {
+  const { h, link, sessionID } = await closeableItem()
+  try {
+    const issue = h.items()[link].issueUrl
+    await h.watcher.done({ sessionID })
+    const admitted = h.prompts.at(-1).id
+    h.watcher.stop()
+    assert.ok(closeLogs(h).some((line) => line.endsWith("— abandoned")), "the abandoned close is logged")
+    h.contexts.set(sessionID, [...beforeClose(), closeMessage(admitted), replyMessage(`Closed: ${issue}`)])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    assert.deepEqual(h.removed, [], "an abandoned close removes nothing")
+    assert.ok(h.items()[link], "the record stays")
   } finally {
     h.clean()
   }

@@ -104,6 +104,7 @@ function fakeTuiContext({
   setRejection,
   selectAnswer,
   promptAnswer,
+  confirmAnswer,
 } = {}) {
   const layers = []
   const dropped = []
@@ -116,6 +117,8 @@ function fakeTuiContext({
   const opened = []
   const selections = []
   const prompts = []
+  const confirms = []
+  const doneInputs = []
   const dialogs = []
   const dialogSettings = []
   const cleared = []
@@ -149,6 +152,10 @@ function fakeTuiContext({
         prompt: async (options) => {
           prompts.push(options)
           return promptAnswer
+        },
+        confirm: async (options) => {
+          confirms.push(options)
+          return confirmAnswer
         },
       },
     },
@@ -185,6 +192,11 @@ function fakeTuiContext({
             opened.push(input)
             return {}
           },
+          async done(input) {
+            calls.push("done")
+            doneInputs.push(input)
+            return {}
+          },
           events: {
             on: (name, handler) => {
               eventHandlers.push([name, handler])
@@ -214,6 +226,8 @@ function fakeTuiContext({
     opened,
     selections,
     prompts,
+    confirms,
+    doneInputs,
     dialogs,
     dialogSettings,
     cleared,
@@ -288,6 +302,7 @@ const renderDialog = (dialogs) => dialogs.at(-1).render()
 test("the RPC contract defines every method and the updated event with an input and an output schema", () => {
   assert.equal(SlackDirectorRpc.id, "slack-director")
   assert.deepEqual(Object.keys(SlackDirectorRpc.methods).sort(), [
+    "done",
     "getConfig",
     "items",
     "markOpened",
@@ -394,6 +409,7 @@ test("the Slack Director entry opens a floating dialog with its own modal keys",
       ["s", `${COMMAND_ID}.slack`],
       ["r", `${COMMAND_ID}.poll`],
       ["e", `${COMMAND_ID}.settings`],
+      ["d", `${COMMAND_ID}.done`],
       ["up", `${COMMAND_ID}.up`],
       ["down", `${COMMAND_ID}.down`],
     ],
@@ -494,10 +510,10 @@ test("the dialog's footer names each key, and its keys are the ones it names", a
   renderDialog(dialogs)
   const modal = modalLayer(layers)
   const keys = modal.commands.map((command) => command.bind)
-  for (const key of ["up", "down", "return", "i", "s", "r", "e"]) {
+  for (const key of ["up", "down", "return", "i", "s", "r", "e", "d"]) {
     assert.ok(keys.includes(key), `the dialog answers ${key}`)
   }
-  assert.equal(footerText(), "↵ session   i issue   s slack   r refresh   e settings")
+  assert.equal(footerText(), "↵ session   i issue   s slack   r refresh   e settings   d done")
   assert.equal(
     layers[0].commands.some((command) => command.bind === "escape"),
     false,
@@ -513,6 +529,79 @@ test("r polls now through the contract", async () => {
   modalLayer(layers).commands.find((command) => command.bind === "r").run()
   await new Promise((resolve) => setImmediate(resolve))
   assert.ok(calls.includes("pollNow"), "r calls pollNow")
+})
+
+test("the contract's done method takes one session id and answers an empty object", () => {
+  const done = SlackDirectorRpc.methods.done
+  assert.ok(done, "the contract carries done")
+  assert.equal(done.input.type, "object")
+  assert.deepEqual(done.input.properties, { sessionID: { type: "string" } })
+  assert.deepEqual(done.input.required, ["sessionID"])
+  assert.equal(done.input.additionalProperties, false, "no other field is accepted")
+  assert.deepEqual(done.output, { type: "object", properties: {}, additionalProperties: false })
+  assert.equal(schemaProblem(done.output, {}), undefined, "an empty answer fits")
+  assert.match(schemaProblem(done.input, { sessionID: 3 }), /sessionID is not a string/)
+  assert.match(schemaProblem(done.input, { sessionID: "ses_1", extra: true }), /undeclared extra/)
+})
+
+test("d asks the confirm dialog once, naming the item and the delete, and a no answer calls no RPC method", async () => {
+  const { context, layers, dialogs, confirms, cleared, calls } = fakeTuiContext({ confirmAnswer: false })
+  await tui.setup(context)
+  await layers[0].commands[0].run()
+  renderDialog(dialogs)
+  const before = calls.length
+  modalLayer(layers).commands.find((command) => command.bind === "d").run()
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(confirms.length, 1, "the key asks one confirm dialog")
+  assert.match(confirms[0].message, /Access to the staging dashboards/, "the message names the item")
+  assert.match(confirms[0].message, /intake issue/i, "it says the intake issue will be closed")
+  assert.match(confirms[0].message, /child sessions/i, "it says the session and its child sessions are deleted")
+  assert.ok(cleared.length > 0, "the overview closes behind the confirm")
+  assert.equal(calls.length, before, "a no answer calls no RPC method")
+  assert.equal(calls.includes("done"), false)
+})
+
+test("d's yes calls done once with the selected row's session and says the close started", async () => {
+  const { context, layers, dialogs, confirms, doneInputs, calls, toasts } = fakeTuiContext({ confirmAnswer: true })
+  await tui.setup(context)
+  await layers[0].commands[0].run()
+  renderDialog(dialogs)
+  const modal = modalLayer(layers)
+  modal.commands.find((command) => command.bind === "down").run()
+  modal.commands.find((command) => command.bind === "d").run()
+  await new Promise((resolve) => setImmediate(resolve))
+
+  assert.equal(confirms.length, 1)
+  assert.deepEqual(doneInputs, [{ sessionID: SECOND.sessionID }], "done is called once with the marked row's session")
+  assert.equal(calls.filter((name) => name === "done").length, 1, "and only once")
+  assert.match(toasts.at(-1).message, /closing/i, "a toast says the close started")
+})
+
+test("a close the contract refuses shows an error toast", async () => {
+  const { context, layers, dialogs, toasts } = fakeTuiContext({ confirmAnswer: true })
+  context.client.rpc = () => ({
+    async items() {
+      return { items: [ITEM, SECOND] }
+    },
+    async status() {
+      return STATUS
+    },
+    async getConfig() {
+      return { config: CONFIG }
+    },
+    async done() {
+      throw new Error("the close was refused")
+    },
+    events: { on: () => () => {} },
+  })
+  await tui.setup(context)
+  await layers[0].commands[0].run()
+  renderDialog(dialogs)
+  modalLayer(layers).commands.find((command) => command.bind === "d").run()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(toasts.at(-1).variant, "error")
+  assert.match(toasts.at(-1).message, /the close was refused/)
 })
 
 test("e on the dialog opens the settings dialog", async () => {

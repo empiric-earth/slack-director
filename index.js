@@ -113,6 +113,13 @@ export default {
         void watcher.pollNow().catch((error) => log(`poll now failed: ${messageOf(error)}`))
         return {}
       },
+      // A close can wait on a sparta approval in the item session, so the call
+      // starts it and answers at once; the close's outcome reaches the dialog as
+      // the item's record leaving.
+      done: async (input) => {
+        void watcher.done(input).catch((error) => log(`the close failed: ${messageOf(error)}`))
+        return {}
+      },
       markOpened: (input) => watcher.markOpened(input),
     })
     emitUpdated = () => {
@@ -164,6 +171,9 @@ export default {
       stopped = true
       clearTimeout(timer)
       controller.abort()
+      // The watcher stops first: a close still in flight is abandoned before it
+      // can remove anything the next install would not know about.
+      watcher.stop()
       await rpcRegistration.dispose()
       await skillRegistration.dispose()
     }

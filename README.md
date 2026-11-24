@@ -63,7 +63,8 @@ gone.
 
 Keys: `↑` and `↓` move the selection, `enter` opens the item's session, `i`
 opens its intake issue in your browser, `s` opens the Slack message, `r` polls
-now, `e` opens the settings dialog and `esc` closes the dialog.
+now, `e` opens the settings dialog, `d` closes the item and deletes its session,
+and `esc` closes the dialog.
 
 While you are in a session, the sidebar carries one line:
 `Slack Director  2 waiting · 1 working`.
@@ -136,6 +137,19 @@ stays.
 - Deleting or archiving an item's session takes its row out of the overview for
   good. The message is not picked up again: a permalink that has had a session
   keeps its place, so a removed item gets no second session.
+- `d` closes the item for good: the item's own session posts a close-reason
+  comment and closes the intake issue as completed, and the plugin deletes the
+  session and every child session under it once that session's own reply names
+  the issue as closed. A turn running in the session is stopped. The confirm
+  before it names the item and says the delete cannot be restored.
+- A session that is running, or one with a permission request pending, refuses
+  the close and keeps its row: the close turn must be the only turn in the
+  session.
+- A record whose session is already gone is dropped from the list, and its
+  intake issue stays open: the plugin cannot prompt a session that no longer
+  exists, so it closes nothing and says so in its log.
+- Every close writes two lines to the plugin's log — one when it starts and one
+  when it ends, with the outcome — so a close still in flight can be found.
 - An item session's transcript holds the thread text it read. It lives in your
   local OpenCode database, and deleting the session deletes it.
 - The message you flag is read by the item session and reaches the model. That

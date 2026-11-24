@@ -19,22 +19,24 @@ import { spawn } from "node:child_process"
 import { SlackDirectorRpc } from "./rpc.js"
 import { FIELD_NAMES } from "./src/config.js"
 import {
+  DIALOG_INSET,
+  DIALOG_LIST_INSET,
   DIALOG_SIZE,
-  KEY_HELP,
   PAGE_TITLE,
-  colourRole,
-  countsText,
+  countsParts,
   fieldValue,
+  footerParts,
   headerParts,
   moveSelection,
   openerCommand,
   pageRows,
-  rowText,
+  rowParts,
+  sections,
   selectedItem,
   settingsValue,
   sidebarText,
-  tableHeaderText,
-  todayText,
+  titleParts,
+  todayParts,
 } from "./src/page.js"
 
 /** The dialog's palette entry and slash command. */
@@ -88,66 +90,118 @@ function signalOf(renderer, initial) {
 /** Read a value that may be a signal's accessor. */
 const read = (value) => (typeof value === "function" ? value() : value)
 
-/** The theme colour one role takes, or undefined when the theme is absent. */
+/** The bold text attribute, as the host's own renderer names it (`TextAttributes.BOLD`). */
+const BOLD = 1
+
+/**
+ * The theme colour one role takes, or undefined for the host's own default. The
+ * waiting and working marks take step 200 of the theme's `orange` and `blue`
+ * hue scales — a hue is a scale keyed by the steps 100 to 900, not a colour —
+ * and fall back to the warning and info feedback text when the theme defines no
+ * such hue.
+ */
 export function roleColour(theme, role) {
   const text = theme?.text ?? {}
-  if (role === "attention") return text.feedback?.warning?.base
-  if (role === "dimmed") return text.muted
-  return text.base
+  const hue = theme?.hue ?? {}
+  switch (role) {
+    case "title":
+    case "base":
+    case "age-calm":
+      return text.base
+    case "muted":
+    case "state-idle":
+    case "workspace-ok":
+      return text.muted
+    case "state-waiting":
+      return hue?.orange?.[200] ?? text.feedback?.warning?.base
+    case "state-working":
+      return hue?.blue?.[200] ?? text.feedback?.info?.base
+    case "age-warn":
+    case "workspace-fail":
+      return text.feedback?.warning?.base
+    case "age-error":
+      return text.feedback?.error?.base
+    case "bar":
+      return text.formfield?.focused
+    default:
+      return undefined
+  }
 }
 
-/** One line of text, as the host's element. */
-function line(renderer, content, colour) {
+/** The background the selected row takes across its whole width. */
+export function selectedBackground(theme) {
+  return theme?.background?.action?.primary?.focused
+}
+
+/** One part of a line, as the host's text element. */
+function textEl(renderer, segment, theme) {
   const element = renderer.createElement("text")
-  renderer.spread(element, colour === undefined ? { content } : { content, fg: colour })
+  const props = { content: segment.text }
+  const colour = roleColour(theme, segment.role)
+  if (colour !== undefined) props.fg = colour
+  if (segment.bold) props.attributes = BOLD
+  renderer.spread(element, props)
   return element
 }
 
-/** One row's line, with the colour its role takes. */
-function rowLine(renderer, row, index, selected, now, theme) {
-  const marked = index === read(selected)
-  const colour = roleColour(theme, colourRole("row", { state: row.state, selected: marked }))
-  return line(renderer, rowText(row.item, row.state, { selected: marked, now: read(now) }), colour)
+/** One line as a row of its parts. */
+function rowBox(renderer, segments, theme, options = {}) {
+  const box = renderer.createElement("box")
+  const props = { flexDirection: "row", children: segments.map((segment) => textEl(renderer, segment, theme)) }
+  if (options.paddingLeft !== undefined) props.paddingLeft = options.paddingLeft
+  if (options.justifyContent) props.justifyContent = options.justifyContent
+  if (options.background !== undefined) props.backgroundColor = options.background
+  renderer.spread(box, props)
+  return box
 }
 
-/** Every line of the dialog's body, in the order the mock lays them out. */
-function bodyLines({ renderer, rows, status, selected, now, theme }) {
-  const dimmed = roleColour(theme, "dimmed")
-  const title = line(renderer, PAGE_TITLE, dimmed)
-  const header = renderer.createElement("box")
-  renderer.spread(header, {
-    flexDirection: "row",
-    children: headerParts(read(status)).map((part) => line(renderer, part.text, roleColour(theme, part.role))),
-  })
-  const head = renderer.createElement("box")
-  renderer.spread(head, {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    width: "100%",
-    children: [title, header],
-  })
+/** One blank line. */
+function blankLine(renderer) {
+  const element = renderer.createElement("text")
+  renderer.spread(element, { content: "" })
+  return element
+}
+
+/**
+ * Every line of the dialog's body, in the order the mock lays them out: the
+ * title row, the header line, the counts line, one section per state that has
+ * rows — each a bold muted header, then its rows — the today line and the
+ * footer, one blank line between each block.
+ */
+function bodyLines({ renderer, rows, status, selected, now, hours, theme }) {
   const lines = [
-    head,
-    line(renderer, countsText(read(rows)), dimmed),
-    line(renderer, ""),
-    line(renderer, tableHeaderText(), dimmed),
+    rowBox(renderer, titleParts(), theme, { paddingLeft: DIALOG_INSET, justifyContent: "space-between" }),
+    rowBox(renderer, headerParts(read(status)), theme, { paddingLeft: DIALOG_INSET }),
+    blankLine(renderer),
+    rowBox(renderer, countsParts(read(rows)), theme, { paddingLeft: DIALOG_INSET }),
+    blankLine(renderer),
   ]
-  for (const [index, row] of read(rows).entries()) {
-    lines.push(rowLine(renderer, row, index, selected, now, theme))
+  for (const section of sections(read(rows))) {
+    lines.push(
+      rowBox(renderer, [{ text: section.title, role: "muted", bold: true }], theme, { paddingLeft: DIALOG_LIST_INSET }),
+    )
+    for (const entry of section.entries) {
+      const marked = entry.index === read(selected)
+      lines.push(
+        rowBox(renderer, rowParts(entry.row, { selected: marked, now: read(now), hours: read(hours) }), theme, {
+          background: marked ? selectedBackground(theme) : undefined,
+        }),
+      )
+    }
   }
-  lines.push(line(renderer, ""), line(renderer, todayText(read(status)), dimmed))
-  lines.push(line(renderer, ""), line(renderer, KEY_HELP, dimmed))
+  lines.push(blankLine(renderer), rowBox(renderer, todayParts(read(status)), theme, { paddingLeft: DIALOG_INSET }))
+  lines.push(blankLine(renderer), rowBox(renderer, footerParts(), theme, { paddingLeft: DIALOG_INSET }))
   return lines
 }
 
 /**
- * The dialog's whole body. `rows`, `status`, `selected` and `now` are
+ * The dialog's whole body. `rows`, `status`, `selected`, `now` and `hours` are
  * accessors, so the one reactive child the host renders reads them again
- * whenever the item map, the status or the selection changes.
+ * whenever the item map, the status, the selection or the config changes.
  */
-export function dialogView({ renderer, rows, status, selected, now = Date.now, theme }) {
+export function dialogView({ renderer, rows, status, selected, now = Date.now, hours = () => undefined, theme }) {
   if (!renderer) return null
-  const body = renderer.createMemo(() => bodyLines({ renderer, rows, status, selected, now, theme }))
+  const body = renderer.createMemo(() => bodyLines({ renderer, rows, status, selected, now, hours, theme }))
   const dialog = renderer.createElement("box")
   renderer.spread(dialog, { flexDirection: "column", children: body })
   return dialog
@@ -161,6 +215,7 @@ async function setup(context, spawnProcess) {
     const renderer = await loadRenderer()
     const [items, setItems] = signalOf(renderer, [])
     const [status, setStatus] = signalOf(renderer, undefined)
+    const [hours, setHours] = signalOf(renderer, undefined)
     const [selected, setSelected] = signalOf(renderer, 0)
     const rpc = () => context.client.rpc(SlackDirectorRpc)
     const toast = (message, variant = "info") => context.ui.toast.show({ message, variant })
@@ -197,9 +252,10 @@ async function setup(context, spawnProcess) {
     async function refresh() {
       try {
         const client = rpc()
-        const [list, state] = await Promise.all([client.items({}), client.status({})])
+        const [list, state, config] = await Promise.all([client.items({}), client.status({}), client.getConfig({})])
         setItems(list?.items ?? [])
         setStatus(state)
+        setHours(config?.config?.work_hours)
         const count = (list?.items ?? []).length
         if (selected() >= count) setSelected(moveSelection(0, count, 0))
       } catch (error) {
@@ -346,7 +402,7 @@ async function setup(context, spawnProcess) {
       // the prompt's.
       context.ui.dialog.show(() => {
         if (dropOverviewLayer === null) dropOverviewLayer = overviewKeys()
-        return dialogView({ renderer, rows, status, selected, now: Date.now, theme: theme() })
+        return dialogView({ renderer, rows, status, selected, now: Date.now, hours, theme: theme() })
       }, dropLayer)
       context.ui.dialog.set({ size: DIALOG_SIZE, centered: true })
     }

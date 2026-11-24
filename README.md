@@ -23,13 +23,31 @@ Everything the watcher has flagged sits in one floating dialog over the current
 screen. Open it with `/slack-director`, or with the `Slack Director` entry in
 the command palette:
 
-- the header names the last poll, its outcome and each workspace — a workspace
-  that failed carries `✗` and the reason;
-- the counts line counts the items by state;
-- the table lists one row per item: its state, its asker, its title, its intake
-  issue, its channel and how long ago it was flagged;
+- the title row names the dialog, with `esc` on the right;
+- the header names the last poll and each workspace — a workspace that failed
+  carries `✗` and the reason;
+- the counts line counts the items by state, each state's mark in its own
+  colour;
+- the rows are grouped under `Waiting for you`, `Working` and `Idle`, one
+  section per state that has rows, in that order;
+- each row is the state mark, then the item's title, its asker, its channel, its
+  intake issue and how long ago it was flagged;
 - the today line carries the day's counts;
-- the help line names the keys.
+- the footer names the keys.
+
+There is no table header, and no state column of its own: the section a row
+sits under is its state, and the mark repeats it. The dialog follows OpenCode's
+own list dialog: an inset panel, a bold title, a bold muted section header, and
+a filled background with a `┃` bar on the row the selection is on.
+
+Only the state mark takes a state colour: `●` for waiting and `◐` for working
+take their colour from the theme, and `○` for idle is muted. On a waiting or
+working row the title is normal text and the asker, the channel and the issue
+number are muted; an idle row is muted throughout. AGE is normal text under four
+working hours, the theme's warning colour from four working hours, and its error
+colour from one working day — where a working day is the length of one day's
+window, so time outside `work_hours` and on a day the window does not list does
+not count.
 
 The dialog carries no Slack message text: a row's title is the item session's
 own title.
@@ -42,9 +60,6 @@ comes first, then working, then idle; the newest flag comes first inside each.
 Keys: `↑` and `↓` move the selection, `enter` opens the item's session, `i`
 opens its intake issue in your browser, `s` opens the Slack message, `r` polls
 now, `e` opens the settings dialog and `esc` closes the dialog.
-
-What needs your attention stands out in colour — a waiting row, the row the
-marker is on, and a workspace that failed — and the rest is dimmed.
 
 While you are in a session, the sidebar carries one line:
 `Slack Director  2 waiting · 1 working`.

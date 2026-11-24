@@ -12,19 +12,21 @@ import assert from "node:assert/strict"
 import { SlackDirectorRpc } from "../rpc.js"
 import { schemaProblem } from "./schema.js"
 import {
-  KEY_HELP,
   PAGE_TITLE,
+  STATE_MARK,
   countsText,
+  footerText,
   headerText,
   moveSelection,
   pageRows,
   rowText,
   sidebarText,
-  tableHeaderText,
+  todayText,
 } from "../src/page.js"
-import tui, { COMMAND_ID, SETTINGS_COMMAND_ID, createTui, dialogView } from "../tui.js"
+import tui, { COMMAND_ID, SETTINGS_COMMAND_ID, createTui, dialogView, roleColour, selectedBackground } from "../tui.js"
 
 const NOW = Date.parse("2026-11-19T14:32:00.000Z")
+const HOURS = { days: ["Mon", "Tue", "Wed", "Thu", "Fri"], start: "09:00", end: "18:00", time_zone: "UTC" }
 
 const STATUS = {
   lastPoll: "2026-11-19T14:32:00.000Z",
@@ -42,11 +44,28 @@ const CONFIG = {
   intake_repo: "empiric-earth/almeida-slack-intake",
   session_directory: "/home/someone/notes",
   poll_seconds: 60,
-  work_hours: { days: ["Mon", "Tue", "Wed", "Thu", "Fri"], start: "09:00", end: "18:00", time_zone: "UTC" },
+  work_hours: HOURS,
   session_agent: "slack-director",
 }
 
-const THEME = { text: { base: "base", muted: "muted", feedback: { warning: { base: "warning" } } } }
+// A stub theme with OpenCode v2.4.0's shape: every role and every step a
+// distinct value, and the two hues the waiting and working marks take.
+const STEPS = [100, 200, 300, 400, 500, 600, 700, 800, 900]
+const scale = (name) => Object.fromEntries(STEPS.map((step) => [step, `${name}-${step}`]))
+const SEMANTIC_HUES = { accent: scale("accent"), interactive: scale("interactive"), neutral: scale("neutral") }
+const THEME = {
+  text: {
+    base: "base",
+    muted: "muted",
+    formfield: { focused: "formfield-focused" },
+    feedback: { warning: { base: "warning" }, error: { base: "error" }, info: { base: "info" } },
+  },
+  background: { action: { primary: { focused: "bg-primary-focused" } } },
+  hue: { ...SEMANTIC_HUES, orange: scale("orange"), blue: scale("blue") },
+}
+/** A theme that defines only the required semantic hues, so orange and blue are absent. */
+const THEME_NO_HUES = { ...THEME, hue: SEMANTIC_HUES }
+const BOLD = 1
 
 const ITEM = {
   permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
@@ -225,17 +244,36 @@ function stubRenderer() {
   }
 }
 
-/** The text of one element: a memo's own value, or the plain content. */
-const contentOf = (element) =>
-  element === undefined || element === null
-    ? undefined
-    : typeof element.props?.content === "function"
-      ? element.props.content()
-      : element.props?.content
-
 /** The lines the dialog draws, in order. */
-const drawnLines = (view) =>
-  view.props.children().map((child) => (child.type === "box" ? undefined : contentOf(child)))
+const drawnLines = (view) => view.props.children()
+
+/** The parts of one line; a blank line has none. */
+const lineChildren = (line) => (line.type === "box" ? line.props.children : [])
+
+/** The text of one line. */
+const lineText = (line) =>
+  line.type === "box" ? lineChildren(line).map((child) => child.props.content).join("") : line.props.content
+
+const childWith = (line, text) => lineChildren(line).find((child) => child.props.content === text)
+
+const STATE_MARKS = Object.values(STATE_MARK)
+
+/** The dialog's row lines: each holds exactly one state mark. */
+const rowLines = (view) =>
+  drawnLines(view).filter((line) => lineChildren(line).filter((child) => STATE_MARKS.includes(child.props.content)).length === 1)
+
+/** Render the dialog with these rows and this theme, through the stub renderer. */
+function viewOf(rows, { status = STATUS, selected = () => 0, theme = THEME, now = () => NOW, hours = () => HOURS } = {}) {
+  return dialogView({
+    renderer: stubRenderer(),
+    rows: () => rows,
+    status: () => status,
+    selected,
+    now,
+    hours,
+    theme,
+  })
+}
 
 /** The modal keymap layer the dialog registered. */
 const modalLayer = (layers) => layers.find((layer) => layer.mode === "modal")
@@ -342,7 +380,7 @@ test("the Slack Director entry opens a floating dialog with its own modal keys",
   assert.equal(dialogs.length, 1, "one floating dialog is open")
   assert.deepEqual(dialogSettings, [{ size: "xlarge", centered: true }], "the dialog takes the layout's own size")
   assert.deepEqual(navigations, [], "no route is navigated to: the dialog floats over the current screen")
-  assert.deepEqual(calls.slice(-2), ["items", "status"], "the command reads the item map and the status")
+  assert.deepEqual(calls.slice(-3), ["items", "status", "getConfig"], "the command reads the items, the status and the config")
 
   const modal = modalLayer(layers)
   assert.ok(modal, "the dialog registers a keymap layer")
@@ -367,31 +405,23 @@ test("the Slack Director entry opens a floating dialog with its own modal keys",
 })
 
 test("up and down move the marker while the dialog stays open", () => {
-  const renderer = stubRenderer()
   const rows = pageRows([ITEM, SECOND], () => ({ running: false, pending: 0 }))
-  const [selected, setSelected] = renderer.createSignal(0)
-  const view = dialogView({
-    renderer,
-    rows: () => rows,
-    status: () => STATUS,
-    selected,
-    now: () => NOW,
-    theme: THEME,
-  })
-  const marker = (index) => drawnLines(view)[4 + index][0]
+  const [selected, setSelected] = stubRenderer().createSignal(0)
+  const view = viewOf(rows, { selected })
+  const marker = (index) => childWith(rowLines(view)[index], "┃") !== undefined
 
-  assert.equal(marker(0), "▸", "the first row is marked when the dialog opens")
-  assert.equal(marker(1), " ")
+  assert.equal(marker(0), true, "the first row is marked when the dialog opens")
+  assert.equal(marker(1), false)
 
   setSelected(moveSelection(selected(), rows.length, 1))
-  assert.equal(marker(0), " ", "down moves the marker off the first row")
-  assert.equal(marker(1), "▸", "the marker follows the selection while the dialog stays open")
+  assert.equal(marker(0), false, "down moves the marker off the first row")
+  assert.equal(marker(1), true, "the marker follows the selection while the dialog stays open")
 
   setSelected(moveSelection(selected(), rows.length, 1))
-  assert.equal(marker(0), "▸", "down from the last row goes to the first")
+  assert.equal(marker(0), true, "down from the last row goes to the first")
 
   setSelected(moveSelection(selected(), rows.length, -1))
-  assert.equal(marker(1), "▸", "up from the first row goes to the last")
+  assert.equal(marker(1), true, "up from the first row goes to the last")
 })
 
 test("the keys act on the row the marker marks", async () => {
@@ -456,7 +486,7 @@ test("an opener that cannot start is reported instead of failing silently", asyn
   assert.equal(toasts.at(-1).variant, "error", "and it is shown as an error")
 })
 
-test("the dialog's help line is the layout's own, and its keys are the ones it names", async () => {
+test("the dialog's footer names each key, and its keys are the ones it names", async () => {
   const { context, layers, dialogs } = fakeTuiContext()
   await tui.setup(context)
   await layers[0].commands[0].run()
@@ -466,10 +496,7 @@ test("the dialog's help line is the layout's own, and its keys are the ones it n
   for (const key of ["up", "down", "return", "i", "s", "r", "e"]) {
     assert.ok(keys.includes(key), `the dialog answers ${key}`)
   }
-  assert.equal(
-    KEY_HELP,
-    "↑↓ move · [enter] open session · [i]ssue · [s]lack · [r]efresh · s[e]ttings · [esc] close",
-  )
+  assert.equal(footerText(), "↵ session   i issue   s slack   r refresh   e settings")
   assert.equal(
     layers[0].commands.some((command) => command.bind === "escape"),
     false,
@@ -574,7 +601,7 @@ test("the item map follows the contract's updated event", async () => {
   const before = calls.length
   eventHandlers[0][1]()
   await new Promise((resolve) => setImmediate(resolve))
-  assert.equal(calls.length, before + 2, "the dialog reads the item map and the status again")
+  assert.equal(calls.length, before + 3, "the dialog reads the items, the status and the config again")
 })
 
 test("a rejected call becomes a toast rather than a crash", async () => {
@@ -623,53 +650,127 @@ test("a settings dialog the user closes changes nothing", async () => {
   assert.equal(toasts.length, 0)
 })
 
-test("the dialog draws the header, the counts line, the table, the rows, the today line and the help line", () => {
-  const renderer = stubRenderer()
-  const rows = pageRows([ITEM], () => ({ running: false, pending: 0 }))
-  const view = dialogView({
-    renderer,
-    rows: () => rows,
-    status: () => STATUS,
-    selected: () => 0,
-    now: () => NOW,
-    theme: THEME,
-  })
+test("the dialog draws the title, the header, the counts, the sections, the rows, the today line and the footer in order", () => {
+  const rows = pageRows([ITEM, SECOND], () => ({ running: false, pending: 0 }))
+  const view = viewOf(rows)
   const lines = drawnLines(view)
-  const head = view.props.children()[0]
-  assert.equal(head.type, "box")
-  assert.equal(head.props.justifyContent, "space-between", "the title and the poll line share one row")
-  assert.equal(head.props.children[0].props.content, "Slack Director")
-  assert.equal(
-    head.props.children[1].props.children.map((child) => child.props.content).join(""),
-    headerText(STATUS),
-    "the header names the last poll, the outcome and each workspace",
-  )
-  assert.match(lines[1], /^1 flagged · 0 working · 1 waiting for you · 0 idle$/)
-  assert.equal(lines[3], tableHeaderText())
-  assert.equal(lines[4], rowText(rows[0].item, "waiting", { selected: true, now: NOW }))
-  assert.match(lines.at(-3), /^Today: flagged 2 · next steps posted 1 · 1 hit skipped$/)
-  assert.equal(lines.at(-1), KEY_HELP)
+
+  const title = lines[0]
+  assert.equal(title.type, "box")
+  assert.equal(title.props.justifyContent, "space-between", "the title and esc share one row")
+  assert.equal(title.props.paddingLeft, 3, "the title takes the host's own side inset")
+  assert.equal(lineChildren(title)[0].props.content, PAGE_TITLE)
+  assert.equal(lineChildren(title)[1].props.content, "esc")
+  assert.equal(lineText(lines[1]), headerText(STATUS), "the header names the last poll and each workspace")
+  assert.equal(lineText(lines[2]), "", "a blank line separates the blocks")
+  assert.equal(lineText(lines[3]), countsText(rows))
+  assert.equal(lines[4].props.content, "", "the counts line is followed by a blank line")
+  assert.equal(childWith(lines[5], "Waiting for you") !== undefined, true, "the first section is Waiting for you")
+  assert.equal(lineText(lines[6]), rowText(rows[0], { selected: true, now: NOW, hours: HOURS }))
+  assert.equal(childWith(lines[7], "Idle") !== undefined, true, "the idle section follows, with no empty section")
+  assert.equal(lineText(lines[8]), rowText(rows[1], { selected: false, now: NOW, hours: HOURS }))
+  assert.equal(lineText(lines[10]), todayText(STATUS))
+  assert.equal(lineText(lines[12]), footerText())
 })
 
-test("a failing workspace's mark takes the attention colour and the rest is dimmed", () => {
-  const renderer = stubRenderer()
-  const rows = pageRows([ITEM], () => ({ running: false, pending: 0 }))
-  const view = dialogView({
-    renderer,
-    rows: () => rows,
-    status: () => STATUS,
-    selected: () => 0,
-    now: () => NOW,
-    theme: THEME,
-  })
-  const head = view.props.children()[0]
-  const parts = head.props.children[1].props.children
-  const failing = parts.find((part) => part.props.content === "✗")
-  const healthy = parts.find((part) => part.props.content === "✓")
-  assert.equal(failing.props.fg, THEME.text.feedback.warning.base, "a failing workspace stands out")
-  assert.equal(healthy.props.fg, THEME.text.muted, "a healthy workspace is dimmed")
-  const lines = view.props.children()
-  assert.equal(lines[4].props.fg, THEME.text.feedback.warning.base, "the waiting row stands out")
+test("a failing workspace's mark takes the warning colour, and the rest of the header is muted", () => {
+  const view = viewOf(pageRows([ITEM], () => ({ running: false, pending: 0 })))
+  const header = drawnLines(view)[1]
+  assert.equal(childWith(header, "✗").props.fg, THEME.text.feedback.warning.base, "a failing workspace stands out")
+  assert.equal(childWith(header, "✓").props.fg, THEME.text.muted, "a healthy workspace is dimmed")
+  assert.equal(childWith(header, "last poll 14:32").props.fg, THEME.text.muted)
+})
+
+test("only the mark takes a state colour: the title is base text and the rest of the row is muted", () => {
+  const rows = [
+    { item: ITEM, state: "waiting" },
+    { item: SECOND, state: "working" },
+    { item: { ...SECOND, sessionID: "ses_3" }, state: "idle" },
+  ]
+  const view = viewOf(rows)
+  const [waiting, working, idle] = rowLines(view)
+
+  // The mark takes exactly step 200 of the theme's hue scale.
+  assert.equal(childWith(waiting, "●").props.fg, THEME.hue.orange[200])
+  assert.equal(childWith(working, "◐").props.fg, THEME.hue.blue[200])
+  assert.equal(childWith(idle, "○").props.fg, THEME.text.muted)
+
+  // ITEM is base text, and it is not the state colour.
+  const waitingItem = lineChildren(waiting)[5]
+  assert.equal(waitingItem.props.fg, THEME.text.base, "ITEM is base text on a waiting row")
+  assert.notEqual(waitingItem.props.fg, THEME.hue.orange[200], "the whole row is not the state colour")
+  assert.equal(lineChildren(working)[5].props.fg, THEME.text.base, "ITEM is base text on a working row")
+  assert.equal(lineChildren(idle)[5].props.fg, THEME.text.muted, "an idle row is muted throughout")
+
+  // ASKER, CHANNEL and the issue number are muted on every row.
+  for (const line of [waiting, working, idle]) {
+    for (const index of [7, 9, 11]) assert.equal(lineChildren(line)[index].props.fg, THEME.text.muted)
+  }
+})
+
+test("a theme without an orange or a blue hue falls back to the warning and info colours", () => {
+  const rows = [
+    { item: ITEM, state: "waiting" },
+    { item: SECOND, state: "working" },
+  ]
+  const view = viewOf(rows, { theme: THEME_NO_HUES })
+  const [waiting, working] = rowLines(view)
+  assert.equal(childWith(waiting, "●").props.fg, THEME.text.feedback.warning.base, "the waiting mark falls back to warning")
+  assert.equal(childWith(working, "◐").props.fg, THEME.text.feedback.info.base, "the working mark falls back to info")
+  assert.equal(roleColour(THEME_NO_HUES, "state-waiting"), THEME.text.feedback.warning.base)
+  assert.equal(roleColour(THEME, "state-waiting"), THEME.hue.orange[200])
+})
+
+test("the selected row takes the focused background and the bar, and no other row does", () => {
+  const rows = [
+    { item: ITEM, state: "waiting" },
+    { item: SECOND, state: "working" },
+  ]
+  const view = viewOf(rows)
+  const [first, second] = rowLines(view)
+  assert.equal(first.props.backgroundColor, selectedBackground(THEME), "the selected row is filled")
+  assert.equal(childWith(first, "┃").props.fg, THEME.text.formfield.focused, "the bar takes the focused form-field colour")
+  assert.equal(second.props.backgroundColor, undefined, "an unselected row sets no background")
+  assert.equal(childWith(second, "┃"), undefined, "only the selected row draws the bar")
+})
+
+test("the counts line's marks take their state colours and its text is muted", () => {
+  const rows = [
+    { item: ITEM, state: "waiting" },
+    { item: SECOND, state: "working" },
+    { item: { ...SECOND, sessionID: "ses_3" }, state: "idle" },
+  ]
+  const view = viewOf(rows)
+  const counts = drawnLines(view)[3]
+  assert.equal(childWith(counts, "●").props.fg, THEME.hue.orange[200])
+  assert.equal(childWith(counts, "◐").props.fg, THEME.hue.blue[200])
+  assert.equal(childWith(counts, "○").props.fg, THEME.text.muted)
+  assert.equal(childWith(counts, " 1 waiting for you").props.fg, THEME.text.muted)
+})
+
+test("the title and the section header and the footer's keys are bold, and their labels are muted", () => {
+  const view = viewOf(pageRows([ITEM], () => ({ running: false, pending: 0 })))
+  const lines = drawnLines(view)
+  assert.equal(childWith(lines[0], PAGE_TITLE).props.attributes, BOLD, "the title is bold")
+  assert.equal(childWith(lines[0], PAGE_TITLE).props.fg, THEME.text.base)
+  assert.equal(childWith(lines[0], "esc").props.fg, THEME.text.muted, "esc is muted")
+  const section = childWith(lines[5], "Waiting for you")
+  assert.equal(section.props.attributes, BOLD, "the section header is bold")
+  assert.equal(section.props.fg, THEME.text.muted, "and muted")
+  const footer = lines.at(-1)
+  assert.equal(childWith(footer, "↵").props.attributes, BOLD, "a footer key is bold")
+  assert.equal(childWith(footer, "↵").props.fg, THEME.text.base)
+  assert.equal(childWith(footer, " session").props.fg, THEME.text.muted, "and its label is muted")
+})
+
+test("AGE's colour is the theme's own: base, then warning from 4 working hours, then error from one day", () => {
+  const flagged = (text) => ({ ...ITEM, flaggedAt: text })
+  const warn = viewOf([{ item: flagged("2026-11-19T10:00:00Z"), state: "waiting" }], { now: () => Date.parse("2026-11-19T14:00:00Z") })
+  const error = viewOf([{ item: flagged("2026-11-19T09:00:00Z"), state: "waiting" }], { now: () => Date.parse("2026-11-19T18:00:00Z") })
+  const calm = viewOf([{ item: flagged("2026-11-19T14:30:00Z"), state: "waiting" }])
+  assert.equal(lineChildren(rowLines(calm)[0])[13].props.fg, THEME.text.base, "under four working hours is base text")
+  assert.equal(lineChildren(rowLines(warn)[0])[13].props.fg, THEME.text.feedback.warning.base, "exactly four working hours warns")
+  assert.equal(lineChildren(rowLines(error)[0])[13].props.fg, THEME.text.feedback.error.base, "one working day errors")
 })
 
 test("the sidebar line carries the counts", async () => {
@@ -677,24 +778,15 @@ test("the sidebar line carries the counts", async () => {
   await tui.setup(context)
   const rows = pageRows([ITEM], () => ({ running: false, pending: 0 }))
   assert.equal(sidebarText(rows), "Slack Director  1 waiting · 0 working")
-  assert.equal(countsText(rows), "1 flagged · 0 working · 1 waiting for you · 0 idle")
+  assert.equal(countsText(rows), "● 1 waiting for you   ◐ 0 working   ○ 0 idle")
   assert.equal(typeof slots[0].render, "function")
 })
 
 test("the dialog shows no Slack message text and no permalink", () => {
-  const renderer = stubRenderer()
-  const rows = pageRows([ITEM], () => ({ running: false, pending: 0 }))
-  const view = dialogView({
-    renderer,
-    rows: () => rows,
-    status: () => STATUS,
-    selected: () => 0,
-    now: () => NOW,
-    theme: THEME,
-  })
+  const view = viewOf(pageRows([ITEM], () => ({ running: false, pending: 0 })))
   for (const line of drawnLines(view)) {
-    if (line === undefined) continue
-    assert.ok(!line.includes("slack.com"), `no permalink in the dialog: ${line}`)
-    assert.ok(!line.includes("archives"), `no Slack path in the dialog: ${line}`)
+    const text = lineText(line)
+    assert.ok(!text.includes("slack.com"), `no permalink in the dialog: ${text}`)
+    assert.ok(!text.includes("archives"), `no Slack path in the dialog: ${text}`)
   }
 })

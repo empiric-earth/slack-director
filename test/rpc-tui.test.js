@@ -38,6 +38,7 @@ const STATUS = {
 }
 
 const CONFIG = {
+  flag_emoji: "magic_wand",
   intake_repo: "empiric-earth/almeida-slack-intake",
   session_directory: "/home/someone/notes",
   poll_seconds: 60,
@@ -266,14 +267,14 @@ test("the RPC contract defines every method and the updated event with an input 
   assert.deepEqual(status.output.properties.today.required, ["flagged", "nextStepsPosted", "skipped"])
 })
 
-test("the contract's config schema carries the session agent and not the retired fields", () => {
+test("the contract's config schema carries the flag emoji and the session agent, and not the retired field", () => {
   const config = SlackDirectorRpc.methods.getConfig.output.properties.config
+  assert.ok(config.properties.flag_emoji, "the config schema declares flag_emoji")
+  assert.ok(config.required.includes("flag_emoji"), "flag_emoji is required")
   assert.ok(config.properties.session_agent, "the config schema carries session_agent")
-  assert.equal(config.properties.triage_agent, undefined, "the retired triage field is gone from the schema")
-  assert.equal(config.properties.flag_emoji, undefined, "the retired flag field is gone from the schema")
+  assert.equal(config.properties.triage_agent, undefined, "the retired field is gone from the schema")
   assert.ok(config.required.includes("session_agent"), "session_agent is required")
   assert.ok(!config.required.includes("triage_agent"))
-  assert.ok(!config.required.includes("flag_emoji"), "the retired flag field is not required")
 })
 
 test("the contract's schemas describe the answers it names, and reject a value that misses", () => {
@@ -500,10 +501,10 @@ test("e on the dialog opens the settings dialog", async () => {
   assert.equal(selections.length, 1, "one select list")
   assert.deepEqual(
     selections[0].options.map((option) => option.title),
-    ["intake_repo", "session_directory", "poll_seconds", "work_hours", "session_agent"],
+    ["flag_emoji", "intake_repo", "session_directory", "poll_seconds", "work_hours", "session_agent"],
     "every config field is a row",
   )
-  assert.equal(selections[0].options[2].description, "60", "the row shows the field's current value")
+  assert.equal(selections[0].options[3].description, "60", "the row shows the field's current value")
   assert.equal(prompts.length, 1, "one prompt for the chosen field")
   assert.equal(prompts[0].title, "Slack Director: poll_seconds")
   assert.equal(prompts[0].value, "60")
@@ -596,7 +597,7 @@ test("the settings dialog shows a field's value, prompts for it and saves it thr
   await tui.setup(context)
   await layers[0].commands[1].run()
   assert.equal(selections.length, 1, "one select list")
-  assert.equal(selections[0].options[4].description, "slack-director", "the row shows the agent in use")
+  assert.equal(selections[0].options[5].description, "slack-director", "the row shows the agent in use")
   assert.equal(prompts[0].title, "Slack Director: session_agent")
   assert.match(toasts.at(-1).message, /session_agent saved/)
 })

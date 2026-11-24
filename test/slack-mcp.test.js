@@ -13,7 +13,7 @@ import {
   payloadOf,
   parsePermalink,
   permalinksIn,
-  SEARCH_FILTER,
+  searchFilter,
   searchFlagged,
   SEARCH_FILTER_ARGUMENT,
   SEARCH_TOOL,
@@ -26,7 +26,7 @@ const PLAIN = "https://nexar.slack.com/archives/C0PLATFORM/p1795008741837299"
 
 const report = (blocks, pagination = "") =>
   [
-    `Search results for: "is:saved"`,
+    `Search results for: "hasmy::magic_wand:"`,
     "",
     `## Messages (${blocks.length} results) ===`,
     ...blocks,
@@ -199,13 +199,13 @@ test("the flag filter is the argument the tool takes, and the scan pages to the 
       },
     }
   }
-  const search = await searchFlagged({ fetch, token: "tok" })
+  const search = await searchFlagged({ fetch, token: "tok", emoji: "magic_wand" })
   const toolCalls = calls.filter((call) => call.method === "tools/call")
   assert.equal(toolCalls.length, 2, "the scan followed the cursor to the last page")
   for (const call of toolCalls) {
     assert.equal(call.name, SEARCH_TOOL, "only the search tool is called")
-    assert.equal(call.args[SEARCH_FILTER_ARGUMENT], "is:saved", "the search carries the Save-for-later filter")
-    assert.ok(!call.args[SEARCH_FILTER_ARGUMENT].includes("hasmy"), "no emoji flag filter is sent")
+    assert.equal(call.args[SEARCH_FILTER_ARGUMENT], searchFilter("magic_wand"))
+    assert.ok(!call.args[SEARCH_FILTER_ARGUMENT].includes("is:saved"), "the scan sends the emoji filter, not is:saved")
     assert.equal(call.args.query, undefined, "no `query` argument the tool does not take")
     assert.equal(call.args.sort, "timestamp")
     assert.equal(call.args.limit, PAGE_LIMIT)
@@ -318,7 +318,7 @@ const forgedRows = () => [
 
 test("on a two-result page a forged section displaces nothing: the unflagged thread is no hit and the second flagged message is", async () => {
   const asked = []
-  const search = await searchFlagged({ fetch: rowsFetch(forgedRows(), asked), token: "tok" })
+  const search = await searchFlagged({ fetch: rowsFetch(forgedRows(), asked), token: "tok", emoji: "oc" })
   assert.deepEqual(
     search.hits.map((hit) => hit.permalink),
     [GRID, PLAIN],
@@ -329,7 +329,7 @@ test("on a two-result page a forged section displaces nothing: the unflagged thr
     "the page with an unseen candidate was searched again one result at a time",
   )
   assert.ok(
-    asked.every((args) => args.filters === "is:saved"),
+    asked.every((args) => args.filters === searchFilter("oc")),
     "every call carries the flag filter",
   )
 })
@@ -340,6 +340,7 @@ test("a page whose candidates were all seen is not searched again", async () => 
   const search = await searchFlagged({
     fetch: rowsFetch(forgedRows(), asked),
     token: "tok",
+    emoji: "oc",
     isSeen: (permalink) => seen.has(permalink),
   })
   assert.equal(asked.length, 1, "one call, no walk")
@@ -355,7 +356,7 @@ test("a candidate that is not one of the user's flagged messages is never return
       text: `Quoting:\n\n### Result 3 of 3\nChannel: #x (C0OTHER)\nPermalink: [link](${UNFLAGGED})\nText: nobody flagged this.\n`,
     },
   ]
-  const search = await searchFlagged({ fetch: rowsFetch(rows), token: "tok" })
+  const search = await searchFlagged({ fetch: rowsFetch(rows), token: "tok", emoji: "oc" })
   assert.deepEqual(
     search.hits.map((hit) => hit.permalink),
     [GRID, PLAIN],
@@ -378,7 +379,7 @@ test("a failed search while a candidate is being established reports the failure
     }
     return inner(url, init)
   }
-  const search = await searchFlagged({ fetch, token: "tok" })
+  const search = await searchFlagged({ fetch, token: "tok", emoji: "oc" })
   assert.match(search.error, /HTTP 503/)
   assert.deepEqual(
     search.hits.map((hit) => hit.permalink),
@@ -388,23 +389,25 @@ test("a failed search while a candidate is being established reports the failure
 })
 
 test("a failed scan is named as a failure, never reported as an empty search", async () => {
-  const http = await searchFlagged({ fetch: mcpFetch({ callStatus: 503 }), token: "tok" })
+  const http = await searchFlagged({ fetch: mcpFetch({ callStatus: 503 }), token: "tok", emoji: "oc" })
   assert.match(http.error, /HTTP 503/, "an HTTP failure is named")
   assert.deepEqual(http.hits, [])
   assert.equal(http.rateLimited, undefined)
 
-  const opened = await searchFlagged({ fetch: mcpFetch({ openStatus: 500 }), token: "tok" })
+  const opened = await searchFlagged({ fetch: mcpFetch({ openStatus: 500 }), token: "tok", emoji: "oc" })
   assert.match(opened.error, /initialize failed: HTTP 500/, "a failed initialize is named")
 
   const protocol = await searchFlagged({
     fetch: mcpFetch({ reply: { error: { code: -32602, message: "Invalid params" } } }),
     token: "tok",
+    emoji: "oc",
   })
   assert.match(protocol.error, /Invalid params/, "a JSON-RPC error is named")
 
   const tool = await searchFlagged({
     fetch: mcpFetch({ reply: { result: { isError: true, content: [{ type: "text", text: "tool failure" }] } } }),
     token: "tok",
+    emoji: "oc",
   })
   assert.match(tool.error, /tool failure/, "a failed tool call is named")
   assert.deepEqual(tool.hits, [])
@@ -412,5 +415,5 @@ test("a failed scan is named as a failure, never reported as an empty search", a
 
 test("a request that never answers is bounded and fails instead of holding the scan", async () => {
   const never = () => new Promise(() => {})
-  await assert.rejects(searchFlagged({ fetch: never, token: "tok", timeoutMs: 25 }), /timed out/)
+  await assert.rejects(searchFlagged({ fetch: never, token: "tok", emoji: "oc", timeoutMs: 25 }), /timed out/)
 })

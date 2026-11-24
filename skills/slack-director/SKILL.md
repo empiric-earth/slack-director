@@ -5,7 +5,8 @@ description: Work one flagged Slack message: find or create its intake issue in 
 
 # Slack Director
 
-A message the user flagged in Slack starts one session for that message, on the
+A message the user flags in Slack by reacting to it with the flag emoji starts
+one session for that message, on the
 `slack-director` agent — the agent the user acts with, so no switch is needed.
 Its first turn finds or creates the intake issue, reads the thread, investigates,
 and posts the findings and proposed next steps. Then it stops and waits for the

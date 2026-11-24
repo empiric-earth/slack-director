@@ -1,13 +1,12 @@
 // The overview dialog's own logic: the state of one item, the order of the rows,
 // the text of every line the dialog and the sidebar show, and the colour role
-// each part of a row takes from the theme.
+// each part of a line takes from the theme.
 //
-// Everything here reads only its arguments, so the node suite drives it with
-// fixed items and fixed session data and asserts the text a person sees. The
-// TUI part turns these lines into elements; nothing here touches a terminal.
-
-/** Where each column of the table starts, as the approved layout lays it out. */
-export const COLUMNS = { marker: 0, state: 2, asker: 13, item: 30, issue: 69, channel: 76, age: 94 }
+// A line is a list of parts, each carrying its text and the name of the colour
+// role it takes. The TUI part turns a role into the theme's own colour and a
+// part into an element; nothing here touches a terminal or reads a theme, so the
+// node suite drives it with fixed items, a fixed clock and a fixed window.
+import { workingDayMinutes, workingMinutesBetween } from "./work-hours.js"
 
 /** The dialog's title, and the name of its palette entry. */
 export const PAGE_TITLE = "Slack Director"
@@ -15,47 +14,32 @@ export const PAGE_TITLE = "Slack Director"
 /** The dialog's size, as the host's own dialog sizes name it. */
 export const DIALOG_SIZE = "xlarge"
 
-/** The keys the dialog answers, as its own help line shows them. */
-export const KEY_HELP =
-  "↑↓ move · [enter] open session · [i]ssue · [s]lack · [r]efresh · s[e]ttings · [esc] close"
+/** The side inset the host's own list dialog gives its title, header and footer lines. */
+export const DIALOG_INSET = 3
 
-/** The two colour roles a part of the dialog takes from the theme. */
-export const ATTENTION = "attention"
-export const DIMMED = "dimmed"
+/** The inset the host's own list dialog gives its rows and section headers. */
+export const DIALOG_LIST_INSET = 4
 
-/** The glyph the STATE column draws for each state. */
-const GLYPH = { waiting: "●", working: "◐", idle: "○" }
+/** The mark each state shows, and the only place a state colour is used. */
+export const STATE_MARK = { waiting: "●", working: "◐", idle: "○" }
 
 /** The display order of the states: waiting first, then working, then idle. */
-const ORDER = ["waiting", "working", "idle"]
+export const STATE_ORDER = ["waiting", "working", "idle"]
 
-/** One cell of a line: its column, and the text it holds. */
-const cell = (start, text) => [start, text]
+/** The section header of each state. */
+export const SECTION_TITLE = { waiting: "Waiting for you", working: "Working", idle: "Idle" }
 
-/**
- * A line of cells, each starting at its own column. A cell that would reach the
- * next column is pushed right, so at least one space always separates two
- * columns whatever the cell lengths are.
- */
-function columnsText(cells) {
-  let line = ""
-  for (const [start, text] of cells) {
-    const at = line === "" ? start : Math.max(start, line.length + 1)
-    if (line.length < at) line += " ".repeat(at - line.length)
-    line += text
-  }
-  return line
-}
+/** How long a flag may age before its AGE colour warns: four working hours. */
+export const AGE_WARNING_MINUTES = 4 * 60
 
-/** A value that fits its column, shortened with an ellipsis when it does not. */
-function clip(text, width) {
-  const value = typeof text === "string" ? text : String(text ?? "")
-  if (value.length <= width) return value
-  return `${value.slice(0, Math.max(0, width - 1))}…`
-}
+/** The widths the row's columns take, so long values are shortened with an ellipsis. */
+export const ROW_WIDTHS = { item: 44, asker: 15, channel: 16, issue: 6, age: 4 }
 
-/** The width a column's value may use, one space short of the next column. */
-const widthBefore = (start, next) => next - start - 1
+/** One part of a line: its text, the colour role it takes, and whether it is bold. */
+const part = (text, role = "none", bold = false) => ({ text, role, bold })
+
+/** A line's parts as the one string a person reads. */
+export const partsText = (parts) => (parts ?? []).map((entry) => entry.text).join("")
 
 /**
  * One item's state, the first match winning:
@@ -84,7 +68,7 @@ export function pageRows(items, liveOf = () => ({})) {
   return (items ?? [])
     .map((item) => ({ item, state: stateOf(item, liveOf(item) ?? {}) }))
     .sort((left, right) => {
-      const byState = ORDER.indexOf(left.state) - ORDER.indexOf(right.state)
+      const byState = STATE_ORDER.indexOf(left.state) - STATE_ORDER.indexOf(right.state)
       if (byState !== 0) return byState
       return flaggedAt(right.item) - flaggedAt(left.item)
     })
@@ -122,7 +106,7 @@ export function ageText(flaggedAt, now = Date.now()) {
   return `${Math.floor(hours / 24)}d`
 }
 
-/** The ISSUE cell: the intake issue's number, or a dash while there is none. */
+/** The issue cell: the intake issue's number, or a dash while there is none. */
 export function issueLabel(item) {
   return typeof item?.issueNumber === "number" ? `#${item.issueNumber}` : "—"
 }
@@ -193,49 +177,22 @@ export function itemTitle(item) {
   return title
 }
 
-/** The table's header line. */
-export function tableHeaderText() {
-  return columnsText([
-    cell(COLUMNS.state, "STATE"),
-    cell(COLUMNS.asker, "ASKER"),
-    cell(COLUMNS.item, "ITEM"),
-    cell(COLUMNS.issue, "ISSUE"),
-    cell(COLUMNS.channel, "CHANNEL"),
-    cell(COLUMNS.age, "AGE"),
-  ])
+/** A value that fits its column, shortened with an ellipsis when it does not. */
+function clip(text, width) {
+  const value = typeof text === "string" ? text : String(text ?? "")
+  if (value.length <= width) return value
+  return `${value.slice(0, Math.max(0, width - 1))}…`
+}
+
+/** A value padded to its column's width, so the columns after it line up. */
+function pad(text, width) {
+  const value = clip(text, width)
+  return value + " ".repeat(Math.max(0, width - value.length))
 }
 
 /**
- * One row's line: the selection marker, the state, then the item's asker, its
- * title, its intake issue, its channel and the age of the flag. No Slack
- * message text is in the dialog: the title is the session's own.
+ * The last poll's time on the local clock, so it reads against the user's own.
  */
-export function rowText(item, state, options = {}) {
-  const now = options.now ?? Date.now()
-  return columnsText([
-    cell(COLUMNS.marker, options.selected ? "▸" : " "),
-    cell(COLUMNS.state, `${GLYPH[state] ?? " "} ${state}`),
-    cell(COLUMNS.asker, clip(itemAsker(item), widthBefore(COLUMNS.asker, COLUMNS.item))),
-    cell(COLUMNS.item, clip(itemTitle(item), widthBefore(COLUMNS.item, COLUMNS.issue))),
-    cell(COLUMNS.issue, clip(issueLabel(item), widthBefore(COLUMNS.issue, COLUMNS.channel))),
-    cell(COLUMNS.channel, clip(item.channel, widthBefore(COLUMNS.channel, COLUMNS.age))),
-    cell(COLUMNS.age, ageText(item.flaggedAt, now)),
-  ])
-}
-
-/** The counts line: how many items the dialog holds, by state. */
-export function countsText(rows) {
-  const of = (state) => (rows ?? []).filter((row) => row.state === state).length
-  return `${(rows ?? []).length} flagged · ${of("working")} working · ${of("waiting")} waiting for you · ${of("idle")} idle`
-}
-
-/** The sidebar's one line. */
-export function sidebarText(rows) {
-  const of = (state) => (rows ?? []).filter((row) => row.state === state).length
-  return `${PAGE_TITLE}  ${of("waiting")} waiting · ${of("working")} working`
-}
-
-/** The last poll's time on the local clock, so it reads against the user's own. */
 export function pollClock(lastPoll) {
   if (typeof lastPoll !== "string") return "never"
   const at = new Date(lastPoll)
@@ -244,50 +201,159 @@ export function pollClock(lastPoll) {
 }
 
 /**
- * The colour role of one part of the dialog, from the theme's two roles:
- * `attention` for what the user has to look at — a waiting row, the row the
- * marker marks, a workspace that failed — and `dimmed` for everything else.
+ * A workspace's name without the Slack MCP server's own prefix, so the header
+ * reads `nexar`, not `slack_nexar`.
  */
-export function colourRole(part, options = {}) {
-  if (part === "row") {
-    if (options.selected) return ATTENTION
-    return options.state === "waiting" ? ATTENTION : DIMMED
-  }
-  if (part === "mark") return options.ok === false ? ATTENTION : DIMMED
-  return DIMMED
+export function workspaceLabel(name) {
+  const text = typeof name === "string" ? name : ""
+  return text.startsWith("slack_") ? text.slice("slack_".length) : text
+}
+
+/** The title row: the dialog's name in base text, and `esc` in muted text. */
+export function titleParts() {
+  return [part(PAGE_TITLE, "title", true), part("esc", "muted")]
 }
 
 /**
- * The header's right part in segments, each with its colour role: the last
- * poll, its outcome, and every workspace with its mark, so a failing workspace
- * stands out and the rest is dimmed.
+ * The header line: the last poll, then each workspace with its mark. A failing
+ * workspace's mark carries the warning colour and its reason follows it.
  */
 export function headerParts(status) {
-  const parts = [
-    { text: `last poll ${pollClock(status?.lastPoll)}`, role: DIMMED },
-    { text: " · ", role: DIMMED },
-    { text: status?.outcome ?? "unknown", role: DIMMED },
-  ]
+  const parts = [part(`last poll ${pollClock(status?.lastPoll)}`, "muted")]
   for (const workspace of status?.workspaces ?? []) {
-    parts.push({ text: " · ", role: DIMMED })
-    parts.push({ text: `${workspace.name} `, role: DIMMED })
-    parts.push({ text: workspace.ok ? "✓" : "✗", role: colourRole("mark", { ok: workspace.ok }) })
-    if (workspace.error) parts.push({ text: ` ${workspace.error}`, role: DIMMED })
+    parts.push(part(" · ", "muted"))
+    parts.push(part(`${workspaceLabel(workspace.name)} `, "muted"))
+    parts.push(part(workspace.ok ? "✓" : "✗", workspace.ok ? "workspace-ok" : "workspace-fail"))
+    if (workspace.error) parts.push(part(` ${workspace.error}`, "muted"))
   }
   return parts
 }
 
-/** The header's right part as one line. */
+/** The header line as one string. */
 export function headerText(status) {
-  return headerParts(status)
-    .map((part) => part.text)
-    .join("")
+  return partsText(headerParts(status))
 }
 
-/** The today line: the day's counts the status carries. */
-export function todayText(status) {
+/** The counts line: each state's mark in its state colour, then its count. */
+export function countsParts(rows) {
+  const of = (state) => (rows ?? []).filter((row) => row.state === state).length
+  const parts = []
+  for (const [index, state] of STATE_ORDER.entries()) {
+    if (index > 0) parts.push(part("   ", "muted"))
+    parts.push(part(STATE_MARK[state], `state-${state}`))
+    parts.push(part(` ${of(state)} ${state === "waiting" ? "waiting for you" : state}`, "muted"))
+  }
+  return parts
+}
+
+/** The counts line as one string. */
+export function countsText(rows) {
+  return partsText(countsParts(rows))
+}
+
+/** Every section that has rows, in state order, each entry carrying its row and its index among all rows. */
+export function sections(rows) {
+  const list = rows ?? []
+  const indexed = list.map((row, index) => ({ row, index }))
+  return STATE_ORDER.map((state) => ({
+    state,
+    title: SECTION_TITLE[state],
+    entries: indexed.filter((entry) => entry.row.state === state),
+  })).filter((section) => section.entries.length > 0)
+}
+
+/** The today line: the day's counts. */
+export function todayParts(status) {
   const today = status?.today ?? {}
-  return `Today: flagged ${today.flagged ?? 0} · next steps posted ${today.nextStepsPosted ?? 0} · ${today.skipped ?? 0} hit skipped`
+  return [
+    part("today", "muted"),
+    part(`  ${today.flagged ?? 0} flagged · ${today.nextStepsPosted ?? 0} next steps posted`, "muted"),
+  ]
+}
+
+/** The today line as one string. */
+export function todayText(status) {
+  return partsText(todayParts(status))
+}
+
+/** The footer: each key in base text, bold, then its muted label. */
+export function footerParts() {
+  const keys = [
+    ["↵", "session"],
+    ["i", "issue"],
+    ["s", "slack"],
+    ["r", "refresh"],
+    ["e", "settings"],
+  ]
+  const parts = []
+  for (const [index, [key, label]] of keys.entries()) {
+    if (index > 0) parts.push(part("   ", "muted"))
+    parts.push(part(key, "base", true))
+    parts.push(part(` ${label}`, "muted"))
+  }
+  return parts
+}
+
+/** The footer as one string. */
+export function footerText() {
+  return partsText(footerParts())
+}
+
+/**
+ * The colour role AGE takes on a row. An idle row is muted throughout. On a
+ * waiting or working row AGE is base text under four working hours, the warning
+ * colour from four working hours, and the error colour from one working day —
+ * where a working day is the length of one day's window.
+ */
+export function ageRole(state, flaggedAt, now = Date.now(), hours) {
+  if (state === "idle") return "muted"
+  const minutes = workingMinutesBetween(hours, Date.parse(flaggedAt), now)
+  const day = workingDayMinutes(hours)
+  if (day > 0 && minutes >= day) return "age-error"
+  if (minutes >= AGE_WARNING_MINUTES) return "age-warn"
+  return "age-calm"
+}
+
+/**
+ * One row's parts: the gutter bar, the state mark, then the item's title, its
+ * asker, its channel, its intake issue and the age of the flag. Only the mark
+ * takes a state colour; on a waiting or working row the title is base text and
+ * the rest is muted, and an idle row is muted throughout. No Slack message text
+ * is in the dialog: the title is the session's own.
+ */
+export function rowParts(row, options = {}) {
+  const item = row?.item ?? {}
+  const state = row?.state
+  const selected = options.selected === true
+  const now = options.now ?? Date.now()
+  const itemRole = state === "idle" ? "muted" : "base"
+  return [
+    part(" ".repeat(DIALOG_LIST_INSET - 2)),
+    part(selected ? "┃" : " ", selected ? "bar" : "none"),
+    part(" "),
+    part(STATE_MARK[state] ?? " ", `state-${state}`),
+    part(" "),
+    part(pad(itemTitle(item), ROW_WIDTHS.item), itemRole),
+    part(" "),
+    part(pad(itemAsker(item), ROW_WIDTHS.asker), "muted"),
+    part(" "),
+    part(pad(item.channel, ROW_WIDTHS.channel), "muted"),
+    part(" "),
+    part(pad(issueLabel(item), ROW_WIDTHS.issue), "muted"),
+    part(" "),
+    part(ageText(item.flaggedAt, now), ageRole(state, item.flaggedAt, now, options.hours)),
+  ]
+}
+
+/** One row as the string a person reads. */
+export function rowText(row, options = {}) {
+  return partsText(rowParts(row, options))
+}
+
+/** The sidebar's one line. */
+export function sidebarText(rows) {
+  const of = (state) => (rows ?? []).filter((row) => row.state === state).length
+  return `${PAGE_TITLE}  ${of("waiting")} waiting · ${of("working")} working`
 }
 
 /**

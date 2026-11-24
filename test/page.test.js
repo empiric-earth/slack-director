@@ -1,23 +1,31 @@
 // The overview dialog's own logic: the state of an item, the order of the rows,
-// the text of every line, the colour roles, the selection move, the URL opener
-// and the settings dialog's values.
+// the text and colour roles of every line, the AGE colour in working time, the
+// selection move, the URL opener and the settings dialog's values.
 //
 // The expected lines are the approved layout's own lines, so this suite fails
-// when a column moves or a label changes. No dependencies; run with
-// `node --test` (or `make test`).
+// when a column moves or a label changes, and the colour-role assertions fail
+// when a part takes the wrong role. No dependencies; run with `node --test`
+// (or `make test`).
 import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
-  ATTENTION,
-  COLUMNS,
-  DIMMED,
-  KEY_HELP,
+  AGE_WARNING_MINUTES,
+  DIALOG_INSET,
+  DIALOG_LIST_INSET,
   PAGE_TITLE,
+  ROW_WIDTHS,
+  SECTION_TITLE,
+  STATE_MARK,
+  STATE_ORDER,
+  ageRole,
   ageText,
   askerName,
-  colourRole,
+  countsParts,
   countsText,
   fieldValue,
+  footerParts,
+  footerText,
+  headerParts,
   headerText,
   issueLabel,
   itemAsker,
@@ -25,18 +33,26 @@ import {
   moveSelection,
   openerCommand,
   pageRows,
+  partsText,
   pollClock,
+  rowParts,
   rowText,
+  sections,
   selectedItem,
   settingsValue,
   sidebarText,
   stateOf,
-  tableHeaderText,
+  titleParts,
+  todayParts,
   todayText,
+  workspaceLabel,
 } from "../src/page.js"
 
 const NOW = Date.parse("2026-11-19T14:32:00.000Z")
 const minutes = (n) => new Date(NOW - n * 60000).toISOString()
+
+/** The window the actions in this suite use: weekdays, 09:00 to 18:00, UTC. */
+const HOURS = { days: ["Mon", "Tue", "Wed", "Thu", "Fri"], start: "09:00", end: "18:00", time_zone: "UTC" }
 
 /** One item record, as the RPC contract serves it. */
 function item(over = {}) {
@@ -151,55 +167,140 @@ test("the rows are waiting, then working, then idle, newest flag first in each",
   )
 })
 
-test("the table's header and rows are the approved layout's lines", () => {
+test("the title row, the header line, the counts line, the today line and the footer are the layout's own", () => {
   const rows = pageRows(ITEMS, liveOf)
-  assert.equal(tableHeaderText(), "  STATE      ASKER            ITEM                                   ISSUE  CHANNEL           AGE")
+
+  assert.equal(partsText(titleParts()), `${PAGE_TITLE}esc`, "the title row holds the name and esc")
+  assert.equal(headerText(STATUS), "last poll 14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps")
+  assert.equal(headerText({ lastPoll: null, outcome: "never polled", workspaces: [] }), "last poll never")
+  assert.equal(pollClock("2026-11-19T14:32:00.000Z"), "14:32")
+  assert.equal(countsText(rows), "● 2 waiting for you   ◐ 1 working   ○ 2 idle")
+  assert.equal(countsText([]), "● 0 waiting for you   ◐ 0 working   ○ 0 idle")
+  assert.equal(todayText(STATUS), "today  5 flagged · 3 next steps posted", "the skipped hits are gone")
+  assert.equal(todayText(undefined), "today  0 flagged · 0 next steps posted")
+  assert.equal(footerText(), "↵ session   i issue   s slack   r refresh   e settings")
+  assert.equal(sidebarText(rows), "Slack Director  2 waiting · 1 working")
+})
+
+test("no line names a STATE column, and the dialog carries no table header", () => {
+  const lines = [
+    partsText(titleParts()),
+    headerText(STATUS),
+    countsText(pageRows(ITEMS, liveOf)),
+    todayText(STATUS),
+    footerText(),
+    ...Object.values(SECTION_TITLE),
+    ...pageRows(ITEMS, liveOf).map((row, index) => rowText(row, { selected: index === 0, now: NOW, hours: HOURS })),
+  ]
+  for (const line of lines) assert.ok(!line.includes("STATE"), `no STATE column: ${line}`)
+  assert.ok(!lines.some((line) => line.includes("ASKER")), "no ASKER header column")
+})
+
+test("the rows are grouped under their section, in state order, each entry carrying its index", () => {
+  const rows = pageRows(ITEMS, liveOf)
+  const groups = sections(rows)
   assert.deepEqual(
-    rows.map((row, index) => rowText(row.item, row.state, { selected: index === 0, now: NOW })),
+    groups.map((group) => [group.state, group.title]),
     [
-      "▸ ● waiting  Maria Costa      Access to the staging dashboards       #41    #platform-help    12m",
-      "  ● waiting  João Pereira     Review of the Terraform module change  #40    DM                1h",
-      "  ◐ working  Ana Silva        Why the nightly export job fails       #42    #data-eng         2m",
-      "  ○ idle     Rui Santos       Budget numbers for Q1 infra            #38    GDM               1d",
-      "  ○ idle     Tiago Lopes      Onboarding steps for the new laptop    #37    #porto-office     3d",
+      ["waiting", "Waiting for you"],
+      ["working", "Working"],
+      ["idle", "Idle"],
     ],
   )
+  assert.deepEqual(
+    groups.map((group) => group.entries.map((entry) => entry.index)),
+    [
+      [0, 1],
+      [2],
+      [3, 4],
+    ],
+    "each entry carries its position among all rows",
+  )
+  assert.deepEqual(sections([]), [], "a state with no rows has no section")
+  assert.deepEqual(STATE_ORDER, ["waiting", "working", "idle"])
 })
 
-test("every column starts where the approved layout puts it", () => {
-  const row = rowText(ITEMS[0], "waiting", { selected: true, now: NOW })
-  assert.equal(row[COLUMNS.marker], "▸")
-  assert.equal(row.slice(COLUMNS.state, COLUMNS.state + 2), "● ")
-  assert.equal(row.slice(COLUMNS.asker, COLUMNS.asker + "Maria Costa".length), "Maria Costa")
-  assert.equal(row.slice(COLUMNS.item, COLUMNS.item + 5), "Acces")
-  assert.equal(row.slice(COLUMNS.issue, COLUMNS.issue + 3), "#41")
-  assert.equal(row.slice(COLUMNS.channel, COLUMNS.channel + "#platform-help".length), "#platform-help")
-  assert.equal(row.slice(COLUMNS.age), "12m")
-  assert.equal(tableHeaderText().length, COLUMNS.age + 3, "the header is as long as a row")
+test("the colour roles name the mark, the text and the bar each part takes", () => {
+  assert.deepEqual(
+    titleParts().map((entry) => [entry.text, entry.role, entry.bold]),
+    [
+      [PAGE_TITLE, "title", true],
+      ["esc", "muted", false],
+    ],
+  )
+  const header = headerParts(STATUS)
+  assert.deepEqual(
+    header.map((entry) => entry.role),
+    ["muted", "muted", "muted", "workspace-ok", "muted", "muted", "workspace-fail", "muted"],
+  )
+  const counts = countsParts(pageRows(ITEMS, liveOf))
+  assert.deepEqual(
+    counts.map((entry) => [entry.text, entry.role]),
+    [
+      ["●", "state-waiting"],
+      [" 2 waiting for you", "muted"],
+      ["   ", "muted"],
+      ["◐", "state-working"],
+      [" 1 working", "muted"],
+      ["   ", "muted"],
+      ["○", "state-idle"],
+      [" 2 idle", "muted"],
+    ],
+  )
+  assert.deepEqual(
+    footerParts().map((entry) => [entry.text, entry.role, entry.bold]),
+    [
+      ["↵", "base", true],
+      [" session", "muted", false],
+      ["   ", "muted", false],
+      ["i", "base", true],
+      [" issue", "muted", false],
+      ["   ", "muted", false],
+      ["s", "base", true],
+      [" slack", "muted", false],
+      ["   ", "muted", false],
+      ["r", "base", true],
+      [" refresh", "muted", false],
+      ["   ", "muted", false],
+      ["e", "base", true],
+      [" settings", "muted", false],
+    ],
+  )
+  assert.deepEqual(todayParts(STATUS).map((entry) => entry.role), ["muted", "muted"])
 })
 
-test("a value too long for its column is shortened, and one space still separates the columns", () => {
-  const long = item({
-    asker: "A".repeat(40),
-    title: "B".repeat(80),
-    issueNumber: null,
-    channel: "C".repeat(40),
-  })
-  const row = rowText(long, "waiting", { now: NOW })
-  assert.equal(row.slice(COLUMNS.asker, COLUMNS.item), `${"A".repeat(15)}… `)
-  assert.equal(row.slice(COLUMNS.item, COLUMNS.issue), `${"B".repeat(37)}… `)
-  assert.equal(row.slice(COLUMNS.issue, COLUMNS.channel), "—      ")
-  assert.equal(row.slice(COLUMNS.channel, COLUMNS.age), `${"C".repeat(16)}… `)
-  assert.equal(issueLabel(item({ issueNumber: 41 })), "#41")
+test("one row is the bar, the mark, then ITEM, ASKER, CHANNEL, the issue and AGE", () => {
+  const rows = pageRows(ITEMS, liveOf)
+  const parts = rowParts(rows[0], { selected: true, now: NOW, hours: HOURS })
 
-  // Every two columns of the header and of this row keep at least one space
-  // between them, whatever the cell lengths are.
-  const starts = [COLUMNS.state, COLUMNS.asker, COLUMNS.item, COLUMNS.issue, COLUMNS.channel, COLUMNS.age]
-  for (const line of [tableHeaderText(), row]) {
-    for (const start of starts) {
-      assert.equal(line[start - 1], " ", `a space sits before the column at ${start}: ${line}`)
-    }
-  }
+  assert.equal(parts[0].text, " ".repeat(DIALOG_LIST_INSET - 2), "the row starts at its inset")
+  assert.equal(parts[1].text, "┃", "the selected row draws the bar")
+  assert.equal(parts[1].role, "bar")
+  assert.equal(parts[3].text, STATE_MARK.waiting)
+  assert.equal(parts[3].role, "state-waiting")
+  assert.equal(parts[5].text.trimEnd(), "Access to the staging dashboards")
+  assert.equal(parts[5].role, "base", "ITEM is base text on a waiting row")
+  assert.equal(parts[7].text.trimEnd(), "Maria Costa")
+  assert.equal(parts[9].text.trimEnd(), "#platform-help")
+  assert.equal(parts[11].text.trimEnd(), "#41")
+  assert.equal(parts[13].text, "12m", "AGE keeps its calendar text")
+
+  const unselected = rowParts(rows[0], { selected: false, now: NOW, hours: HOURS })
+  assert.equal(unselected[1].text, " ")
+  assert.equal(unselected[1].role, "none")
+
+  const idle = rowParts(rows[3], { selected: false, now: NOW, hours: HOURS })
+  assert.equal(idle[3].role, "state-idle")
+  assert.equal(idle[5].role, "muted", "an idle row is muted throughout")
+  assert.equal(idle[7].role, "muted")
+})
+
+test("a value too long for its column is shortened with an ellipsis", () => {
+  const long = item({ title: "B".repeat(80), asker: "A".repeat(40), channel: "C".repeat(40) })
+  const parts = rowParts({ item: long, state: "waiting" }, { now: NOW, hours: HOURS })
+  assert.equal(parts[5].text, `${"B".repeat(ROW_WIDTHS.item - 1)}…`)
+  assert.equal(parts[7].text, `${"A".repeat(ROW_WIDTHS.asker - 1)}…`, "ASKER is shortened to its column")
+  assert.equal(parts[9].text, `${"C".repeat(ROW_WIDTHS.channel - 1)}…`)
 })
 
 test("the ITEM cell drops a leading asker, so ASKER is not shown twice", () => {
@@ -222,10 +323,7 @@ test("a record an earlier build left without an asker shows the asker its title 
   })
   assert.equal(itemAsker(earlier), "André Almeida", "the ASKER cell is not left empty")
   assert.equal(itemTitle(earlier), "note-to-self to verify the dialog", "and ITEM keeps no asker prefix")
-  const row = rowText(earlier, "waiting", { now: NOW })
-  assert.equal(row.slice(COLUMNS.asker, COLUMNS.item).trimEnd(), "André Almeida")
-  assert.equal(row.slice(COLUMNS.item, COLUMNS.item + 12), "note-to-self")
-  assert.equal(row[COLUMNS.item - 1], " ", "at least one space separates ASKER and ITEM")
+  assert.equal(rowParts({ item: earlier, state: "waiting" }, { now: NOW, hours: HOURS })[7].text.trimEnd(), "André Almeida")
 })
 
 test("the ASKER cell drops the id or the address the search reported beside the name", () => {
@@ -237,8 +335,10 @@ test("the ASKER cell drops the id or the address the search reported beside the 
   })
   assert.equal(itemAsker(idle), "André Almeida")
   assert.equal(itemTitle(idle), "note-to-self to verify the dialog")
-  const row = rowText(idle, "idle", { now: NOW })
-  assert.equal(row.slice(COLUMNS.asker, COLUMNS.item).trimEnd(), "André Almeida")
+  assert.equal(askerName("Maria Costa (U0000000000)"), "Maria Costa")
+  assert.equal(askerName("André Almeida <aalmeida@empiricearth.com>"), "André Almeida")
+  assert.equal(askerName("Maria Costa"), "Maria Costa", "a name on its own is unchanged")
+  assert.equal(askerName(""), "")
 })
 
 test("a record whose first turn has named no issue keeps its neutral title and shows no asker", () => {
@@ -250,23 +350,7 @@ test("a record whose first turn has named no issue keeps its neutral title and s
   })
   assert.equal(itemAsker(fresh), "", "the neutral title's dash is not an asker separator")
   assert.equal(itemTitle(fresh), "Flagged message in DM — 1795263523.511709")
-  const row = rowText(fresh, "waiting", { now: NOW })
-  assert.equal(row.slice(COLUMNS.asker, COLUMNS.item), " ".repeat(COLUMNS.item - COLUMNS.asker))
-  assert.equal(row.slice(COLUMNS.item, COLUMNS.item + 9), "Flagged m")
-})
-
-test("the ITEM cell drops the asker's name when the search reported an id or an address beside it", () => {
-  const withId = item({ asker: "Maria Costa (U0000000000)", title: "Maria Costa — Access to the staging dashboards" })
-  assert.equal(itemTitle(withId), "Access to the staging dashboards", "the id beside the name is not part of the title")
-  const withAddress = item({
-    asker: "André Almeida <aalmeida@empiricearth.com>",
-    title: "André Almeida — note-to-self to verify the dialog",
-  })
-  assert.equal(itemTitle(withAddress), "note-to-self to verify the dialog", "nor is an address beside it")
-  assert.equal(askerName("Maria Costa (U0000000000)"), "Maria Costa")
-  assert.equal(askerName("André Almeida <aalmeida@empiricearth.com>"), "André Almeida")
-  assert.equal(askerName("Maria Costa"), "Maria Costa", "a name on its own is unchanged")
-  assert.equal(askerName(""), "")
+  assert.equal(rowParts({ item: fresh, state: "waiting" }, { now: NOW, hours: HOURS })[7].text, " ".repeat(ROW_WIDTHS.asker))
 })
 
 test("the selection move wraps at both ends, and the marker picks the row the keys act on", () => {
@@ -280,31 +364,6 @@ test("the selection move wraps at both ends, and the marker picks the row the ke
   assert.equal(selectedItem([], 0), undefined)
 })
 
-test("the colour role marks what needs attention and dims the rest", () => {
-  assert.equal(colourRole("row", { state: "waiting", selected: false }), ATTENTION, "a waiting row stands out")
-  assert.equal(colourRole("row", { state: "working", selected: true }), ATTENTION, "the selected row stands out")
-  assert.equal(colourRole("row", { state: "idle", selected: false }), DIMMED, "an idle row is dimmed")
-  assert.equal(colourRole("row", { state: "working", selected: false }), DIMMED, "a working row is dimmed")
-  assert.equal(colourRole("mark", { ok: false }), ATTENTION, "a failing workspace's mark stands out")
-  assert.equal(colourRole("mark", { ok: true }), DIMMED, "a healthy workspace's mark is dimmed")
-  assert.equal(colourRole("label"), DIMMED, "a label is dimmed")
-})
-
-test("the header names the last poll, the outcome and every workspace, a failing one with its label", () => {
-  assert.equal(headerText(STATUS), "last poll 14:32 · ok · slack_nexar ✓ · slack_nauto ✗ sign-in expired — run /mcps")
-  assert.equal(headerText({ lastPoll: null, outcome: "never polled", workspaces: [] }), "last poll never · never polled")
-  assert.equal(headerText({ lastPoll: "not a time", outcome: "ok", workspaces: [] }), "last poll never · ok")
-  assert.equal(pollClock("2026-11-19T14:32:00.000Z"), "14:32")
-})
-
-test("the counts line, the today line and the sidebar line carry the counts", () => {
-  const rows = pageRows(ITEMS, liveOf)
-  assert.equal(countsText(rows), "5 flagged · 1 working · 2 waiting for you · 2 idle")
-  assert.equal(sidebarText(rows), "Slack Director  2 waiting · 1 working")
-  assert.equal(todayText(STATUS), "Today: flagged 5 · next steps posted 3 · 1 hit skipped")
-  assert.equal(todayText(undefined), "Today: flagged 0 · next steps posted 0 · 0 hit skipped")
-})
-
 test("the age counts from the flag, in minutes, then hours, then days", () => {
   assert.equal(ageText(minutes(0), NOW), "0m")
   assert.equal(ageText(minutes(12), NOW), "12m")
@@ -315,14 +374,45 @@ test("the age counts from the flag, in minutes, then hours, then days", () => {
   assert.equal(ageText(minutes(60 * 24 * 3), NOW), "3d")
   assert.equal(ageText("not a time", NOW), "—")
   assert.equal(ageText(minutes(-5), NOW), "0m", "a clock that runs behind reads as just now")
+  assert.equal(issueLabel(item({ issueNumber: 41 })), "#41")
+  assert.equal(issueLabel(item({ issueNumber: null })), "—")
 })
 
-test("the dialog's title and the help line are the approved layout's own", () => {
+test("AGE's colour uses working time: base under 4 working hours, warning from 4, error from one day", () => {
+  const flagged = "2026-11-23T09:00:00Z"
+  const calm = ageRole("waiting", flagged, Date.parse("2026-11-23T12:59:00Z"), HOURS)
+  assert.equal(calm, "age-calm", "239 working minutes is under the warning")
+  assert.equal(AGE_WARNING_MINUTES, 4 * 60)
+  assert.equal(ageRole("waiting", flagged, Date.parse("2026-11-23T13:00:00Z"), HOURS), "age-warn", "exactly 4 working hours warns")
+  assert.equal(ageRole("waiting", flagged, Date.parse("2026-11-23T17:59:00Z"), HOURS), "age-warn", "under one working day")
+  assert.equal(ageRole("waiting", flagged, Date.parse("2026-11-23T18:00:00Z"), HOURS), "age-error", "exactly one working day errors")
+  assert.equal(ageRole("working", flagged, Date.parse("2026-11-24T10:00:00Z"), HOURS), "age-error", "one day plus an hour")
+  assert.equal(ageRole("idle", flagged, Date.parse("2026-12-31T00:00:00Z"), HOURS), "muted", "an idle row is muted throughout")
+})
+
+test("AGE's colour counts working time, not calendar time", () => {
+  // Friday 17:00 to Monday 10:00 is 65 calendar hours but only 2 working hours.
+  const flagged = "2026-11-20T17:00:00Z"
+  const now = Date.parse("2026-11-23T10:00:00Z")
+  assert.equal(ageRole("waiting", flagged, now, HOURS), "age-calm", "calendar time would have read as an error")
+})
+
+test("AGE's colour is calm outside the window and on a day it does not list", () => {
+  assert.equal(ageRole("waiting", "2026-11-21T12:00:00Z", Date.parse("2026-11-21T14:00:00Z"), HOURS), "age-calm")
+  assert.equal(ageRole("waiting", "not a time", NOW, HOURS), "age-calm", "an unreadable time is calm")
+})
+
+test("a workspace's name drops the Slack MCP server's own prefix", () => {
+  assert.equal(workspaceLabel("slack_nexar"), "nexar")
+  assert.equal(workspaceLabel("slack_nauto"), "nauto")
+  assert.equal(workspaceLabel("other"), "other")
+  assert.equal(workspaceLabel(undefined), "")
+})
+
+test("the dialog's title is the layout's own", () => {
   assert.equal(PAGE_TITLE, "Slack Director")
-  assert.equal(
-    KEY_HELP,
-    "↑↓ move · [enter] open session · [i]ssue · [s]lack · [r]efresh · s[e]ttings · [esc] close",
-  )
+  assert.equal(DIALOG_INSET, 3, "the host's own side inset")
+  assert.equal(DIALOG_LIST_INSET, 4, "the host's own list inset")
 })
 
 test("the URL opener runs the system's opener for http and https, and refuses every other URL", () => {

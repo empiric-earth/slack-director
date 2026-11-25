@@ -204,7 +204,7 @@ test("the poller cell shows its cycle time, its distinct reason and what the cyc
   assert.equal(
     pollerCell({
       lastCycle: "2026-11-19T14:32:00.000Z",
-      outcome: "rate limited: #7",
+      outcome: "rate limited",
       issues: 11,
       threads: 4,
       conversations: 2,
@@ -212,7 +212,7 @@ test("the poller cell shows its cycle time, its distinct reason and what the cyc
       failed: [7],
       possiblyCut: true,
     }),
-    "poller 14:32 ✗ rate limited: #7 · 11 issues · 4 threads · 2 conversations · 1 unattended · list cut at 100",
+    "poller 14:32 ✗ rate limited · 11 issues · 4 threads · 2 conversations · 1 unattended · list cut at 100",
     "throttling is told from a sign-in problem, and an incomplete list is not hidden by a failure",
   )
   assert.equal(

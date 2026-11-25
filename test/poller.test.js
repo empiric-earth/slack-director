@@ -513,7 +513,7 @@ test("a yaml block with a key the reader cannot trust is rejected, so the issue 
   await h.run()
   assert.equal(h.reads(READ_THREAD_TOOL).length, 0, "a block the reader cannot trust is not read")
   assert.equal(h.prompts.length, 0, "and it never wakes")
-  assert.ok(h.logs.some((line) => /issue #11 skipped/.test(line)), "the log names the issue")
+  assert.ok(h.logs.some((line) => /did not parse/.test(line)), "the log names the reason")
 })
 
 test("an issue whose yaml block does not parse is skipped and named by number", async () => {

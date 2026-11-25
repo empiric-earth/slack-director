@@ -424,11 +424,11 @@ async function setup(context, spawnProcess, rendererOverride) {
         })
       } catch (error) {
         toast(`${PAGE_TITLE}: ${messageOf(error)}`, "error")
-        restoreOverview(captured.sessionID)
+        restoreOverview()
         return
       }
       if (confirmed !== true) {
-        restoreOverview(captured.sessionID)
+        restoreOverview()
         return
       }
       // The overview comes back on the user's yes, before the close is sent and
@@ -436,7 +436,7 @@ async function setup(context, spawnProcess, rendererOverride) {
       // answer, a refusal or a failure only adds a notice. Nothing in that
       // continuation touches the dialog, so a stale one can never reopen a view
       // the user has since left, or move its selection.
-      restoreOverview(captured.sessionID)
+      restoreOverview()
       try {
         refusedSessions.delete(captured.sessionID)
         await rpc().done({ sessionID: captured.sessionID })
@@ -452,11 +452,13 @@ async function setup(context, spawnProcess, rendererOverride) {
 
     /**
      * Show the overview again, on the item the user left it on. The marker
-     * follows that item's identity through any reordering, and when the item is
-     * already gone it takes the neighbor the reconcile rule picks.
+     * already follows that item's identity through any reordering, and a
+     * refresh that ran while the confirm was up has already handed a removed
+     * item's marker to its neighbor, so the restore keeps the rows' own
+     * reconcile result instead of reconciling the captured identity again.
      */
-    function restoreOverview(capturedID) {
-      reconcile(capturedID)
+    function restoreOverview() {
+      reconcile()
       openOverview()
     }
 

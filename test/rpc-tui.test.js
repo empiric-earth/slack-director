@@ -1031,6 +1031,92 @@ test("cancel restores the overview on the captured item, by identity, after its 
   assert.deepEqual(fake.doneInputs, [], "a cancel sends no request")
 })
 
+/**
+ * Three waiting items, newest first, and a confirm that stays pending until the
+ * test settles it: the middle item is the marked one and the one a refresh
+ * removes while the confirm is up. The overview is closed behind the confirm,
+ * so only a refresh can move the marker before the answer.
+ */
+function disappearanceDuringConfirm() {
+  const first = { ...ITEM, sessionID: "ses_1", flaggedAt: "2026-11-19T14:30:00.000Z" }
+  const removed = {
+    ...ITEM,
+    sessionID: "ses_2",
+    title: "Review of the Terraform module change",
+    issueNumber: 40,
+    issueUrl: "https://github.com/empiric-earth/almeida-slack-intake/issues/40",
+    flaggedAt: "2026-11-19T14:20:00.000Z",
+  }
+  const third = {
+    ...ITEM,
+    sessionID: "ses_3",
+    title: "Budget question for Q1",
+    issueNumber: 39,
+    issueUrl: "https://github.com/empiric-earth/almeida-slack-intake/issues/39",
+    flaggedAt: "2026-11-19T14:10:00.000Z",
+  }
+  const fake = fakeTuiContext({ items: [first, removed, third] })
+  let settleConfirm
+  const dialogs = fake.context.ui.dialog
+  fake.context.ui.dialog = {
+    ...dialogs,
+    confirm: (options) => {
+      fake.confirms.push(options)
+      return new Promise((resolve) => {
+        settleConfirm = resolve
+      })
+    },
+  }
+  return { fake, first, removed, third, settleConfirm: (answer) => settleConfirm(answer) }
+}
+
+test("a cancel after the marked item disappears during confirmation keeps the reconciled neighbor", async () => {
+  const { fake, first, removed, third, settleConfirm } = disappearanceDuringConfirm()
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+
+  // The user marks the second row: the item the refresh will remove.
+  modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
+  assert.equal(markedItem(renderDialog(fake.dialogs)), removed.title)
+
+  // The confirm is up and unanswered when a refresh removes that row; the
+  // refresh hands the marker to its next surviving neighbor.
+  clickDone(renderDialog(fake.dialogs))
+  await tick()
+  assert.equal(fake.confirms.length, 1, "the click asks one confirm for the marked row")
+  fake.setItems([first, third])
+  fake.eventHandlers.find(([name]) => name === "updated")[1]()
+  await tick()
+
+  settleConfirm(undefined)
+  await tick()
+  const restored = renderDialog(fake.dialogs)
+  assert.equal(rowLines(restored).length, 2, "the removed row is gone")
+  assert.equal(markedItem(restored), third.title, "the next surviving neighbor keeps the marker")
+  assert.deepEqual(fake.doneInputs, [], "a cancel sends no request")
+})
+
+test("a yes after the marked item disappears during confirmation requests the captured item and keeps the neighbor", async () => {
+  const { fake, first, removed, third, settleConfirm } = disappearanceDuringConfirm()
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+  modalLayer(fake.layers).commands.find((command) => command.bind === "down").run()
+
+  clickDone(renderDialog(fake.dialogs))
+  await tick()
+  fake.setItems([first, third])
+  fake.eventHandlers.find(([name]) => name === "updated")[1]()
+  await tick()
+
+  settleConfirm(true)
+  await tick()
+  assert.deepEqual(fake.doneInputs, [{ sessionID: removed.sessionID }], "one request, for the captured item")
+  const restored = renderDialog(fake.dialogs)
+  assert.equal(markedItem(restored), third.title, "the next surviving neighbor keeps the marker")
+})
+
 test("only a yes sends one Done request, for the captured item, and the row stays until its record leaves", async () => {
   const fake = fakeTuiContext({ confirmAnswer: true })
   await renderedTui().setup(fake.context)

@@ -367,12 +367,14 @@ test("the item first prompt carries the item, the skill, the writes it allows an
   assert.ok(prompt.includes("a request to the user"), "a flagged message counts as a request to the user")
   assert.match(prompt, /scope rules/i, "the prompt defers to the skill's scope rules")
   assert.ok(
-    prompt.includes("Make no GitHub write but that one issue create and that one comment"),
+    prompt.includes(
+      "Make no GitHub write but the lookup's one create or one reopen, the one state edit of a found open issue that carries no `state`, and that one comment",
+    ),
     "the prompt names the only GitHub writes the first turn may make",
   )
   assert.ok(
-    prompt.includes("no issue edit, label, close or reopen"),
-    "the prompt names an issue edit as forbidden",
+    prompt.includes("no label, no close, and no second comment"),
+    "the prompt names the writes the first turn may not make",
   )
   assert.match(prompt, /end your reply with the two fixed lines/i, "the reply ends with the two fixed lines")
   assert.ok(prompt.includes("Intake issue: <the issue's URL>"), "the reply's first fixed line")
@@ -524,22 +526,24 @@ test("the first prompt and the skill look the permalink up before either branch 
     assert.ok(index >= 0, `${needle} is in the text`)
     return index
   }
-  // A reply that was lost, or a reissue, must not make a second issue for one
-  // permalink: the lookup comes before the create in either branch.
-  for (const [name, text, lookup, branches] of [
+  // A reply that was lost, a reissue or a re-flag must not make a second issue
+  // for one permalink: the lookup and its reopen come before the create in
+  // either branch.
+  for (const [name, raw, lookup, branches] of [
     [
       "the first prompt",
       prompt,
-      "create one in the skill's issue format only when no issue carries it",
+      "create one in the skill's issue format only when neither lookup finds one",
       ["A message you leave out still gets its issue", "Otherwise write a paraphrase"],
     ],
     [
       "the skill",
       read(SKILL_REL),
-      "Create an issue only when no issue carries it",
-      ["Leave a message the rules leave out alone", "Otherwise read the thread and investigate"],
+      "Create an issue only when neither lookup finds one",
+      ["Leave a message the rules leave out alone", "Otherwise read the source and investigate"],
     ],
   ]) {
+    const text = raw.replace(/\s+/g, " ")
     const lookupAt = at(text, lookup)
     for (const branch of branches) {
       assert.ok(lookupAt < at(text, branch), `${name} looks the permalink up before ${branch}`)
@@ -579,6 +583,79 @@ test("the skill keeps the item format, the data rule, the field sources and the 
   assert.match(flat, /never post a decision or a commitment/i, "no decisions or commitments")
 })
 
+test("the skill defines the four request states and the four fields, with the body as their one source", () => {
+  const skill = read(SKILL_REL)
+  const flat = skill.replace(/\s+/g, " ")
+  for (const state of ["`needs-me`", "`blocked`", "`waiting-requester`", "`idle`"]) {
+    assert.ok(skill.includes(state), `the skill names the state ${state}`)
+  }
+  for (const field of ["`state`", "`state_since`", "`blocked_on`", "`waiting_on`"]) {
+    assert.ok(flat.includes(field), `the skill names the field ${field}`)
+  }
+  assert.match(flat, /that body is the state's one source/i, "the body is the state's one source")
+  assert.match(flat, /no label and no other field mirrors it/i, "no label mirrors the state")
+  assert.match(flat, /read-modify-write of the body/i, "a state change is a read-modify-write of the body")
+  assert.match(flat, /read it back/i, "the write is read back")
+  assert.match(
+    flat,
+    /one comment giving the old state, the new state and the reason/i,
+    "a state change posts one comment with the old state, the new state and the reason",
+  )
+  assert.match(flat, /a paraphrase with no Slack text/i, "the reason comment carries no Slack text")
+  assert.match(flat, /whose state is `idle` stays open/i, "an idle issue stays open")
+})
+
+test("the skill's read rules read the named conversation for a DM or a group DM", () => {
+  const flat = read(SKILL_REL).replace(/\s+/g, " ")
+  assert.match(
+    flat,
+    /when a prompt names the conversation .* read that conversation too/i,
+    "the first turn's read rule reads the named conversation",
+  )
+  assert.match(
+    flat,
+    /an unthreaded message in it is returned by the conversation read and not by a thread read/i,
+    "the skill says why a named conversation is read",
+  )
+  assert.match(
+    flat,
+    /read the source the prompt names from the `ts` it names/i,
+    "the after-the-first-turn rule reads the named source",
+  )
+})
+
+test("the first prompt pins the request-state fields, the closed-issue lookup and the reopened reply line", () => {
+  const hit = {
+    permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
+    workspace: "slack_nexar",
+    channel: { id: "C0PLATFORM", label: "#platform-help" },
+    ts: "1795194443.137219",
+  }
+  const prompt = itemFirstPrompt(hit, "empiric-earth/almeida-slack-intake")
+  assert.ok(prompt.includes("`state: needs-me`"), "the prompt pins the field name `state` and its first value")
+  assert.ok(prompt.includes("`state_since`"), "the prompt pins the field `state_since`")
+  // The closed-issue lookup comes by the permalink first, then by the thread's
+  // own `channel_id` and `thread_ts`, before any create.
+  const at = (needle) => {
+    const index = prompt.indexOf(needle)
+    assert.ok(index >= 0, `${needle} is in the prompt`)
+    return index
+  }
+  const permalinkLookup = at("issue whose `permalink` field equals the permalink above")
+  const threadLookup = at("a closed issue of the same thread")
+  const threadKeys = at("`channel_id` and `thread_ts`")
+  const create = at("create one in the skill's issue format")
+  assert.ok(threadKeys > threadLookup, "the thread lookup names `channel_id` and `thread_ts`")
+  assert.ok(permalinkLookup < create, "the permalink lookup comes before a create")
+  assert.ok(threadLookup < create, "the closed-issue-of-the-thread lookup comes before a create")
+  assert.match(prompt, /reopen it/i, "the prompt tells the session to reopen the closed issue")
+  assert.match(
+    prompt,
+    /the lookup found it, created it or reopened it/i,
+    "the reply's closing lines name a reopened issue like a found one",
+  )
+})
+
 test("the Slack-skills rule names no skill, and the customization hook is pinned by its fixed id", () => {
   const skill = read(SKILL_REL)
   const section = /^## The user's Slack skills\n([\s\S]*?)(?=\n## )/m.exec(skill)
@@ -604,19 +681,23 @@ test("the skill bounds the first turn's writes and gives its reply's two lines",
   const flat = read(SKILL_REL).replace(/\s+/g, " ")
   assert.match(
     flat,
-    /first turn's GitHub writes are exactly that one issue create and that one comment/i,
-    "the first turn's writes are the one issue create and the one comment",
+    /first turn's GitHub writes are exactly: the one issue create, or the one reopen/i,
+    "the first turn's writes are the one create or the one reopen, and the one comment",
   )
   assert.match(
     flat,
-    /no issue edit, no label, no close or reopen, and no second comment/i,
+    /no label, no close, no second comment/i,
     "every other write of the first turn is named as forbidden",
   )
   assert.match(flat, /belongs to a later turn the user drives/i, "the skill's other writes are later-turn writes")
   assert.match(flat, /a flagged message counts as a request to the user/i, "a flagged message counts as a request")
   assert.match(flat, /Intake issue: <the issue's URL>/, "the reply's first line names the issue")
   assert.match(flat, /Title: <the issue's exact title>/, "the reply's second line is the issue's exact title")
-  assert.match(flat, /only when no issue carries it/i, "an issue is created only when none carries the permalink")
+  assert.match(
+    flat,
+    /create an issue only when neither lookup finds one/i,
+    "an issue is created only when neither the permalink nor the thread lookup finds one",
+  )
   assert.match(flat, /every flagged message gets\s+its issue/i, "every flagged message gets its issue")
 })
 

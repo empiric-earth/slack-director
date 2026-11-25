@@ -17,6 +17,30 @@ It never sends a Slack message on its own: OpenCode asks you to approve every
 send. It writes to the intake repo only, and always as a paraphrase plus the
 Slack permalink — never the message text.
 
+## The request state
+
+Each open intake issue carries one request state in its yaml block, and that
+body is the state's one source — no label mirrors it. The four states are:
+
+- `needs-me` — you must decide, answer or act; a new request starts here;
+- `blocked` — it waits on a third party, a CISO decision or another team;
+- `waiting-requester` — it is the requester's turn;
+- `idle` — nothing is pending; it suggests the issue should close.
+
+The item session writes the state and keeps it current. It sets `needs-me` and
+`state_since` on the issue a new flag creates, and on a later change it reads the
+body, changes only those fields, writes it back and adds one comment with the
+old state, the new state and the reason. The poller's "new activity" prompt makes
+it read the named source, re-triage the request, and change the state when the
+request's turn moved — or post nothing when it did not. An issue whose state is
+`idle` stays open: the close is still yours, with `d`.
+
+A re-flag on a thread whose intake issue is closed reopens that issue — matched
+first by the permalink, then by the same channel and thread — sets it back to
+`needs-me` and comments what changed, instead of making a second issue. The block
+also carries `state_since`, and `blocked_on` or `waiting_on` while one of them
+applies.
+
 ## The overview dialog
 
 Everything the watcher has flagged sits in one floating dialog over the current
@@ -189,10 +213,11 @@ stays.
   messages newer than the newest one seen; a DM's or a group DM's conversation
   is read too. A newer message wakes the item session with a "new activity"
   prompt that names the issue, the source (`thread`, `conversation` or both) and
-  the `ts` it is newer than. The poller writes nothing to GitHub or Slack, makes
-  no model call, and keeps only Slack `ts` values — never message text. The
-  newest-seen `ts` per issue stays in the plugin's local storage, never on the
-  issue.
+  the `ts` it is newer than; the session reads that source, re-triages the
+  request and changes its request state. The poller writes nothing to GitHub or
+  Slack, makes no model call, and keeps only Slack `ts` values — never message
+  text. The newest-seen `ts` per issue stays in the plugin's local storage, never
+  on the issue.
 - An open, in-scope issue whose session was deleted or archived is **unattended**:
   the poller still reads it — so a new message is noticed — but it is never
   woken and never given a new session. The overview's header shows the poller's

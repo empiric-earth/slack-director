@@ -58,9 +58,10 @@ intake repo the first prompt names. Nothing else, and never another repo:
 - reads: `GET repos/<intake_repo>/issues?state=all&per_page=100`,
   `GET repos/<intake_repo>/issues/<n>`,
   `GET repos/<intake_repo>/issues/<n>/comments`.
-- writes: `POST repos/<intake_repo>/issues` and
-  `POST repos/<intake_repo>/issues/<n>/comments`. `PATCH
-  repos/<intake_repo>/issues/<n>` and the close form belong to a later turn the
+- writes: `POST repos/<intake_repo>/issues`,
+  `POST repos/<intake_repo>/issues/<n>/comments`, and `PATCH
+  repos/<intake_repo>/issues/<n>` — the reopen of a re-flagged thread's closed
+  issue and the request-state edit. The close form belongs to a later turn the
   user drives.
 - The plugin's close prompt, sent on the user's `d`, is the user's own ask to close the issue, in the close form above.
 - List the issues with a projection of number, title, state and the permalink
@@ -87,19 +88,27 @@ its issue. The first turn runs these steps in this order:
 2. **Find the intake issue before you create one.** List every page of the
    intake repo's issues once, open and closed alike, and look for the one whose
    `permalink` field equals the item's permalink. That permalink is the issue's
-   key. Create an issue only when no issue carries it, and in the form the
-   branch below names: the permalink fields and the category only when the
-   message is left out, the format below otherwise. The lookup comes before the
-   create in either branch, so a reply that was lost, or a reissue, never makes
-   a second issue for one message.
+   key. When the issue that carries it is closed, the flag is a re-flag:
+   reopen it, set `state: needs-me` and `state_since`, and say what changed in
+   the one comment below — never a second issue. When no issue carries the
+   permalink, look for a closed issue of the same thread — the same
+   `channel_id` and `thread_ts` — and reopen that one the same way. Create an
+   issue only when neither lookup finds one, and in the form the branch below
+   names: the permalink fields, `state: needs-me` and `state_since`, and the
+   category only when the message is left out, the format below otherwise. The
+   lookup and the reopen come before the create in either branch, so a reply
+   that was lost, a reissue, or a re-flag never makes a second issue for one
+   message.
 3. **Leave a message the rules leave out alone.** Its issue — the one the lookup
    found or made — holds the permalink fields and the category only, with no
    paraphrase of the message's content. Post one comment that says it is out of
    scope and asks the user, and read no thread and no channel — not to confirm
    the category, and not to look for a message Slack does not hold.
-4. **Otherwise read the thread and investigate.** Read the flagged message's
+4. **Otherwise read the source and investigate.** Read the flagged message's
    thread by the channel and the timestamp in the prompt, through the Slack read
-   tools. Read only: change nothing.
+   tools. When a prompt names the conversation — a DM or a group DM — read that
+   conversation too, because an unthreaded message in it is returned by the
+   conversation read and not by a thread read. Read only: change nothing.
 5. **Post the findings and proposed next steps** as one comment on the issue.
 6. **Reply in the first prompt's reply template**, filled in from what you
    found, and end the reply with exactly these two lines, below the `---` rule:
@@ -109,10 +118,12 @@ its issue. The first turn runs these steps in this order:
    Title: <the issue's exact title>
    ```
 
-The first turn's GitHub writes are exactly that one issue create and that one
-comment, and nothing else: no issue edit, no label, no close or reopen, and no
-second comment. A correction goes into the one comment. Every other write this
-skill lists belongs to a later turn the user drives.
+The first turn's GitHub writes are exactly: the one issue create, or the one
+reopen of the closed issue this message's thread already has, each carrying
+`state` and `state_since`; the one state edit of a found open issue that carries
+no `state`; and that one comment. Nothing else: no label, no close, no second
+comment. A correction goes into the one comment. Every other write this skill
+lists belongs to a later turn the user drives.
 
 Then stop. Take no other action: no Slack send, reaction, edit or delete, no
 other issue and no other comment.
@@ -142,14 +153,46 @@ The intake repo holds requests to the user, and nothing else.
   `channel_name` (the channel label: the channel's name without the `#`, `DM`
   or `GDM`), `thread_ts` (so the thread can be read again), `origin` (the value
   `flag`), `asker` (the Slack id and name), `asked_at`, and `due` when the
-  message names one, else empty.
+  message names one, else empty. It also holds `state` and `state_since`, and
+  `blocked_on` or `waiting_on` while one of them applies — the request state
+  below.
 - A message the scope rules leave out gets the same block and one more field,
   `category`, in place of the paraphrase; the body carries no other line.
-- Comments hold follow-ups and the close reason.
+- Comments hold follow-ups, the reason for a state change, and the close reason.
 - An open issue is a pending request. A closed issue is done.
 
 Never copy a Slack message into an issue. Write a paraphrase in your own words
 and add the permalink. No verbatim Slack text in a title, a body or a comment.
+
+## The request state
+
+An open issue carries exactly one request state in its yaml block, and that body
+is the state's one source: no label and no other field mirrors it. GitHub's
+open and closed is the closed state beside it; a closed issue shows no state.
+
+| State | Meaning |
+|---|---|
+| `needs-me` | The user must decide, answer or act. A new request starts here. |
+| `blocked` | It waits on a third party — a CISO decision, another team. |
+| `waiting-requester` | It is the requester's turn: you asked for more info, or the next move is theirs. |
+| `idle` | Nothing is pending; it suggests the issue should close. |
+
+The block holds `state`, `state_since` (the ISO 8601 time of the last change),
+and `blocked_on` (a URL) only while `blocked`, or `waiting_on` (a list of Slack
+ids) only while `waiting-requester`.
+
+The first turn sets the first state: `state: needs-me` and `state_since` go into
+the issue it creates, into a closed issue it reopens, or into a found open issue
+that carries no `state`, always by the read-modify-write below. Its one comment
+is the findings comment; when it set or changed the state it also gives the old
+and the new state and the reason there.
+
+A later state change is a read-modify-write of the body: read the body, change
+only those fields, write it, read it back and confirm it is what you wrote. Then
+post one comment giving the old state, the new state and the reason, as a
+paraphrase with no Slack text. Every intake write goes through the credential
+broker, as the GitHub section above says. An open issue whose state is `idle`
+stays open: `idle` only suggests a close, and the close stays the user's `d`.
 
 ## Where a field comes from
 
@@ -179,3 +222,9 @@ The first turn ends and the session waits for the user. You are already on the
 `slack-director` agent, so act on the item: answer their questions about it,
 read the thread and summarise it, draft a reply, or send the one they ask for.
 Every Slack send waits for their approval in the OpenCode prompt.
+
+When the poller wakes you with a "new activity" prompt, read the source the
+prompt names from the `ts` it names — the thread, the DM's or group DM's
+conversation, or both — then re-triage the request. Change the request state
+when the request's turn moved, and post nothing when it did not. Every Slack
+send still waits for the user's approval.

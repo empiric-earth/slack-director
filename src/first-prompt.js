@@ -29,13 +29,15 @@ export function itemFirstPrompt(hit, intakeRepo) {
     "",
     "The flag is the user's own triage, so a flagged message counts as a request to the user.",
     "",
-    "Find the intake issue first, before any other write: look in that repo for the issue whose `permalink` field equals the permalink above, among open and closed issues alike, and create one in the skill's issue format only when no issue carries it. One issue per permalink is what keeps a later turn — a reissue included — from making a second one for the same message, so no branch below creates an issue of its own.",
+    "Find the intake issue first, before any other write: look in that repo for the issue whose `permalink` field equals the permalink above, among open and closed issues alike. When that issue is closed, this flag is a re-flag: reopen it, set `state: needs-me` and `state_since`, and post one comment that says what changed, instead of creating an issue. When no issue carries the permalink, look for a closed issue of the same thread — the same `channel_id` and `thread_ts` — and reopen that one the same way; create one in the skill's issue format only when neither lookup finds one. The issue you create carries `state: needs-me` and `state_since` in its yaml block. One issue per permalink is what keeps a later turn — a reissue or a re-flag included — from making a second one for the same message, so no branch below creates an issue of its own.",
+    "",
+    "A found open issue that carries no `state` gets `state: needs-me` and `state_since` by a read-modify-write of its body, the same way every state change is written.",
     "",
     "Then apply the skill's scope rules, and decide the category without reading anything: the permalink, the workspace and the channel above are what tell it. The skill's out-of-scope categories are customer or production data, Slack Connect or an external channel, and a category the permalink, the workspace and the channel do not tell; only a message in one of them is left out of the investigation. A message you leave out still gets its issue — the one the lookup found or made — which holds the permalink fields and the category only, with no paraphrase of its content, and one comment that says it is out of scope and asks the user. Read no thread and no channel for it, in any workspace: not to confirm the category, and not to look for a message Slack does not hold.",
     "",
-    "Otherwise write a paraphrase and the permalink only, never verbatim Slack text; read that message's thread with the Slack read tools and investigate, read-only; and post the findings and proposed next steps as one comment on the issue.",
+    "Otherwise write a paraphrase and the permalink only, never verbatim Slack text; read that message's thread with the Slack read tools — and its conversation when the message is in a DM or a group DM, because an unthreaded message there is returned by the conversation read and not by the thread read — and investigate, read-only; and post the findings and proposed next steps as one comment on the issue.",
     "",
-    "Make no GitHub write but that one issue create and that one comment: no issue edit, label, close or reopen, and no second comment. A correction goes into the one comment.",
+    "Make no GitHub write but the lookup's one create or one reopen, the one state edit of a found open issue that carries no `state`, and that one comment: no label, no close, and no second comment. A correction goes into the one comment.",
     "",
     "Reply with the template below, filled in from what you found — the chat reply is what the user reads, so keep it scannable. Write its sections in this order, and end your reply with the two fixed lines, below the `---` rule:",
     "",
@@ -60,6 +62,8 @@ export function itemFirstPrompt(hit, intakeRepo) {
     "Title: <the issue's exact title>",
     "```",
     "",
+    "Name the issue in those two closing lines the same way whether the lookup found it, created it or reopened it.",
+    "",
     "**Next steps** lists every real option, the recommended one first with ⭐: two or more when there clearly are several, no filler, and a single option when only one path makes sense.",
     "",
     "A message the scope rules leave out gets the header line, **What we know** with the one bullet `Out of scope: <category>. I read nothing.`, and its real options.",
@@ -78,7 +82,11 @@ export function itemFirstPrompt(hit, intakeRepo) {
  */
 export function newActivityPrompt({ issueUrl, source, watermark }) {
   const where =
-    source === "both" ? "the thread and the conversation" : source === "conversation" ? "the conversation" : "the thread"
+    source === "both"
+      ? "the thread and the DM's or group DM's conversation"
+      : source === "conversation"
+        ? "the DM's or group DM's conversation"
+        : "the thread"
   return [
     "There is new activity on this item.",
     "",
@@ -86,7 +94,9 @@ export function newActivityPrompt({ issueUrl, source, watermark }) {
     `Source: ${source}`,
     `Newer than: ${watermark}`,
     "",
-    `Read ${where} from ${watermark} with the Slack read tools, then follow the \`slack-director\` skill: re-triage the request and update its state.`,
+    `Read ${where} from ${watermark} with the Slack read tools, then follow the \`slack-director\` skill: re-triage the request, change its state when its turn moved and post nothing when it did not.`,
+    "",
+    "Never send a Slack message without the user's approval.",
     "",
     "Then stop, and take no other action.",
   ].join("\n")

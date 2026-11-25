@@ -15,7 +15,7 @@ import { createClaims } from "./src/claims.js"
 import { createConfigReader, DEFAULT_POLL_SECONDS } from "./src/config.js"
 import { createGhRunner } from "./src/gh.js"
 import { createPoller, DEFAULT_POLL_MINUTES } from "./src/poller.js"
-import { registerInstance, ownerPollNow } from "./src/singleton.js"
+import { processOwner, registerInstance, ownerPollNow } from "./src/singleton.js"
 import { claimsDir, reissueDir } from "./src/state.js"
 import { createWatcher, SESSION_EVENT_TYPES } from "./src/watcher.js"
 
@@ -83,9 +83,9 @@ export default {
 
     const config = createConfigReader()
     // One lease owner per server process, shared by the flag scan and the thread
-    // poller: one loop's lease trip never blocks the other, and a second server
-    // process is still spared both.
-    const owner = randomUUID()
+    // poller and by every instance this process loads: one loop's lease trip
+    // never blocks another, and a second server process is still spared both.
+    const owner = processOwner()
     // The watcher's change notice goes out through the RPC registration, which
     // is created after it: the holders are filled in as soon as that returns.
     let emitUpdated = () => {}

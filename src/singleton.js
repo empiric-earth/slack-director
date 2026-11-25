@@ -12,13 +12,30 @@
 // Every instance still serves the RPC from the shared plugin storage, and a
 // poll-now on any instance runs the owner's scan through the same registry.
 
+import { randomUUID } from "node:crypto"
+
 const REGISTRY = Symbol.for("slack-director.singleton")
+const OWNER = Symbol.for("slack-director.lease-owner")
 
 function registry() {
   const existing = globalThis[REGISTRY]
   if (existing) return existing
   const created = { instances: new Map(), ownerID: null, next: 0 }
   globalThis[REGISTRY] = created
+  return created
+}
+
+/**
+ * This server process's lease identity, stable for the process's life. Every
+ * loaded instance shares it, so the lease never lets one instance of a process
+ * block another, and a second server process — a different owner — is still
+ * guarded.
+ */
+export function processOwner() {
+  const existing = globalThis[OWNER]
+  if (existing) return existing
+  const created = randomUUID()
+  globalThis[OWNER] = created
   return created
 }
 

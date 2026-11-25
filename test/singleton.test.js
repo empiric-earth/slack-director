@@ -2,7 +2,14 @@
 // timers, and a poll-now reaches the owner's scan. No dependencies.
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { hasOwner, ownerPollNow, registerInstance, resetRegistry } from "../src/singleton.js"
+import { hasOwner, ownerPollNow, processOwner, registerInstance, resetRegistry } from "../src/singleton.js"
+
+test("the process's lease owner is one id, stable for the process's life", () => {
+  const first = processOwner()
+  assert.equal(typeof first, "string")
+  assert.ok(first.length > 0)
+  assert.equal(processOwner(), first, "every instance the process loads shares one owner")
+})
 
 test("the first instance owns the timers, and a second loaded instance does not", () => {
   resetRegistry()

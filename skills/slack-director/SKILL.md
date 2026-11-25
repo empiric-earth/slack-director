@@ -81,8 +81,8 @@ its issue. The first turn runs these steps in this order:
    thread by the channel and the timestamp in the prompt, through the Slack read
    tools. Read only: change nothing.
 5. **Post the findings and proposed next steps** as one comment on the issue.
-6. **Reply with the same findings and next steps**, and end the reply with
-   exactly these two lines:
+6. **Reply in the first prompt's reply template**, filled in from what you
+   found, and end the reply with exactly these two lines, below the `---` rule:
 
    ```
    Intake issue: <the issue's URL>

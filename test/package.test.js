@@ -9,6 +9,7 @@ import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import plugin, { parseSkill, skillPath } from "../index.js"
 import { itemFirstPrompt } from "../src/first-prompt.js"
+import { parseReply } from "../src/reply.js"
 import { SlackDirectorRpc } from "../rpc.js"
 import { schemaProblem } from "./schema.js"
 
@@ -327,7 +328,7 @@ test("the item first prompt carries the item, the skill, the writes it allows an
     prompt.includes("no issue edit, label, close or reopen"),
     "the prompt names an issue edit as forbidden",
   )
-  assert.match(prompt, /end your reply with exactly these two\s+lines/i, "the reply ends with the two lines")
+  assert.match(prompt, /end your reply with the two fixed lines/i, "the reply ends with the two fixed lines")
   assert.ok(prompt.includes("Intake issue: <the issue's URL>"), "the reply's first fixed line")
   assert.ok(prompt.includes("Title: <the issue's exact title>"), "the reply asks for the issue's exact title")
   assert.ok(
@@ -335,6 +336,81 @@ test("the item first prompt carries the item, the skill, the writes it allows an
     "every flagged message gets its issue, the out-of-scope ones included",
   )
   assert.match(prompt, /take no other action/i, "the first turn is bounded")
+})
+
+test("the first prompt's reply carries the template's sections in order, with the two fixed lines last", () => {
+  const hit = {
+    permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
+    workspace: "slack_nexar",
+    channel: { id: "C0PLATFORM", label: "#platform-help" },
+    ts: "1795194443.137219",
+  }
+  const prompt = itemFirstPrompt(hit, "empiric-earth/almeida-slack-intake")
+  const fence = prompt.match(/```\n([\s\S]*?)\n```/)
+  assert.ok(fence, "the prompt carries the reply template in a fenced block")
+  const template = fence[1]
+  const order = [
+    "**<asker>** · <#channel | DM | GDM> · <asked_at, e.g. Mon 24 Nov 09:55> · [message](<permalink>)",
+    "**Gist:** <one line: what they want from you>",
+    "**Status:** <unanswered | answered by X | nudged N times> · **Due:** <date | none named>",
+    "**What we know**",
+    "- <what they want, paraphrased>",
+    "- <fact checked> (<source>)",
+    "- Missing: <what the message leaves out>",
+    "- Not checked: <what this pass could not read>",
+    "- ⚠️ <compliance flag, only when one applies>",
+    "**Next steps**",
+    "1. ⭐ <recommended> — <what the director does when picked>",
+    "2. <a real alternative>",
+    "---",
+    "Intake issue: <the issue's URL>",
+    "Title: <the issue's exact title>",
+  ]
+  let previous = -1
+  for (const needle of order) {
+    const index = template.indexOf(needle)
+    assert.ok(index >= 0, `${needle} is in the template`)
+    assert.ok(index > previous, `${needle} follows the line before it`)
+    previous = index
+  }
+  const lines = template.split("\n")
+  assert.equal(lines.at(-2), "Intake issue: <the issue's URL>", "the template's second-to-last line is the intake issue")
+  assert.equal(lines.at(-1), "Title: <the issue's exact title>", "the template's last line is the issue's exact title")
+  for (const rule of [
+    "lists every real option, the recommended one first",
+    "`Out of scope: <category>. I read nothing.`",
+    "not bound by the template",
+  ]) {
+    assert.ok(prompt.includes(rule), `the prompt carries the rule "${rule}"`)
+  }
+})
+
+test("parseReply reads the two fixed lines from a reply written in the template", () => {
+  const issueUrl = "https://github.com/empiric-earth/almeida-slack-intake/issues/412"
+  const reply = [
+    "**Ana** · #platform-help · Mon 24 Nov 09:55 · [message](https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219)",
+    "**Gist:** asks for read access to the staging dashboards",
+    "**Status:** unanswered · **Due:** none named",
+    "",
+    "**What we know**",
+    "- Wants read access to the staging dashboards",
+    "- The channel is an internal one (channel name)",
+    "- Missing: who owns the dashboards",
+    "- Not checked: the access list",
+    "",
+    "**Next steps**",
+    "1. ⭐ Ask the platform team for read access — the director drafts the ask",
+    "2. Answer in the thread — the director drafts the reply",
+    "",
+    "---",
+    `Intake issue: ${issueUrl}`,
+    "Title: Access to the staging dashboards",
+  ].join("\n")
+  assert.deepEqual(parseReply(reply), {
+    issueUrl,
+    issueNumber: 412,
+    title: "Access to the staging dashboards",
+  })
 })
 
 test("the first prompt and the skill carry no issue-less path", () => {

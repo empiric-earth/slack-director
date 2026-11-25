@@ -39,10 +39,11 @@ const config = {
     intake_repo: { type: "string" },
     session_directory: { type: "string" },
     poll_seconds: { type: "integer" },
+    poll_minutes: { type: "integer" },
     work_hours: workHours,
     session_agent: { type: "string" },
   },
-  required: ["flag_emoji", "intake_repo", "session_directory", "poll_seconds", "work_hours", "session_agent"],
+  required: ["flag_emoji", "intake_repo", "session_directory", "poll_seconds", "poll_minutes", "work_hours", "session_agent"],
   additionalProperties: false,
 }
 
@@ -54,6 +55,53 @@ const workspace = {
     error: nullableString,
   },
   required: ["name", "ok", "error"],
+  additionalProperties: false,
+}
+
+// One open, in-scope issue whose session was deleted or archived. It is shown,
+// never woken, and never given a new session.
+const unattended = {
+  type: "object",
+  properties: {
+    number: { type: "integer" },
+    url: { type: "string" },
+    title: { type: "string" },
+    permalink: { type: "string" },
+    state: { type: "string" },
+    state_since: { type: "string" },
+    asked_at: { type: "string" },
+    newActivity: { type: "boolean" },
+  },
+  required: ["number", "url", "title", "permalink", "state", "state_since", "asked_at", "newActivity"],
+  additionalProperties: false,
+}
+
+// The thread poller's last cycle. It is optional: an older status carries none,
+// and the header shows no poller cell until a cycle has run.
+const poller = {
+  type: "object",
+  properties: {
+    lastCycle: nullableString,
+    outcome: { type: "string" },
+    issues: { type: "integer" },
+    threads: { type: "integer" },
+    conversations: { type: "integer" },
+    unattended: { type: "array", items: unattended },
+    ghError: nullableString,
+    failed: { type: "array", items: { type: "integer" } },
+    possiblyCut: { type: "boolean" },
+  },
+  required: [
+    "lastCycle",
+    "outcome",
+    "issues",
+    "threads",
+    "conversations",
+    "unattended",
+    "ghError",
+    "failed",
+    "possiblyCut",
+  ],
   additionalProperties: false,
 }
 
@@ -74,6 +122,7 @@ const status = {
       required: ["flagged", "nextStepsPosted", "skipped"],
       additionalProperties: false,
     },
+    poller,
   },
   required: ["lastPoll", "outcome", "workspaces", "configError", "today"],
   additionalProperties: false,

@@ -28,6 +28,9 @@ const SOURCE_MODULES = [
   "claims.js",
   "state.js",
   "slack-mcp.js",
+  "gh.js",
+  "poller.js",
+  "singleton.js",
   "first-prompt.js",
   "reply.js",
   "watcher.js",
@@ -228,6 +231,49 @@ test("setup registers the RPC contract the TUI part calls, with every method han
       assert.equal(typeof rpcRegistrations[0].handlers[method], "function", `the contract's ${method} is handled`)
     }
     await dispose()
+  })
+})
+
+test("two host contexts in one server process run one scan per interval, not two", async () => {
+  await withConfigHome(async (configFile) => {
+    mkdirSync(dirname(configFile), { recursive: true })
+    writeFileSync(
+      configFile,
+      JSON.stringify({
+        intake_repo: "empiric-earth/almeida-slack-intake",
+        session_directory: "/tmp/sessions",
+        poll_seconds: 3600,
+        poll_minutes: 0,
+        work_hours: { days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], start: "00:00", end: "23:59", time_zone: "UTC" },
+      }),
+    )
+    const first = fakeContext()
+    const second = fakeContext()
+    let disposeFirst
+    let disposeSecond
+    // The claims directory follows the state home too, so point it at the
+    // fixture: the operator's own claims are never read by a test.
+    const fixtureHome = dirname(dirname(dirname(configFile)))
+    const previousState = process.env.XDG_STATE_HOME
+    process.env.XDG_STATE_HOME = join(fixtureHome, "state")
+    const scans = (context) => context.rpcEvents.filter(([name]) => name === "updated").length
+    try {
+      disposeFirst = await plugin.setup(first.ctx)
+      disposeSecond = await plugin.setup(second.ctx)
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      assert.equal(scans(first) + scans(second), 1, "exactly one instance runs the timers")
+      // The owner unloads: the other loaded instance takes the timers over.
+      await disposeFirst()
+      disposeFirst = undefined
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      assert.equal(scans(second), 1, "the other instance runs the next interval")
+      assert.equal(scans(first), 1, "and the unloaded one runs nothing more")
+    } finally {
+      if (disposeFirst) await disposeFirst()
+      if (disposeSecond) await disposeSecond()
+      if (previousState === undefined) delete process.env.XDG_STATE_HOME
+      else process.env.XDG_STATE_HOME = previousState
+    }
   })
 })
 

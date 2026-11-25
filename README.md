@@ -24,8 +24,8 @@ screen. Open it with `/slack-director`, or with the `Slack Director` entry in
 the command palette:
 
 - the title row names the dialog, with `esc` on the right;
-- the header names the last poll and each workspace — a workspace that failed
-  carries `✗` and the reason;
+- the header names the last poll, each workspace — a workspace that failed
+  carries `✗` and the reason — and the poller's one cell;
 - the counts line counts the items by state, each state's mark in its own
   colour;
 - the rows are grouped under `Waiting for you`, `Working` and `Idle`, one
@@ -39,7 +39,7 @@ The dialog's shape, with one blank line between two groups that are shown:
 
 ```
 Slack Director                                                                            esc
-last poll 14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps
+last poll 14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps · poller ✓ 11
 
 ● 2 waiting for you   ◐ 1 working   ○ 1 idle
 
@@ -133,7 +133,9 @@ watcher starts to renew a Slack sign-in, and you never pick it.
    - `flag_emoji` — the emoji name without colons; default `oc`.
    - `intake_repo` — `owner/name`; required.
    - `session_directory` — the absolute path an item session runs in; required.
-   - `poll_seconds` — the interval between scans; default `60`.
+   - `poll_seconds` — the interval between flag scans; default `60`.
+   - `poll_minutes` — the interval between thread-poller cycles; default `5`.
+     `0` turns the poller off and leaves the flag scan running.
    - `work_hours` — `days` (a list of `Mon` … `Sun`), `start` and `end`
      (`HH:MM`) and `time_zone` (an IANA name); default Monday to Friday, 09:00
      to 18:00, in this machine's time zone. Nothing is polled outside it.
@@ -158,6 +160,27 @@ stays.
 - The watcher polls every connected Slack MCP server whose URL is
   `https://mcp.slack.com/mcp`, and gives each flagged message one item session.
   It writes nothing to Slack.
+- The flag scan and the thread poller run once per OpenCode server process, not
+  once per workspace or project: the first plugin instance a process loads owns
+  the timers, and another loaded instance takes them over when it unloads. A
+  poll-now from any instance runs the owner's scan.
+- The thread poller reads the intake repo's open issues through the host's `gh`
+  — the CLI's own login, its argument list fixed and no shell, a list of at most
+  100 issues — and, for every open issue that is in scope, its Slack thread for
+  messages newer than the newest one seen; a DM's or a group DM's conversation
+  is read too. A newer message wakes the item session with a "new activity"
+  prompt that names the issue, the source (`thread`, `conversation` or both) and
+  the `ts` it is newer than. The poller writes nothing to GitHub or Slack, makes
+  no model call, and keeps only Slack `ts` values — never message text. The
+  newest-seen `ts` per issue stays in the plugin's local storage, never on the
+  issue.
+- An open, in-scope issue whose session was deleted or archived is **unattended**:
+  the poller still reads it — so a new message is noticed — but it is never
+  woken and never given a new session. The overview's header shows the poller's
+  last cycle (the issues, threads and conversations read, a `gh` failure, a
+  rate-limited read, a possibly cut list), and the status lists each unattended
+  issue with its `permalink`, `state`, `state_since` and `asked_at`, and a mark
+  when its source has newer activity.
 - A session is titled after the flagged message's channel and its author until
   its first turn ends, and after the intake issue's title from then on.
 - Removing the flag from a message you have handled keeps the scan short: the

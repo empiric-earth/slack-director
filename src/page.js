@@ -261,8 +261,29 @@ export function titleParts() {
 }
 
 /**
- * The header line: the last poll, then each workspace with its mark. A failing
- * workspace's mark carries the warning colour and its reason follows it.
+ * The poller's one short cell: how many issues its last cycle read, or why it
+ * failed or could not be trusted. Nothing is shown until a cycle has run.
+ */
+export function pollerCell(poller) {
+  if (!poller || typeof poller.lastCycle !== "string") return undefined
+  if (poller.ghError) return `poller ✗ ${poller.ghError}`
+  if (Array.isArray(poller.failed) && poller.failed.length > 0) return "poller ✗ read failed"
+  if (poller.possiblyCut) return "poller ! list cut at 100"
+  return `poller ✓ ${poller.issues ?? 0}`
+}
+
+/** The poller cell's parts, with a failing cell in the warning colour. */
+function pollerParts(poller) {
+  const cell = pollerCell(poller)
+  if (cell === undefined) return []
+  const failed = cell.includes("✗") || cell.includes("!")
+  return [part(" · ", "muted"), part(cell, failed ? "workspace-fail" : "workspace-ok")]
+}
+
+/**
+ * The header line: the last poll, then each workspace with its mark, then the
+ * poller's one cell, when it has run. A failing workspace's mark carries the
+ * warning colour and its reason follows it.
  */
 export function headerParts(status) {
   const parts = [part(`last poll ${pollClock(status?.lastPoll)}`, "muted")]
@@ -272,6 +293,7 @@ export function headerParts(status) {
     parts.push(part(workspace.ok ? "✓" : "✗", workspace.ok ? "workspace-ok" : "workspace-fail"))
     if (workspace.error) parts.push(part(` ${workspace.error}`, "muted"))
   }
+  parts.push(...pollerParts(status?.poller))
   return parts
 }
 
@@ -457,7 +479,7 @@ export function settingsValue(field, value) {
  * server part, which refuses it and leaves the file alone.
  */
 export function fieldValue(field, text) {
-  if (field === "poll_seconds") return Number(text)
+  if (field === "poll_seconds" || field === "poll_minutes") return Number(text)
   if (field === "work_hours") return JSON.parse(text)
   return text
 }

@@ -20,6 +20,10 @@ export const KEYS = {
   status: key("status"),
   suspended: key("suspended"),
   today: key("today"),
+  // The thread poller's last cycle, and the newest-seen Slack `ts` per intake
+  // issue. The poller is the only writer of both.
+  poller: key("poller"),
+  watermarks: key("watermarks"),
 }
 
 /** The claims directory, one per namespace. */

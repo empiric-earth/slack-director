@@ -410,3 +410,136 @@ export async function searchFlagged({
   }
   return { hits: dedupe(hits), shape }
 }
+
+/** The Slack tools the poller reads conversations with. */
+export const READ_THREAD_TOOL = "slack_read_thread"
+export const READ_CHANNEL_TOOL = "slack_read_channel"
+
+/** The poller follows a read's next cursor for at most this many pages. */
+export const READ_PAGES = 5
+
+// A Slack message timestamp: `seconds.microseconds`, ten digits before the dot.
+const TS_FORM = /^\d{10}\.\d{6}$/
+
+/** Whether a value is in Slack's `ts` form. */
+export function isTimestamp(value) {
+  return typeof value === "string" && TS_FORM.test(value)
+}
+
+/**
+ * Every Slack `ts` value an answer carries, from the fields whose names end in
+ * `ts` — a message's `ts`, a `thread_ts`, or any other timestamp field — and
+ * never a value that is not in Slack's `ts` form. The answer's message text is
+ * never read: only a field line of the form `<name>_ts: <ts>` is matched in a
+ * report, so a timestamp-looking string inside a message is not taken.
+ */
+export function timestampsOf(result) {
+  const out = []
+  const collect = (value, key) => {
+    if (typeof value === "string") {
+      if (/(^|_)ts$/.test(key ?? "") && TS_FORM.test(value)) out.push(value)
+      return
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) collect(item, undefined)
+      return
+    }
+    if (value && typeof value === "object") {
+      for (const [name, child] of Object.entries(value)) collect(child, name)
+    }
+  }
+  collect(resultPayload(result), undefined)
+  for (const text of textOf(result?.content)) collectReport(text, out)
+  return out
+}
+
+/** `ts` values a markdown report gives on its own field lines. */
+function collectReport(text, out) {
+  if (typeof text !== "string") return
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^[ \t>*+-]*[A-Za-z][\w ]*_ts[ \t]*[:=][ \t]*(\d{10}\.\d{6})[ \t]*$/.exec(line)
+    if (match) out.push(match[1])
+  }
+}
+
+/** The newest of a list of Slack `ts` values, or undefined. */
+export function newestTs(values) {
+  let newest
+  for (const value of values ?? []) {
+    if (!isTimestamp(value)) continue
+    if (newest === undefined || Number(value) > Number(newest)) newest = value
+  }
+  return newest
+}
+
+/**
+ * Read one conversation through the Slack MCP server and answer the Slack `ts`
+ * values it holds, following the answer's next cursor for at most `pages`
+ * pages. Read-only: the only tool called is the one named. An answer that
+ * cannot be read is a failed read, and it is named in the answer rather than
+ * thrown, so one bad read never stops the cycle.
+ */
+export async function readMessages({
+  fetch,
+  url = SLACK_MCP_URL,
+  token,
+  tool,
+  args,
+  pages = READ_PAGES,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+}) {
+  const opened = await post({
+    fetch,
+    url,
+    token,
+    timeoutMs,
+    body: {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT },
+    },
+  })
+  if (opened.status === 401) return { unauthorized: true, timestamps: [] }
+  if (opened.status === 429) return { rateLimited: true, timestamps: [] }
+  if (opened.status < 200 || opened.status >= 300 || !opened.payload?.result) {
+    return { error: `Slack initialize failed: ${answerFailure(opened)}`, timestamps: [] }
+  }
+  const sessionID = opened.sessionID
+  await post({
+    fetch,
+    url,
+    token,
+    sessionID,
+    timeoutMs,
+    body: { jsonrpc: "2.0", method: "notifications/initialized" },
+  })
+
+  const timestamps = []
+  let cursor
+  let id = 2
+  for (let page = 0; page < pages; page += 1) {
+    const callArgs = cursor ? { ...args, cursor } : { ...args }
+    const call = await post({
+      fetch,
+      url,
+      token,
+      sessionID,
+      timeoutMs,
+      body: { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: tool, arguments: callArgs } },
+    })
+    if (call.status === 401) return { unauthorized: true, timestamps }
+    if (call.status === 429) return { rateLimited: true, timestamps }
+    const result = call.payload?.result
+    if (call.status < 200 || call.status >= 300 || !result) {
+      return { error: `Slack read failed: ${answerFailure(call)}`, timestamps }
+    }
+    if (rateLimited(result)) return { rateLimited: true, timestamps }
+    if (result.isError === true) return { error: `Slack read failed: ${toolErrorText(result)}`, timestamps }
+    timestamps.push(...timestampsOf(result))
+    const next = cursorOf(result)
+    if (!next || next === cursor) break
+    cursor = next
+  }
+  return { timestamps }
+}

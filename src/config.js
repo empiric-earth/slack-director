@@ -16,6 +16,8 @@ import { defaultWorkHours, normalizeWorkHours, validateWorkHours } from "./work-
 
 export const DEFAULT_FLAG_EMOJI = "oc"
 export const DEFAULT_POLL_SECONDS = 60
+/** The minutes between thread-poller cycles; `0` turns the poller off. */
+export const DEFAULT_POLL_MINUTES = 5
 export const DEFAULT_SESSION_AGENT = "slack-director"
 
 /** The fields a poll cannot run without. */
@@ -27,6 +29,7 @@ export const FIELD_NAMES = [
   "intake_repo",
   "session_directory",
   "poll_seconds",
+  "poll_minutes",
   "work_hours",
   "session_agent",
 ]
@@ -46,6 +49,7 @@ export function defaultConfig() {
     intake_repo: "",
     session_directory: "",
     poll_seconds: DEFAULT_POLL_SECONDS,
+    poll_minutes: DEFAULT_POLL_MINUTES,
     work_hours: defaultWorkHours(),
     session_agent: DEFAULT_SESSION_AGENT,
   }
@@ -68,6 +72,10 @@ export function fieldProblem(field, value) {
         : "config field invalid: session_directory"
     case "poll_seconds":
       return Number.isInteger(value) && value > 0 ? undefined : "config field invalid: poll_seconds"
+    case "poll_minutes":
+      // A non-negative integer: `0` turns the poller off, and a negative one
+      // or a fraction is refused.
+      return Number.isInteger(value) && value >= 0 ? undefined : "config field invalid: poll_minutes"
     case "work_hours":
       return validateWorkHours(value)
     case "session_agent":

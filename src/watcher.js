@@ -217,6 +217,23 @@ export function createWatcher({
     )
   }
 
+  /** The thread poller's last cycle, as its status key holds it. */
+  async function readPoller() {
+    return (
+      (await storage.get(KEYS.poller)) ?? {
+        lastCycle: null,
+        outcome: "never polled",
+        issues: 0,
+        threads: 0,
+        conversations: 0,
+        unattended: [],
+        ghError: null,
+        failed: [],
+        possiblyCut: false,
+      }
+    )
+  }
+
   async function readItems() {
     return (await storage.get(KEYS.items)) ?? {}
   }
@@ -805,7 +822,7 @@ export function createWatcher({
    */
   async function status() {
     const stored = await readStatus()
-    return { ...stored, today: await today() }
+    return { ...stored, today: await today(), poller: await readPoller() }
   }
 
   /**

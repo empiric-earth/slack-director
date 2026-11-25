@@ -51,10 +51,11 @@ export function yamlBlockOf(body) {
  * surrounding quotes are dropped.
  *
  * A field is kept even when its value is empty, so a scope marker's presence is
- * never lost: an empty `category:` still excludes the issue. A line whose key is
- * not a plain field name — a quoted key the reader cannot trust, a nested key —
- * makes the whole block unreadable rather than that one line dropped, so an
- * issue whose scope marker hides behind such a key is never read.
+ * never lost: an empty `category:` still excludes the issue. A line that is not
+ * a plain `key: value` field — a line with no key, a quoted key the reader
+ * cannot trust, a nested key — makes the whole block unreadable rather than
+ * that one line dropped, so an issue whose scope marker hides behind such a
+ * line is never read.
  */
 export function blockFields(text) {
   const fields = {}
@@ -63,7 +64,10 @@ export function blockFields(text) {
     const line = raw.trim()
     if (line === "" || line.startsWith("#")) continue
     const at = line.indexOf(":")
-    if (at <= 0) continue
+    // A line that is not a `key: value` field — an explicit mapping key, a list
+    // item, a continuation — is syntax this reader does not support, and a scope
+    // marker could hide in it, so the whole block is unreadable.
+    if (at <= 0) return undefined
     const key = line.slice(0, at).trim().replace(/^["'](.*)["']$/, "$1")
     if (!/^[A-Za-z_][\w-]*$/.test(key)) return undefined
     let value = line.slice(at + 1).replace(/\s+#.*$/, "").trim()
@@ -367,7 +371,11 @@ export function createPoller({
         // A cycle the unload aborted stops here: it prompts nothing more, so a
         // successor that already owns the timers is the only one that wakes.
         if (cancelled()) return undefined
-        if (await promptable(record)) {
+        const eligible = await promptable(record)
+        // The session lookup awaits; an unload that aborted during it must not
+        // prompt, so the boundary is checked again before the prompt.
+        if (cancelled()) return undefined
+        if (eligible) {
           const source = threadNewer && convNewer ? "both" : convNewer ? "conversation" : "thread"
           try {
             await session.prompt({

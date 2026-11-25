@@ -94,6 +94,7 @@ function harness({
   sessionTime = { busy: 0, idle: 5 },
   owner,
   signal,
+  onSessionGet,
 } = {}) {
   const storage = memoryStorage()
   const clock = { ms: NOW }
@@ -125,7 +126,10 @@ function harness({
     return respond(200, "{}")
   }
   const session = {
-    async get() { return { id: "ses_1", time: structuredClone(sessionTime) } },
+    async get() {
+      if (onSessionGet) await onSessionGet()
+      return { id: "ses_1", time: structuredClone(sessionTime) }
+    },
     async prompt(input) { prompts.push(input) },
     async create() { throw new Error("the poller creates no session") },
     async remove() { throw new Error("the poller removes no session") },
@@ -496,6 +500,27 @@ test("an empty category value still excludes the issue from every read", async (
   assert.equal(h.prompts.length, 0, "and it never wakes")
 })
 
+test("a yaml block with an explicit mapping key is rejected, so the issue is not read", async () => {
+  const h = harness({
+    issues: [
+      issueWithBody(11, [
+        "? category",
+        ": customer data",
+        "permalink: https://nexar.slack.com/archives/C0PROD/p1",
+        "workspace: slack_nexar",
+        "channel_id: C0PROD",
+        "channel_name: prod",
+        "thread_ts: 1795194443.137219",
+      ]),
+    ],
+    reads: () => answer([{ ts: tsOf(30) }]),
+  })
+  await h.run()
+  assert.equal(h.reads(READ_THREAD_TOOL).length, 0, "a block with unsupported syntax is not read")
+  assert.equal(h.prompts.length, 0, "and it never wakes")
+  assert.ok(h.logs.some((line) => /did not parse/.test(line)), "the log names the reason")
+})
+
 test("a yaml block with a key the reader cannot trust is rejected, so the issue is not read", async () => {
   const h = harness({
     issues: [
@@ -569,6 +594,40 @@ test("a successful answer the reader cannot read is a failed read, not an empty 
   assert.equal(h.watermarks()["11"].ts, tsOf(600), "an unreadable answer moves no watermark")
   assert.deepEqual(h.status().failed, [11], "the status names the issue")
   assert.ok(h.logs.some((line) => /issue #\d+ read failed/.test(line)))
+})
+
+test("a nonempty answer whose report holds no timestamp is a failed read, and a recognized empty one is not", async () => {
+  const link = "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219"
+  const setup = (reads) => {
+    const h = harness({
+      issues: [
+        openIssue(11, {
+          permalink: link,
+          workspace: "slack_nexar",
+          channel_id: "C0PLATFORM",
+          channel_name: "platform-help",
+          thread_ts: "1795194443.137219",
+        }),
+      ],
+      reads,
+    })
+    h.setItems({ [link]: recordFor(11, link) })
+    h.setWatermarks({ 11: { ts: tsOf(600), firstReadAt: new Date(NOW).toISOString() } })
+    return h
+  }
+  for (const messages of ["unrecognized nonempty report format", [{ text: "no timestamp field" }], ["a row"]]) {
+    const h = setup(() => reportAnswer({ messages }))
+    await h.run()
+    assert.deepEqual(h.status().failed, [11], "the status names the issue")
+    assert.equal(h.watermarks()["11"].ts, tsOf(600), "and no watermark moves")
+    assert.equal(h.prompts.length, 0)
+  }
+  for (const messages of ["", "No thread messsages", "No messages", []]) {
+    const h = setup(() => reportAnswer({ messages }))
+    await h.run()
+    assert.deepEqual(h.status().failed, [], "a recognized empty answer is a healthy read")
+    assert.equal(h.prompts.length, 0, "and wakes nothing")
+  }
 })
 
 test("a rate-limited read is reported and the watermark stays", async () => {
@@ -806,6 +865,8 @@ test("the block reader takes the fields, drops an inline comment and keeps a quo
   assert.deepEqual(blockFields('"category": x'), { category: "x" }, "a quoted key is the same key")
   assert.deepEqual(blockFields("category: \n"), { category: "" }, "an empty value keeps the marker")
   assert.equal(blockFields('"the category": x'), undefined, "a key the reader cannot trust rejects the block")
+  assert.equal(blockFields("? category\n: x\npermalink: https://x/p1"), undefined, "an explicit mapping key rejects the block")
+  assert.equal(blockFields("permalink: https://x/p1\n- item"), undefined, "a line that is not a field rejects the block")
 })
 
 test("tsOfIso and tsBefore give Slack's ts form", () => {
@@ -1002,6 +1063,31 @@ test("a cycle the unload aborts prompts nothing and writes no watermark", async 
   assert.equal(h.prompts.length, 0, "an aborted cycle sends no prompt")
   assert.equal(h.watermarks()["11"].ts, tsOf(600), "and writes no watermark")
   assert.equal(h.status().lastCycle, undefined, "and records no cycle")
+})
+
+test("an unload during the session lookup stops the wake before its prompt", async () => {
+  const link = "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219"
+  const controller = new AbortController()
+  const h = harness({
+    signal: controller.signal,
+    issues: [
+      openIssue(11, {
+        permalink: link,
+        workspace: "slack_nexar",
+        channel_id: "C0PLATFORM",
+        channel_name: "platform-help",
+        thread_ts: "1795194443.137219",
+      }),
+    ],
+    reads: () => answer([{ ts: tsOf(30) }]),
+    // The unload lands while the eligibility lookup is awaited.
+    onSessionGet: () => controller.abort(),
+  })
+  h.setItems({ [link]: recordFor(11, link) })
+  h.setWatermarks({ 11: { ts: tsOf(600), firstReadAt: new Date(NOW).toISOString() } })
+  await h.run()
+  assert.equal(h.prompts.length, 0, "a cycle aborted during the lookup sends no prompt")
+  assert.equal(h.watermarks()["11"].ts, tsOf(600), "and writes no watermark")
 })
 
 test("a read the unload aborts mid-flight ends the cycle with the last status and throws nothing", async () => {

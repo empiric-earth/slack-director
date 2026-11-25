@@ -523,13 +523,26 @@ export function newestTs(values) {
 // report this reader understands.
 const READ_REPORT_FIELDS = ["messages", "results", "hits"]
 
-/** Whether a read answer carries a report this reader can read. */
+// A report text the live read answers give for a conversation with no message.
+const EMPTY_REPORT = /^no\s+(?:thread\s+)?mess+ages?\b/i
+
+/** Whether a report field is one this reader recognizes as holding no message. */
+function emptyReport(value) {
+  if (Array.isArray(value)) return value.length === 0
+  if (typeof value === "string") return value.trim() === "" || EMPTY_REPORT.test(value.trim())
+  return false
+}
+
+/**
+ * Whether a read answer is one this reader understands: it yields at least one
+ * Slack `ts`, or a report field it recognizes as empty. A report field that
+ * holds content but no timestamp is a format the reader does not know, so it is
+ * unreadable rather than empty.
+ */
 export function readableAnswer(result) {
+  if (timestampsOf(result).length > 0) return true
   const payload = resultPayload(result)
-  return READ_REPORT_FIELDS.some((field) => {
-    const value = payload[field]
-    return typeof value === "string" || Array.isArray(value)
-  })
+  return READ_REPORT_FIELDS.some((field) => emptyReport(payload[field]))
 }
 
 /**

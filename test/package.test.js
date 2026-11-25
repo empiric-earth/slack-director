@@ -533,6 +533,19 @@ test("the skill keeps the item format, the data rule, the field sources and the 
   assert.match(flat, /never post a decision or a commitment/i, "no decisions or commitments")
 })
 
+test("the Slack-skills rule names no skill, and the customization hook is pinned by its fixed id", () => {
+  const skill = read(SKILL_REL)
+  const section = /^## The user's Slack skills\n([\s\S]*?)(?=\n## )/m.exec(skill)
+  assert.ok(section, "the skill keeps the user's Slack skills section")
+  assert.ok(!/`[^`]+`/.test(section[1]), "the user's Slack skills rule quotes no skill name")
+  const flat = skill.replace(/\s+/g, " ")
+  assert.ok(skill.includes("`my-slack-director`"), "the skill names the fixed customization id")
+  assert.match(flat, /never relaxes the safety rules/i, "the customization never relaxes the safety rules")
+  assert.match(flat, /load the skill with that id/i, "the customization is loaded by its id")
+  assert.match(flat, /before the steps of the first turn/i, "the customization loads before the first turn")
+  assert.match(flat, /when the load fails/i, "a failed load has a rule")
+})
+
 test("the skill bounds the first turn's writes and gives its reply's two lines", () => {
   const flat = read(SKILL_REL).replace(/\s+/g, " ")
   assert.match(

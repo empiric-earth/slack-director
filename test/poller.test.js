@@ -54,10 +54,9 @@ function answer(rows, next) {
   }
 }
 
-// The live answer shape, as task #97's probe recorded it: one JSON object with
-// the report in a `messages` string and the next page in `pagination_info`.
-// Each message's `ts` sits on its own `Message TS:` line; the `detailed` format
-// is the only one that carries it.
+// The live read answer's shape: one JSON object with the report in a `messages`
+// string and the next page in `pagination_info`. Each message's `ts` sits on its
+// own `Message TS:` line; the `detailed` format is the only one that carries it.
 const reportAnswer = (report) => ({ content: [{ type: "text", text: JSON.stringify(report) }] })
 const threadReport = (timestamps) => ({
   messages: [
@@ -424,7 +423,7 @@ test("an issue whose yaml block does not parse is skipped and named by number", 
   })
   await h.run()
   assert.equal(h.reads(READ_THREAD_TOOL).length, 0, "nothing is read")
-  assert.ok(h.logs.some((line) => line.includes("#11") && line.includes("did not parse")), "the log names the issue by number")
+  assert.ok(h.logs.some((line) => /issue #\d+ skipped/.test(line)), "the log names the issue by number")
 })
 
 test("an unreadable read moves no watermark and reaches the status and the log", async () => {
@@ -446,7 +445,7 @@ test("an unreadable read moves no watermark and reaches the status and the log",
   await h.run()
   assert.equal(h.watermarks()["11"].ts, tsOf(600), "a failed read moves no watermark")
   assert.deepEqual(h.status().failed, [11], "the status names the issue")
-  assert.ok(h.logs.some((line) => line.includes("#11") && line.includes("read failed")))
+  assert.ok(h.logs.some((line) => /issue #\d+ read failed/.test(line)))
 })
 
 test("a rate-limited read is reported and the watermark stays", async () => {

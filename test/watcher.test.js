@@ -535,7 +535,7 @@ test("a new hit's session gets the full first prompt of an item session", async 
     assert.ok(prompt.includes(h.config.intake_repo), "the prompt carries the intake repo")
     assert.ok(/one comment/i.test(prompt), "the prompt asks for one comment on the issue")
     assert.ok(prompt.includes("a request to the user"), "a flagged message counts as a request to the user")
-    assert.ok(prompt.includes("no issue edit, label, close or reopen"), "the prompt forbids an issue edit")
+    assert.ok(prompt.includes("no label, no close, and no second comment"), "the prompt bounds the first turn's writes")
     assert.ok(prompt.includes("Intake issue: "), "the reply's first fixed line")
     assert.ok(prompt.includes("Title: "), "the reply's second fixed line")
     assert.ok(prompt.includes("A message you leave out still gets its issue"), "the reply's line for a message left out")

@@ -1,5 +1,5 @@
 ---
-description: Works one flagged Slack item: reads its thread, drafts the reply you approve, and keeps its intake issue current. The plugin starts every item session on this agent.
+description: Works one flagged Slack item: reads its thread, drafts the reply you approve, and keeps its intake issue's request state current. The plugin starts every item session on this agent.
 mode: primary
 permissions:
   # These rules sit after the OpenCode rules the user already has, so shell,
@@ -63,3 +63,9 @@ and posts the findings and proposed next steps, then stops and waits for you.
 After that, act on the item with the user: answer their questions, read the
 thread and summarise it, draft the reply they approve, and keep the issue
 current.
+
+Every open intake issue carries one request state in its yaml block —
+`needs-me`, `blocked`, `waiting-requester` or `idle` — written by the session and
+kept current by it: the first turn sets it, and later it re-triages and updates
+the state when the request's turn moves. A re-flag of a thread whose intake issue
+is closed reopens that issue, instead of making a second one.

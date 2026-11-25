@@ -892,6 +892,30 @@ test("the new-activity prompt names the issue, its source and the watermark, and
   assert.match(text, /slack-director/)
 })
 
+test("the new-activity prompt asks for the conversation read when its source is the conversation", () => {
+  const conversation = newActivityPrompt({
+    issueUrl: "https://x/issues/11",
+    source: "conversation",
+    watermark: "1795194443.137219",
+  })
+  // A DM's or a group DM's unthreaded message is returned by the conversation
+  // read alone, so the wake for that source must ask for the conversation.
+  assert.match(
+    conversation,
+    /Read the DM's or group DM's conversation from 1795194443\.137219/,
+    "the conversation source reads the conversation, not only the thread",
+  )
+  assert.ok(!/Read the thread from/.test(conversation), "a conversation source does not read the thread only")
+  assert.match(conversation, /re-triage/, "the wake asks for a re-triage by the skill")
+  assert.match(conversation, /change its state when its turn moved/, "the wake asks for a state change")
+
+  const both = newActivityPrompt({ issueUrl: "https://x/issues/11", source: "both", watermark: "1795194443.137219" })
+  assert.match(both, /Read the thread and the DM's or group DM's conversation from/, "the both source names both reads")
+
+  const thread = newActivityPrompt({ issueUrl: "https://x/issues/11", source: "thread", watermark: "1795194443.137219" })
+  assert.match(thread, /Read the thread from/, "the thread source reads the thread")
+})
+
 test("the reader takes each message's ts from the live read answer shape", () => {
   const thread = reportAnswer(threadReport([tsOf(600), tsOf(300)]))
   assert.deepEqual(timestampsOf(thread), [tsOf(600), tsOf(300)], "a thread answer's Message TS lines")

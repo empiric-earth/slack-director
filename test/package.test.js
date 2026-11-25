@@ -543,7 +543,15 @@ test("the Slack-skills rule names no skill, and the customization hook is pinned
   assert.match(flat, /never relaxes the safety rules/i, "the customization never relaxes the safety rules")
   assert.match(flat, /load the skill with that id/i, "the customization is loaded by its id")
   assert.match(flat, /before the steps of the first turn/i, "the customization loads before the first turn")
-  assert.match(flat, /when the load fails/i, "a failed load has a rule")
+  // A failed load must both tell the user and stop every draft and send: the
+  // notification and the barrier are separate obligations, so neither one
+  // alone may satisfy this test.
+  assert.match(flat, /when the load fails, tell the user/i, "a failed load notifies the user")
+  assert.match(
+    flat,
+    /write no Slack draft and no send until it loads or the user tells you to go on without it/i,
+    "a failed load blocks every draft and send until the skill loads or the user goes on without it",
+  )
 })
 
 test("the skill bounds the first turn's writes and gives its reply's two lines", () => {

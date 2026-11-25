@@ -12,6 +12,14 @@ export const NAMESPACE = "item"
 
 const key = (name) => `${NAMESPACE}/${name}`
 
+/**
+ * How long one instance's lease keeps another from polling, shared by the flag
+ * scan and the thread poller. An instance's own lease never blocks it, so a tick
+ * is never skipped by the lease the tick before it left; a lease that outlives a
+ * configured interval still spares a second server process the same tick.
+ */
+export const LEASE_MS = 30_000
+
 /** The plugin storage keys, each under the namespace. */
 export const KEYS = {
   seen: key("seen"),

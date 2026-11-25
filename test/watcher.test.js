@@ -871,6 +871,11 @@ test("the item record reads as waiting before the first prompt is sent", async (
     assert.equal(atPrompt.firstTurnFailed, true)
     assert.equal(atPrompt.firstTurnEndedAt, null)
     assert.equal(atPrompt.sessionID, h.created[0].id)
+    assert.equal(
+      atPrompt.pollerFrom,
+      atPrompt.flaggedAt,
+      "a new item carries the instant this build's scan recorded it, so the poller baselines from its flag",
+    )
   } finally {
     h.clean()
   }

@@ -39,7 +39,7 @@ The dialog's shape, with one blank line between two groups that are shown:
 
 ```
 Slack Director                                                                            esc
-last poll 14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps · poller ✓ 11
+last poll 14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps · poller 14:32 ✓ 4 issues · 2 threads · 1 conversation
 
 ● 2 waiting for you   ◐ 1 working   ○ 1 idle
 
@@ -177,10 +177,10 @@ stays.
 - An open, in-scope issue whose session was deleted or archived is **unattended**:
   the poller still reads it — so a new message is noticed — but it is never
   woken and never given a new session. The overview's header shows the poller's
-  last cycle (the issues, threads and conversations read, a `gh` failure, a
-  rate-limited read, a possibly cut list), and the status lists each unattended
-  issue with its `permalink`, `state`, `state_since` and `asked_at`, and a mark
-  when its source has newer activity.
+  last cycle (its time, the issues, threads and conversations read, the
+  unattended issues, a `gh` failure, a rate-limited read, a possibly cut list),
+  and the status lists each unattended issue with its `permalink`, `state`,
+  `state_since` and `asked_at`, and a mark when its source has newer activity.
 - A session is titled after the flagged message's channel and its author until
   its first turn ends, and after the intake issue's title from then on.
 - Removing the flag from a message you have handled keeps the scan short: the

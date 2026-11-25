@@ -248,7 +248,7 @@ function deadline(ms, onExpire) {
  * the read of its body — and aborts the request too when the fetch honours the
  * signal, so one answer that never arrives cannot hold the poll.
  */
-async function post({ fetch, url, token, sessionID, body, timeoutMs = REQUEST_TIMEOUT_MS }) {
+async function post({ fetch, url, token, sessionID, body, timeoutMs = REQUEST_TIMEOUT_MS, signal }) {
   const headers = {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
@@ -257,6 +257,13 @@ async function post({ fetch, url, token, sessionID, body, timeoutMs = REQUEST_TI
   if (sessionID) headers["mcp-session-id"] = sessionID
   const controller = new AbortController()
   const { expired, cancel } = deadline(timeoutMs, () => controller.abort())
+  // A caller's own stop — the plugin unloading — aborts this request too, so an
+  // in-flight read never outlives the instance that started it.
+  const onAbort = () => controller.abort()
+  if (signal) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener("abort", onAbort, { once: true })
+  }
   try {
     const response = await Promise.race([
       fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal }),
@@ -270,6 +277,7 @@ async function post({ fetch, url, token, sessionID, body, timeoutMs = REQUEST_TI
     }
   } finally {
     cancel()
+    if (signal) signal.removeEventListener("abort", onAbort)
   }
 }
 
@@ -509,6 +517,21 @@ export function newestTs(values) {
   return newest
 }
 
+// The fields a read answer carries its report in. The live read answers are one
+// JSON object with `messages`; a search answer uses `results` or `hits`. An
+// answer with none of them — or with a value that is not a report — is not a
+// report this reader understands.
+const READ_REPORT_FIELDS = ["messages", "results", "hits"]
+
+/** Whether a read answer carries a report this reader can read. */
+export function readableAnswer(result) {
+  const payload = resultPayload(result)
+  return READ_REPORT_FIELDS.some((field) => {
+    const value = payload[field]
+    return typeof value === "string" || Array.isArray(value)
+  })
+}
+
 /**
  * Read one conversation through the Slack MCP server and answer the Slack `ts`
  * values it holds, following the answer's next cursor for at most `pages`
@@ -524,12 +547,14 @@ export async function readMessages({
   args,
   pages = READ_PAGES,
   timeoutMs = REQUEST_TIMEOUT_MS,
+  signal,
 }) {
   const opened = await post({
     fetch,
     url,
     token,
     timeoutMs,
+    signal,
     body: {
       jsonrpc: "2.0",
       id: 1,
@@ -549,6 +574,7 @@ export async function readMessages({
     token,
     sessionID,
     timeoutMs,
+    signal,
     body: { jsonrpc: "2.0", method: "notifications/initialized" },
   })
 
@@ -563,6 +589,7 @@ export async function readMessages({
       token,
       sessionID,
       timeoutMs,
+      signal,
       body: { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: tool, arguments: callArgs } },
     })
     if (call.status === 401) return { unauthorized: true, timestamps }
@@ -573,6 +600,10 @@ export async function readMessages({
     }
     if (rateLimited(result)) return { rateLimited: true, timestamps }
     if (result.isError === true) return { error: `Slack read failed: ${toolErrorText(result)}`, timestamps }
+    // A successful answer that carries no report the reader understands is a
+    // failed read, not an empty one: the watermark must not move on it. A
+    // changed report format must not make polling look healthy.
+    if (!readableAnswer(result)) return { error: "Slack read failed: the answer could not be read", timestamps }
     timestamps.push(...timestampsOf(result))
     const next = cursorOf(result)
     if (!next || next === cursor) break

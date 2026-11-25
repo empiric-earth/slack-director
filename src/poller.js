@@ -11,11 +11,12 @@
 // The poller writes nothing to GitHub and nothing to Slack. It keeps only Slack
 // `ts` values — never message text — and its log lines and status name issue
 // numbers and reasons, never an issue body.
+import { randomUUID } from "node:crypto"
 import { DEFAULT_POLL_MINUTES } from "./config.js"
 import { newActivityPrompt } from "./first-prompt.js"
 import { ISSUE_LIST_LIMIT, issueListArgs } from "./gh.js"
 import { readMessages, newestTs, READ_CHANNEL_TOOL, READ_FORMAT, READ_PAGES, READ_THREAD_TOOL, SLACK_MCP_URL } from "./slack-mcp.js"
-import { KEYS } from "./state.js"
+import { KEYS, LEASE_MS } from "./state.js"
 import { inWorkHours } from "./work-hours.js"
 
 export { DEFAULT_POLL_MINUTES }
@@ -46,8 +47,14 @@ export function yamlBlockOf(body) {
 /**
  * The fields of that block, one `key: value` line each. Answers undefined when
  * the block holds no field at all, which is how a block that does not parse is
- * told from an empty one. A `#` starts a comment, and a value's surrounding
- * quotes are dropped.
+ * told from an empty one. A `#` starts a comment, and a key's or a value's
+ * surrounding quotes are dropped.
+ *
+ * A field is kept even when its value is empty, so a scope marker's presence is
+ * never lost: an empty `category:` still excludes the issue. A line whose key is
+ * not a plain field name — a quoted key the reader cannot trust, a nested key —
+ * makes the whole block unreadable rather than that one line dropped, so an
+ * issue whose scope marker hides behind such a key is never read.
  */
 export function blockFields(text) {
   const fields = {}
@@ -57,12 +64,12 @@ export function blockFields(text) {
     if (line === "" || line.startsWith("#")) continue
     const at = line.indexOf(":")
     if (at <= 0) continue
-    const key = line.slice(0, at).trim()
-    if (!/^[A-Za-z_][\w-]*$/.test(key)) continue
+    const key = line.slice(0, at).trim().replace(/^["'](.*)["']$/, "$1")
+    if (!/^[A-Za-z_][\w-]*$/.test(key)) return undefined
     let value = line.slice(at + 1).replace(/\s+#.*$/, "").trim()
     value = value.replace(/^["'](.*)["']$/, "$1")
     any = true
-    if (value !== "") fields[key] = value
+    fields[key] = value
   }
   return any ? fields : undefined
 }
@@ -135,7 +142,15 @@ export function createPoller({
   requestTimeoutMs,
   pages = READ_PAGES,
   inHours = inWorkHours,
+  owner = randomUUID(),
+  leaseMs = LEASE_MS,
+  signal,
 }) {
+  // The instance's own stop. The plugin's unload aborts it, so a cycle still
+  // reading when the timers move to another instance makes no more prompt and
+  // writes no watermark: the successor's newer progress is never overwritten.
+  const cancelled = () => signal?.aborted === true
+
   async function writeStatus(status) {
     await storage.set(KEYS.poller, status)
     try {
@@ -187,11 +202,13 @@ export function createPoller({
       // `Message TS:` line, so the reader asks for it explicitly.
       args: { ...args, response_format: READ_FORMAT },
       pages,
+      signal,
       ...(requestTimeoutMs === undefined ? {} : { timeoutMs: requestTimeoutMs }),
     })
   }
 
   async function cycle(config, ranAt) {
+    if (cancelled()) return undefined
     const listed = await runGh(issueListArgs(config.intake_repo))
     if (!listed || listed.ok !== true) {
       const detail = ghFailureText(listed)
@@ -237,14 +254,17 @@ export function createPoller({
     let watermarksChanged = false
 
     for (const issue of issues) {
+      if (cancelled()) return undefined
       const block = yamlBlockOf(issue.body)
       const fields = block === undefined ? undefined : blockFields(block)
       if (!fields) {
         log(`poller: issue #${issue.number} skipped — its yaml block did not parse`)
         continue
       }
-      // A message the scope rules leave out is never read and never wakes.
-      if (typeof fields.category === "string" && fields.category !== "") continue
+      // A message the scope rules leave out is never read and never wakes. The
+      // marker counts whatever its value: a quoted key and an empty value both
+      // reach here; a block the reader cannot trust was skipped above.
+      if (Object.hasOwn(fields, "category")) continue
 
       issuesRead += 1
       const key = String(issue.number)
@@ -252,12 +272,17 @@ export function createPoller({
       const storedTs = typeof stored?.ts === "string" ? stored.ts : undefined
       const firstReadAt = typeof stored?.firstReadAt === "string" ? stored.firstReadAt : ranAt
       const record = recordFor(issue, fields)
-      const flaggedTs = record ? tsOfIso(record.flaggedAt) : undefined
 
-      // The effective watermark: what was stored, else a new item's flag minus
-      // 60 seconds, else (an issue no item record names) nothing yet.
+      // The effective watermark: what was stored, else the flag of an item this
+      // build recorded, minus 60 seconds, so a reply that arrived while its
+      // first turn ran is replayed once. An earlier build's item — a record with
+      // no `pollerFrom` — and an issue no item record names baseline at their
+      // first read, with no wake.
       let watermark = storedTs
-      if (watermark === undefined && record && flaggedTs !== undefined) watermark = tsBefore(flaggedTs, 60)
+      if (watermark === undefined && typeof record?.pollerFrom === "string") {
+        const flaggedTs = tsOfIso(record.pollerFrom)
+        if (flaggedTs !== undefined) watermark = tsBefore(flaggedTs, 60)
+      }
 
       const server = slackServer(servers, fields.workspace)
       const token = server ? await resolveCredential(fields.workspace) : undefined
@@ -336,9 +361,12 @@ export function createPoller({
 
       let moved
       if (storedTs === undefined && watermark === undefined) {
-        // A record with no flag time: start at this read's newest, with no wake.
+        // No baseline for this item: start at this read's newest, with no wake.
         moved = newest
       } else if (anyNewer) {
+        // A cycle the unload aborted stops here: it prompts nothing more, so a
+        // successor that already owns the timers is the only one that wakes.
+        if (cancelled()) return undefined
         if (await promptable(record)) {
           const source = threadNewer && convNewer ? "both" : convNewer ? "conversation" : "thread"
           try {
@@ -365,6 +393,9 @@ export function createPoller({
       }
     }
 
+    // An aborted cycle writes nothing: its watermark snapshot may already be
+    // older than the progress the successor made, and must not overwrite it.
+    if (cancelled()) return undefined
     if (watermarksChanged) await storage.set(KEYS.watermarks, nextWatermarks)
     return {
       lastCycle: ranAt,
@@ -389,7 +420,24 @@ export function createPoller({
     if (error) return { pollMinutes: minutes, status: previous }
     // Outside the work window nothing is read at all, like the flag scan.
     if (!inHours(config.work_hours, now())) return { pollMinutes: minutes, status: previous }
-    const status = await cycle(config, new Date(now()).toISOString())
+    // The lease guards a second server process: a foreign, unexpired lease
+    // spares this one the cycle, and this instance's own trip never blocks it.
+    const lease = await storage.get(KEYS.lease)
+    if (lease && lease.owner !== owner && typeof lease.expires === "number" && lease.expires > now()) {
+      return { pollMinutes: minutes, status: previous }
+    }
+    await storage.set(KEYS.lease, { owner, expires: now() + leaseMs })
+    let status
+    try {
+      status = await cycle(config, new Date(now()).toISOString())
+    } catch (error) {
+      // A read the unload aborted is not a failure: the cycle ends with the last
+      // cycle in place, and the successor carries on.
+      if (!cancelled()) throw error
+      return { pollMinutes: minutes, status: previous }
+    }
+    // An aborted cycle leaves the last cycle in place, not a half-finished one.
+    if (status === undefined) return { pollMinutes: minutes, status: previous }
     await writeStatus(status)
     return { pollMinutes: minutes, status }
   }

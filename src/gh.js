@@ -11,6 +11,14 @@ import { execFile } from "node:child_process"
 /** The most issues one read lists; a list of exactly this many is possibly cut. */
 export const ISSUE_LIST_LIMIT = 100
 
+/**
+ * How long one `gh` read may run before the child is killed. Well inside the
+ * shortest poller interval, so a hung `gh` — a stalled credential helper or a
+ * dead network — is a failed list of this cycle, never a poller that never runs
+ * again.
+ */
+export const GH_TIMEOUT_MS = 30_000
+
 /** The one `gh` argument list the poller runs. */
 export function issueListArgs(repo) {
   return [
@@ -29,20 +37,22 @@ export function issueListArgs(repo) {
 
 /**
  * The real runner: `gh` as one child process with the argument list it is
- * given, no shell. Answers `{ ok, code, stdout, stderr }`; a missing binary, no
- * login and a non-zero exit all reach the caller as `ok: false`, so the cycle
- * reports them and the next one runs.
+ * given, no shell, bounded by `timeoutMs`. Answers `{ ok, code, stdout, stderr }`;
+ * a missing binary, no login, a non-zero exit and an expired child all reach the
+ * caller as `ok: false`, so the cycle reports them and the next one runs.
  */
-export function createGhRunner({ exec = execFile, maxBuffer = 16 * 1024 * 1024 } = {}) {
+export function createGhRunner({ exec = execFile, maxBuffer = 16 * 1024 * 1024, timeoutMs = GH_TIMEOUT_MS } = {}) {
   return (args) =>
     new Promise((resolve) => {
-      exec("gh", args, { maxBuffer }, (error, stdout, stderr) => {
+      exec("gh", args, { maxBuffer, timeout: timeoutMs }, (error, stdout, stderr) => {
         if (error) {
+          const timedOut = error.killed === true || error.signal === "SIGTERM"
           resolve({
             ok: false,
             code: typeof error.code === "number" ? error.code : null,
+            timedOut,
             stdout: stdout ?? "",
-            stderr: (stderr ?? "") || (error.message ?? ""),
+            stderr: timedOut ? `gh timed out after ${timeoutMs} ms` : (stderr ?? "") || (error.message ?? ""),
           })
           return
         }

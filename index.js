@@ -82,12 +82,17 @@ export default {
     })
 
     const config = createConfigReader()
+    // One lease owner per server process, shared by the flag scan and the thread
+    // poller: one loop's lease trip never blocks the other, and a second server
+    // process is still spared both.
+    const owner = randomUUID()
     // The watcher's change notice goes out through the RPC registration, which
     // is created after it: the holders are filled in as soon as that returns.
     let emitUpdated = () => {}
     let emitRefused = () => {}
     const watcher = createWatcher({
       storage: ctx.storage,
+      owner,
       claims: createClaims({ dir: claimsDir(), randomID: () => randomUUID() }),
       // The reissue's own claim and commit files, beside the main claims.
       reissue: createClaims({ dir: reissueDir(), randomID: () => randomUUID() }),
@@ -103,9 +108,13 @@ export default {
       log,
     })
     // The thread poller shares the config reader, the MCP servers and the
-    // session API with the watcher. Its own timer runs beside the flag scan's.
+    // session API with the watcher. Its own timer runs beside the flag scan's,
+    // and the unload aborts it so an in-flight cycle writes nothing more.
+    const pollAbort = new AbortController()
     const poller = createPoller({
       storage: ctx.storage,
+      owner,
+      signal: pollAbort.signal,
       now: () => Date.now(),
       fetch: (url, init) => fetch(url, init),
       runGh: createGhRunner(),
@@ -234,6 +243,9 @@ export default {
       stopped = true
       clearTimeout(timer)
       clearTimeout(pollerTimer)
+      // Abort the poller before the timers move on: a cycle still reading makes
+      // no more prompt and writes no watermark after the successor takes over.
+      pollAbort.abort()
       controller.abort()
       // The watcher stops first: a close still in flight is abandoned before it
       // can remove anything the next install would not know about.

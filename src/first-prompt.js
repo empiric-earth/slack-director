@@ -4,16 +4,19 @@
 // the `slack-director` skill and the credential broker, and denies the shell
 // commands of the credentialed CLIs. The broker judges each of its calls
 // against the session's task, so the first prompt names the only GitHub writes
-// the first turn may make: one issue create and one comment.
+// the first turn may make: the lookup's one create or one reopen, the one state
+// edit of a found open issue that carries no `state`, and one comment.
 
 /**
  * The first prompt of an item session: find the intake issue for the permalink
- * — creating one only when no issue carries it, before either branch writes —
- * apply the skill's scope rules, read the thread, and post the findings and
- * next steps once. Every flagged message gets an issue; a message the scope
- * rules leave out gets the one the lookup found or made, holding the permalink
- * fields and its category only. The category is decided from what this prompt
- * already carries, so a session reads nothing to place a message it leaves out.
+ * — reopening the closed issue that carries it, or a closed issue of the same
+ * thread, and creating one only when neither lookup finds one, before either
+ * branch writes — apply the skill's scope rules, read the thread, and post the
+ * findings and next steps once. Every flagged message gets an issue; a message
+ * the scope rules leave out gets the one the lookup found or made, holding the
+ * permalink fields and its category only. The category is decided from what this
+ * prompt already carries, so a session reads nothing to place a message it
+ * leaves out.
  */
 export function itemFirstPrompt(hit, intakeRepo) {
   return [

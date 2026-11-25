@@ -656,6 +656,24 @@ test("the first prompt pins the request-state fields, the closed-issue lookup an
   )
 })
 
+test("the first prompt pins the create branch's state schema on its own", () => {
+  const hit = {
+    permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
+    workspace: "slack_nexar",
+    channel: { id: "C0PLATFORM", label: "#platform-help" },
+    ts: "1795194443.137219",
+  }
+  const prompt = itemFirstPrompt(hit, "empiric-earth/almeida-slack-intake")
+  // The create instruction's own sentence, alone: the reopen and found-open
+  // branches carry the field names too, so a schema broken in the create branch
+  // only must still fail here.
+  const createAt = prompt.indexOf("The issue you create carries")
+  assert.ok(createAt >= 0, "the prompt carries the create branch's schema instruction")
+  const sentence = prompt.slice(createAt, prompt.indexOf(".", createAt) + 1)
+  assert.ok(sentence.includes("`state: needs-me`"), "the create branch pins `state: needs-me`")
+  assert.ok(sentence.includes("`state_since`"), "the create branch pins `state_since`")
+})
+
 test("the Slack-skills rule names no skill, and the customization hook is pinned by its fixed id", () => {
   const skill = read(SKILL_REL)
   const section = /^## The user's Slack skills\n([\s\S]*?)(?=\n## )/m.exec(skill)

@@ -8,7 +8,7 @@ import { fieldProblem, DEFAULT_POLL_MINUTES, FIELD_NAMES } from "../src/config.j
 import { createGhRunner, issueListArgs, ISSUE_LIST_LIMIT } from "../src/gh.js"
 import { blockFields, createPoller, tsBefore, tsOfIso, yamlBlockOf } from "../src/poller.js"
 import { newActivityPrompt } from "../src/first-prompt.js"
-import { READ_CHANNEL_TOOL, READ_THREAD_TOOL, SLACK_MCP_URL } from "../src/slack-mcp.js"
+import { cursorOf, newestTs, READ_CHANNEL_TOOL, READ_THREAD_TOOL, SLACK_MCP_URL, timestampsOf } from "../src/slack-mcp.js"
 import { KEYS } from "../src/state.js"
 
 const NOW = Date.UTC(2026, 10, 18, 12, 0, 0)
@@ -53,6 +53,29 @@ function answer(rows, next) {
     ],
   }
 }
+
+// The live answer shape, as task #97's probe recorded it: one JSON object with
+// the report in a `messages` string and the next page in `pagination_info`.
+// Each message's `ts` sits on its own `Message TS:` line; the `detailed` format
+// is the only one that carries it.
+const reportAnswer = (report) => ({ content: [{ type: "text", text: JSON.stringify(report) }] })
+const threadReport = (timestamps) => ({
+  messages: [
+    "=== THREAD PARENT MESSAGE ===",
+    "From: Maria Costa (U123)",
+    `Message TS: ${timestamps[0]}`,
+    "> placeholder text",
+    ...timestamps.slice(1).map((ts) => `=== Reply ===\nMessage TS: ${ts}\n> placeholder text`),
+  ].join("\n"),
+  pagination_info: "There are no more messages in this thread.",
+})
+const dmReport = (timestamps) => ({
+  messages: [
+    "Channel: DM (D03KHBF103X)",
+    ...timestamps.map((ts) => `=== Message from Maria Costa (U123) at 12:00 UTC ===\nMessage TS: ${ts}\n> placeholder text`),
+  ].join("\n"),
+  pagination_info: "There are more messages available. To view the next page, use cursor: `abc123`",
+})
 
 function harness({
   issues = [],
@@ -644,4 +667,89 @@ test("the new-activity prompt names the issue, its source and the watermark, and
   assert.ok(text.includes("Source: both"))
   assert.ok(text.includes("1795194443.137219"))
   assert.match(text, /slack-director/)
+})
+
+test("the reader takes each message's ts from the live read answer shape", () => {
+  const thread = reportAnswer(threadReport([tsOf(600), tsOf(300)]))
+  assert.deepEqual(timestampsOf(thread), [tsOf(600), tsOf(300)], "a thread answer's Message TS lines")
+  assert.equal(cursorOf(thread), undefined, "a thread with no next page carries no cursor")
+  const dm = reportAnswer(dmReport([tsOf(300), tsOf(120)]))
+  assert.deepEqual(timestampsOf(dm), [tsOf(300), tsOf(120)], "a DM answer's Message TS lines")
+  assert.equal(cursorOf(dm), "abc123", "the DM's pagination line carries its cursor")
+  assert.equal(newestTs(timestampsOf(dm)), tsOf(120), "the newest is the most recent message")
+})
+
+test("a run of a message body that looks like a field is not taken, and a `ts`-named field still is", () => {
+  const report = reportAnswer({
+    messages: `Message TS: ${tsOf(600)}\n> Message TS: 1111111111.111111\n`,
+    pagination_info: "There are no more messages in this thread.",
+  })
+  // The quoted body's own line is indented by `> ` and is not a message's own
+  // field, so only the real line is taken; a message body may not add one.
+  assert.deepEqual(timestampsOf(report), [tsOf(600)])
+  const structured = { content: [{ type: "text", text: JSON.stringify({ messages: [{ ts: tsOf(30) }] }) }] }
+  assert.deepEqual(timestampsOf(structured), [tsOf(30)], "a structured `ts` field is still read")
+})
+
+test("a real DM answer with an unthreaded message newer than the watermark wakes with source `conversation`", async () => {
+  const link = "https://nexar.slack.com/archives/D03KHBF103X/p1795194443137219"
+  const h = harness({
+    issues: [
+      openIssue(11, {
+        permalink: link,
+        workspace: "slack_nexar",
+        channel_id: "D03KHBF103X",
+        channel_name: "DM",
+        thread_ts: "1795194443.137219",
+      }),
+    ],
+    reads: ({ name }) =>
+      name === READ_CHANNEL_TOOL ? reportAnswer(dmReport([tsOf(30)])) : reportAnswer(threadReport([tsOf(900)])),
+  })
+  h.setItems({ [link]: recordFor(11, link) })
+  h.setWatermarks({ 11: { ts: tsOf(600), firstReadAt: new Date(NOW).toISOString() } })
+  await h.run()
+  assert.equal(h.prompts.length, 1, "the unthreaded message wakes the session")
+  assert.ok(h.prompts[0].text.includes("Source: conversation"))
+  assert.equal(h.watermarks()["11"].ts, tsOf(30), "the watermark moves to the newest ts read")
+})
+
+test("a real thread answer with a new reply newer than the watermark wakes with source `thread`", async () => {
+  const link = "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219"
+  const h = harness({
+    issues: [
+      openIssue(11, {
+        permalink: link,
+        workspace: "slack_nexar",
+        channel_id: "C0PLATFORM",
+        channel_name: "platform-help",
+        thread_ts: "1795194443.137219",
+      }),
+    ],
+    reads: () => reportAnswer(threadReport([tsOf(900), tsOf(30)])),
+  })
+  h.setItems({ [link]: recordFor(11, link) })
+  h.setWatermarks({ 11: { ts: tsOf(600), firstReadAt: new Date(NOW).toISOString() } })
+  await h.run()
+  assert.equal(h.prompts.length, 1)
+  assert.ok(h.prompts[0].text.includes("Source: thread"))
+})
+
+test("every read asks for the detailed format, the only one that carries a message's ts", async () => {
+  const link = "https://nexar.slack.com/archives/D03KHBF103X/p1795194443137219"
+  const h = harness({
+    issues: [
+      openIssue(11, {
+        permalink: link,
+        workspace: "slack_nexar",
+        channel_id: "D03KHBF103X",
+        channel_name: "DM",
+        thread_ts: "1795194443.137219",
+      }),
+    ],
+    reads: () => reportAnswer(dmReport([tsOf(900)])),
+  })
+  await h.run()
+  assert.equal(h.reads(READ_THREAD_TOOL)[0].args.response_format, "detailed")
+  assert.equal(h.reads(READ_CHANNEL_TOOL)[0].args.response_format, "detailed")
 })

@@ -418,8 +418,21 @@ export const READ_CHANNEL_TOOL = "slack_read_channel"
 /** The poller follows a read's next cursor for at most this many pages. */
 export const READ_PAGES = 5
 
+/**
+ * The read answer's detail level. The default (`detailed`) is the only one that
+ * carries each message's `Message TS:` line; `concise` drops it, so the reader
+ * asks for `detailed` explicitly.
+ */
+export const READ_FORMAT = "detailed"
+
 // A Slack message timestamp: `seconds.microseconds`, ten digits before the dot.
 const TS_FORM = /^\d{10}\.\d{6}$/
+
+// The one line a read report gives a message's timestamp on: the field at the
+// start of a line, with nothing before it and nothing after the timestamp. A
+// message's body is quoted or indented, so a timestamp-looking line inside it
+// never matches.
+const MESSAGE_TS_LINE = /^message[\s_]*ts\s*[:=]\s*(\d{10}\.\d{6})\s*$/i
 
 /** Whether a value is in Slack's `ts` form. */
 export function isTimestamp(value) {
@@ -427,37 +440,61 @@ export function isTimestamp(value) {
 }
 
 /**
- * Every Slack `ts` value an answer carries, from the fields whose names end in
- * `ts` — a message's `ts`, a `thread_ts`, or any other timestamp field — and
- * never a value that is not in Slack's `ts` form. The answer's message text is
- * never read: only a field line of the form `<name>_ts: <ts>` is matched in a
- * report, so a timestamp-looking string inside a message is not taken.
+ * Every Slack `ts` value an answer carries. The live read answers are a JSON
+ * object whose `messages` field is one text report: each message's timestamp
+ * sits on its own `Message TS: <ts>` line, and the thread root carries none of
+ * the door fields. So the reader takes both routes — a `..._ts` field of a
+ * structured answer, and a `Message TS:` line of a report — and never a value
+ * that is not in Slack's `ts` form. A message's text is not read for timestamps
+ * beyond that final anchored line.
  */
 export function timestampsOf(result) {
   const out = []
-  const collect = (value, key) => {
+  const collectField = (value, key) => {
     if (typeof value === "string") {
       if (/(^|_)ts$/.test(key ?? "") && TS_FORM.test(value)) out.push(value)
       return
     }
     if (Array.isArray(value)) {
-      for (const item of value) collect(item, undefined)
+      for (const item of value) collectField(item, undefined)
       return
     }
     if (value && typeof value === "object") {
-      for (const [name, child] of Object.entries(value)) collect(child, name)
+      for (const [name, child] of Object.entries(value)) collectField(child, name)
     }
   }
-  collect(resultPayload(result), undefined)
-  for (const text of textOf(result?.content)) collectReport(text, out)
+  const payload = resultPayload(result)
+  collectField(payload, undefined)
+  for (const text of reportTexts(result, payload)) collectTsLines(text, out)
   return out
 }
 
-/** `ts` values a markdown report gives on its own field lines. */
-function collectReport(text, out) {
+/** Every text a read answer carries its report in: each string field, and the raw content. */
+function reportTexts(result, payload) {
+  const texts = []
+  const walk = (value) => {
+    if (typeof value === "string") {
+      texts.push(value)
+      return
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item)
+      return
+    }
+    if (value && typeof value === "object") {
+      for (const child of Object.values(value)) walk(child)
+    }
+  }
+  walk(payload)
+  for (const text of textOf(result?.content)) texts.push(text)
+  return texts
+}
+
+/** The `Message TS:` values a report text gives, one per line. */
+function collectTsLines(text, out) {
   if (typeof text !== "string") return
   for (const line of text.split(/\r?\n/)) {
-    const match = /^[ \t>*+-]*[A-Za-z][\w ]*_ts[ \t]*[:=][ \t]*(\d{10}\.\d{6})[ \t]*$/.exec(line)
+    const match = MESSAGE_TS_LINE.exec(line)
     if (match) out.push(match[1])
   }
 }

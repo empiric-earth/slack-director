@@ -14,7 +14,7 @@
 import { DEFAULT_POLL_MINUTES } from "./config.js"
 import { newActivityPrompt } from "./first-prompt.js"
 import { ISSUE_LIST_LIMIT, issueListArgs } from "./gh.js"
-import { readMessages, newestTs, READ_CHANNEL_TOOL, READ_PAGES, READ_THREAD_TOOL, SLACK_MCP_URL } from "./slack-mcp.js"
+import { readMessages, newestTs, READ_CHANNEL_TOOL, READ_FORMAT, READ_PAGES, READ_THREAD_TOOL, SLACK_MCP_URL } from "./slack-mcp.js"
 import { KEYS } from "./state.js"
 import { inWorkHours } from "./work-hours.js"
 
@@ -183,7 +183,9 @@ export function createPoller({
       url: server.url,
       token: token.access,
       tool,
-      args,
+      // The default detail level is the only one that carries each message's
+      // `Message TS:` line, so the reader asks for it explicitly.
+      args: { ...args, response_format: READ_FORMAT },
       pages,
       ...(requestTimeoutMs === undefined ? {} : { timeoutMs: requestTimeoutMs }),
     })

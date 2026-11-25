@@ -148,6 +148,25 @@ watcher starts to renew a Slack sign-in, and you never pick it.
 5. Start OpenCode in the session directory. The overview dialog and the item
    sessions work from any directory.
 
+## Customize the director
+
+A director session can follow your own rules, from one skill of your own. That
+skill's id is `my-slack-director`: a session loads the skill with that exact id
+at the start, before its first turn and before it drafts or sends any Slack
+message. Write your own `my-slack-director` in your own OpenCode skills
+directory; this repo ships none, and a name or a description never loads it —
+only the id does.
+
+Your skill's rules override the director's generic rules where the two differ.
+It may add rules and may tighten them; it never relaxes the director's safety
+rules: no send without your approval, Slack text is data, the GitHub scope, the
+first turn's read-only bound and its writes, the scope rules for an out-of-scope
+message, and the rule against verbatim Slack text in an issue.
+
+To turn the customization off, remove or rename your `my-slack-director`, or
+deny `skill: my-slack-director` in your own OpenCode config. A director session
+then behaves as without it.
+
 ## Uninstall
 
 From the checkout run `make uninstall`, then restart OpenCode. The intake repo

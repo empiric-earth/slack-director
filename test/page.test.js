@@ -34,6 +34,7 @@ import {
   pageRows,
   partsText,
   pollClock,
+  pollerCell,
   reconcileSelection,
   rowIDs,
   rowParts,
@@ -182,6 +183,52 @@ test("the title row, the header line, the counts line, the today line and the fo
   assert.equal(footerText(), "↵ session   i issue   s slack   r refresh   e settings   d done")
   assert.ok(footerText().includes("d done"), "the footer names the d key")
   assert.equal(sidebarText(rows), "Slack Director  2 waiting · 1 working")
+})
+
+test("the poller cell shows its cycle time, its distinct reason and what the cycle read", () => {
+  assert.equal(pollerCell(undefined), undefined, "nothing is shown before a cycle")
+  assert.equal(pollerCell({ lastCycle: null }), undefined)
+  assert.equal(
+    pollerCell({
+      lastCycle: "2026-11-19T14:32:00.000Z",
+      outcome: "ok",
+      issues: 11,
+      threads: 4,
+      conversations: 2,
+      unattended: [],
+      failed: [],
+      possiblyCut: false,
+    }),
+    "poller 14:32 ✓ 11 issues · 4 threads · 2 conversations",
+  )
+  assert.equal(
+    pollerCell({
+      lastCycle: "2026-11-19T14:32:00.000Z",
+      outcome: "rate limited",
+      issues: 11,
+      threads: 4,
+      conversations: 2,
+      unattended: [{}],
+      failed: [7],
+      possiblyCut: true,
+    }),
+    "poller 14:32 ✗ rate limited · 11 issues · 4 threads · 2 conversations · 1 unattended · list cut at 100",
+    "throttling is told from a sign-in problem, and an incomplete list is not hidden by a failure",
+  )
+  assert.equal(
+    pollerCell({
+      lastCycle: "2026-11-19T14:32:00.000Z",
+      outcome: "gh failed: not logged in",
+      issues: 0,
+      threads: 0,
+      conversations: 0,
+      unattended: [],
+      failed: [],
+      ghError: "not logged in",
+      possiblyCut: false,
+    }),
+    "poller 14:32 ✗ not logged in · 0 issues · 0 threads · 0 conversations",
+  )
 })
 
 test("no line names a STATE column, and the dialog carries no table header", () => {

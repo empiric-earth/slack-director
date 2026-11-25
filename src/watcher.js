@@ -52,22 +52,16 @@ import { DEFAULT_POLL_SECONDS } from "./config.js"
 import { itemFirstPrompt, closePrompt, refreshPrompt } from "./first-prompt.js"
 import { closeReply, contextMessages, parseReply, replyText } from "./reply.js"
 import { REQUEST_TIMEOUT_MS, searchFlagged, SLACK_MCP_URL } from "./slack-mcp.js"
-import { KEYS } from "./state.js"
+import { KEYS, LEASE_MS } from "./state.js"
 import { inWorkHours } from "./work-hours.js"
+
+export { LEASE_MS }
 
 /** The agent a refresh session runs on. */
 export const REFRESH_AGENT = "slack-director-refresh"
 
 /** The record form this build writes; a record without it is an earlier build's. */
 export const RECORD_FORMAT = 2
-
-/**
- * How long one instance's lease keeps another from polling. An instance's own
- * lease never blocks it, so a tick is never skipped by the lease the tick
- * before it left; a lease that outlives a configured interval still spares a
- * second instance the same tick.
- */
-export const LEASE_MS = 30_000
 
 /** The status of a workspace whose credential cannot be renewed. */
 export const SUSPENDED_ERROR = "sign-in expired — run /mcps"
@@ -168,8 +162,8 @@ export function createWatcher({
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
   inHours = inWorkHours,
   reissue = NO_REISSUE,
+  owner = randomUUID(),
 }) {
-  const owner = randomUUID()
   // The item sessions this instance started and whose first turn it is still
   // waiting on. A turn-end event completes the item only for one of these, so a
   // later turn, or a turn whose start this instance never saw, cannot.
@@ -213,6 +207,23 @@ export function createWatcher({
         workspaces: [],
         configError: null,
         today: emptyToday(),
+      }
+    )
+  }
+
+  /** The thread poller's last cycle, as its status key holds it. */
+  async function readPoller() {
+    return (
+      (await storage.get(KEYS.poller)) ?? {
+        lastCycle: null,
+        outcome: "never polled",
+        issues: 0,
+        threads: 0,
+        conversations: 0,
+        unattended: [],
+        ghError: null,
+        failed: [],
+        possiblyCut: false,
       }
     )
   }
@@ -536,6 +547,7 @@ export function createWatcher({
       log(`session create failed for ${hit.permalink}: ${messageOf(error)}`)
       return
     }
+    const flaggedAt = new Date(now()).toISOString()
     const record = {
       permalink: hit.permalink,
       workspace: hit.workspace,
@@ -543,7 +555,11 @@ export function createWatcher({
       channelID: hit.channel.id,
       ts: hit.ts,
       asker: hit.asker ?? "",
-      flaggedAt: new Date(now()).toISOString(),
+      flaggedAt,
+      // The instant this build's flag scan recorded the item: the poller starts
+      // a new item's first watermark here. A record without it is an earlier
+      // build's, whose item the poller baselines without a wake.
+      pollerFrom: flaggedAt,
       title,
       sessionID: created.id,
       issueNumber: null,
@@ -805,7 +821,7 @@ export function createWatcher({
    */
   async function status() {
     const stored = await readStatus()
-    return { ...stored, today: await today() }
+    return { ...stored, today: await today(), poller: await readPoller() }
   }
 
   /**

@@ -260,9 +260,47 @@ export function titleParts() {
   return [part(PAGE_TITLE, "title", true), part("esc", "muted", false, "close")]
 }
 
+/** One count with its noun in the right number. */
+const countLabel = (count, one, many) => `${count} ${count === 1 ? one : many}`
+
 /**
- * The header line: the last poll, then each workspace with its mark. A failing
- * workspace's mark carries the warning colour and its reason follows it.
+ * The poller's one cell: the time of its last cycle, whether it was healthy, the
+ * distinct reason when it was not, and what it read — the issues, threads and
+ * conversations, the unattended issues and a possibly cut list. Nothing is shown
+ * until a cycle has run.
+ */
+export function pollerCell(poller) {
+  if (!poller || typeof poller.lastCycle !== "string") return undefined
+  const details = [
+    countLabel(poller.issues ?? 0, "issue", "issues"),
+    countLabel(poller.threads ?? 0, "thread", "threads"),
+    countLabel(poller.conversations ?? 0, "conversation", "conversations"),
+  ]
+  const unattended = Array.isArray(poller.unattended) ? poller.unattended.length : 0
+  if (unattended > 0) details.push(countLabel(unattended, "unattended", "unattended"))
+  if (poller.possiblyCut) details.push("list cut at 100")
+  const detail = details.join(" · ")
+  const clock = pollClock(poller.lastCycle)
+  // The distinct reason the last cycle recorded, so throttling is never read as
+  // a sign-in problem and an incomplete list is never hidden by a failure.
+  const reason = typeof poller.outcome === "string" && poller.outcome !== "" ? poller.outcome : "read failed"
+  if (poller.ghError) return `poller ${clock} ✗ ${poller.ghError} · ${detail}`
+  if (Array.isArray(poller.failed) && poller.failed.length > 0) return `poller ${clock} ✗ ${reason} · ${detail}`
+  return `poller ${clock} ✓ ${detail}`
+}
+
+/** The poller cell's parts, with a failing cell in the warning colour. */
+function pollerParts(poller) {
+  const cell = pollerCell(poller)
+  if (cell === undefined) return []
+  const failed = cell.includes("✗") || cell.includes("!")
+  return [part(" · ", "muted"), part(cell, failed ? "workspace-fail" : "workspace-ok")]
+}
+
+/**
+ * The header line: the last poll, then each workspace with its mark, then the
+ * poller's one cell, when it has run. A failing workspace's mark carries the
+ * warning colour and its reason follows it.
  */
 export function headerParts(status) {
   const parts = [part(`last poll ${pollClock(status?.lastPoll)}`, "muted")]
@@ -272,6 +310,7 @@ export function headerParts(status) {
     parts.push(part(workspace.ok ? "✓" : "✗", workspace.ok ? "workspace-ok" : "workspace-fail"))
     if (workspace.error) parts.push(part(` ${workspace.error}`, "muted"))
   }
+  parts.push(...pollerParts(status?.poller))
   return parts
 }
 
@@ -457,7 +496,7 @@ export function settingsValue(field, value) {
  * server part, which refuses it and leaves the file alone.
  */
 export function fieldValue(field, text) {
-  if (field === "poll_seconds") return Number(text)
+  if (field === "poll_seconds" || field === "poll_minutes") return Number(text)
   if (field === "work_hours") return JSON.parse(text)
   return text
 }

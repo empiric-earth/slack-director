@@ -71,10 +71,31 @@ export function itemFirstPrompt(hit, intakeRepo) {
 }
 
 /**
+ * The "new activity" prompt the poller sends to an item session. It names the
+ * issue, the source the activity is in (`thread`, `conversation` or both) and
+ * the watermark it is newer than, and carries no Slack text: the session reads
+ * the named source from that `ts` itself.
+ */
+export function newActivityPrompt({ issueUrl, source, watermark }) {
+  const where =
+    source === "both" ? "the thread and the conversation" : source === "conversation" ? "the conversation" : "the thread"
+  return [
+    "There is new activity on this item.",
+    "",
+    `Intake issue: ${issueUrl}`,
+    `Source: ${source}`,
+    `Newer than: ${watermark}`,
+    "",
+    `Read ${where} from ${watermark} with the Slack read tools, then follow the \`slack-director\` skill: re-triage the request and update its state.`,
+    "",
+    "Then stop, and take no other action.",
+  ].join("\n")
+}
+
+/**
  * The prompt of a refresh session: one Slack search through OpenCode's own MCP
  * client, whose request renews the workspace's credential.
- */
-export function refreshPrompt(workspace) {
+ */export function refreshPrompt(workspace) {
   return [
     `Run one Slack search on the ${workspace} server, then stop.`,
     "",

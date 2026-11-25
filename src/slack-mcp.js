@@ -248,7 +248,7 @@ function deadline(ms, onExpire) {
  * the read of its body — and aborts the request too when the fetch honours the
  * signal, so one answer that never arrives cannot hold the poll.
  */
-async function post({ fetch, url, token, sessionID, body, timeoutMs = REQUEST_TIMEOUT_MS }) {
+async function post({ fetch, url, token, sessionID, body, timeoutMs = REQUEST_TIMEOUT_MS, signal }) {
   const headers = {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
@@ -257,6 +257,13 @@ async function post({ fetch, url, token, sessionID, body, timeoutMs = REQUEST_TI
   if (sessionID) headers["mcp-session-id"] = sessionID
   const controller = new AbortController()
   const { expired, cancel } = deadline(timeoutMs, () => controller.abort())
+  // A caller's own stop — the plugin unloading — aborts this request too, so an
+  // in-flight read never outlives the instance that started it.
+  const onAbort = () => controller.abort()
+  if (signal) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener("abort", onAbort, { once: true })
+  }
   try {
     const response = await Promise.race([
       fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: controller.signal }),
@@ -270,6 +277,7 @@ async function post({ fetch, url, token, sessionID, body, timeoutMs = REQUEST_TI
     }
   } finally {
     cancel()
+    if (signal) signal.removeEventListener("abort", onAbort)
   }
 }
 
@@ -409,4 +417,210 @@ export async function searchFlagged({
     cursor = next
   }
   return { hits: dedupe(hits), shape }
+}
+
+/** The Slack tools the poller reads conversations with. */
+export const READ_THREAD_TOOL = "slack_read_thread"
+export const READ_CHANNEL_TOOL = "slack_read_channel"
+
+/** The poller follows a read's next cursor for at most this many pages. */
+export const READ_PAGES = 5
+
+/**
+ * The read answer's detail level. The default (`detailed`) is the only one that
+ * carries each message's `Message TS:` line; `concise` drops it, so the reader
+ * asks for `detailed` explicitly.
+ */
+export const READ_FORMAT = "detailed"
+
+// A Slack message timestamp: `seconds.microseconds`, ten digits before the dot.
+const TS_FORM = /^\d{10}\.\d{6}$/
+
+// The one line a read report gives a message's timestamp on: the field at the
+// start of a line, with nothing before it and nothing after the timestamp. A
+// message's body is quoted or indented, so a timestamp-looking line inside it
+// never matches.
+const MESSAGE_TS_LINE = /^message[\s_]*ts\s*[:=]\s*(\d{10}\.\d{6})\s*$/i
+
+/** Whether a value is in Slack's `ts` form. */
+export function isTimestamp(value) {
+  return typeof value === "string" && TS_FORM.test(value)
+}
+
+/**
+ * Every Slack `ts` value an answer carries. The live read answers are a JSON
+ * object whose `messages` field is one text report: each message's timestamp
+ * sits on its own `Message TS: <ts>` line, and the thread root carries none of
+ * the door fields. So the reader takes both routes — a `..._ts` field of a
+ * structured answer, and a `Message TS:` line of a report — and never a value
+ * that is not in Slack's `ts` form. A message's text is not read for timestamps
+ * beyond that final anchored line.
+ */
+export function timestampsOf(result) {
+  const out = []
+  const collectField = (value, key) => {
+    if (typeof value === "string") {
+      if (/(^|_)ts$/.test(key ?? "") && TS_FORM.test(value)) out.push(value)
+      return
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) collectField(item, undefined)
+      return
+    }
+    if (value && typeof value === "object") {
+      for (const [name, child] of Object.entries(value)) collectField(child, name)
+    }
+  }
+  const payload = resultPayload(result)
+  collectField(payload, undefined)
+  for (const text of reportTexts(result, payload)) collectTsLines(text, out)
+  return out
+}
+
+/** Every text a read answer carries its report in: each string field, and the raw content. */
+function reportTexts(result, payload) {
+  const texts = []
+  const walk = (value) => {
+    if (typeof value === "string") {
+      texts.push(value)
+      return
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item)
+      return
+    }
+    if (value && typeof value === "object") {
+      for (const child of Object.values(value)) walk(child)
+    }
+  }
+  walk(payload)
+  for (const text of textOf(result?.content)) texts.push(text)
+  return texts
+}
+
+/** The `Message TS:` values a report text gives, one per line. */
+function collectTsLines(text, out) {
+  if (typeof text !== "string") return
+  for (const line of text.split(/\r?\n/)) {
+    const match = MESSAGE_TS_LINE.exec(line)
+    if (match) out.push(match[1])
+  }
+}
+
+/** The newest of a list of Slack `ts` values, or undefined. */
+export function newestTs(values) {
+  let newest
+  for (const value of values ?? []) {
+    if (!isTimestamp(value)) continue
+    if (newest === undefined || Number(value) > Number(newest)) newest = value
+  }
+  return newest
+}
+
+// The fields a read answer carries its report in. The live read answers are one
+// JSON object with `messages`; a search answer uses `results` or `hits`. An
+// answer with none of them — or with a value that is not a report — is not a
+// report this reader understands.
+const READ_REPORT_FIELDS = ["messages", "results", "hits"]
+
+// A report text the live read answers give for a conversation with no message.
+const EMPTY_REPORT = /^no\s+(?:thread\s+)?mess+ages?\b/i
+
+/** Whether a report field is one this reader recognizes as holding no message. */
+function emptyReport(value) {
+  if (Array.isArray(value)) return value.length === 0
+  if (typeof value === "string") return value.trim() === "" || EMPTY_REPORT.test(value.trim())
+  return false
+}
+
+/**
+ * Whether a read answer is one this reader understands: it yields at least one
+ * Slack `ts`, or a report field it recognizes as empty. A report field that
+ * holds content but no timestamp is a format the reader does not know, so it is
+ * unreadable rather than empty.
+ */
+export function readableAnswer(result) {
+  if (timestampsOf(result).length > 0) return true
+  const payload = resultPayload(result)
+  return READ_REPORT_FIELDS.some((field) => emptyReport(payload[field]))
+}
+
+/**
+ * Read one conversation through the Slack MCP server and answer the Slack `ts`
+ * values it holds, following the answer's next cursor for at most `pages`
+ * pages. Read-only: the only tool called is the one named. An answer that
+ * cannot be read is a failed read, and it is named in the answer rather than
+ * thrown, so one bad read never stops the cycle.
+ */
+export async function readMessages({
+  fetch,
+  url = SLACK_MCP_URL,
+  token,
+  tool,
+  args,
+  pages = READ_PAGES,
+  timeoutMs = REQUEST_TIMEOUT_MS,
+  signal,
+}) {
+  const opened = await post({
+    fetch,
+    url,
+    token,
+    timeoutMs,
+    signal,
+    body: {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: PROTOCOL_VERSION, capabilities: {}, clientInfo: CLIENT },
+    },
+  })
+  if (opened.status === 401) return { unauthorized: true, timestamps: [] }
+  if (opened.status === 429) return { rateLimited: true, timestamps: [] }
+  if (opened.status < 200 || opened.status >= 300 || !opened.payload?.result) {
+    return { error: `Slack initialize failed: ${answerFailure(opened)}`, timestamps: [] }
+  }
+  const sessionID = opened.sessionID
+  await post({
+    fetch,
+    url,
+    token,
+    sessionID,
+    timeoutMs,
+    signal,
+    body: { jsonrpc: "2.0", method: "notifications/initialized" },
+  })
+
+  const timestamps = []
+  let cursor
+  let id = 2
+  for (let page = 0; page < pages; page += 1) {
+    const callArgs = cursor ? { ...args, cursor } : { ...args }
+    const call = await post({
+      fetch,
+      url,
+      token,
+      sessionID,
+      timeoutMs,
+      signal,
+      body: { jsonrpc: "2.0", id: id++, method: "tools/call", params: { name: tool, arguments: callArgs } },
+    })
+    if (call.status === 401) return { unauthorized: true, timestamps }
+    if (call.status === 429) return { rateLimited: true, timestamps }
+    const result = call.payload?.result
+    if (call.status < 200 || call.status >= 300 || !result) {
+      return { error: `Slack read failed: ${answerFailure(call)}`, timestamps }
+    }
+    if (rateLimited(result)) return { rateLimited: true, timestamps }
+    if (result.isError === true) return { error: `Slack read failed: ${toolErrorText(result)}`, timestamps }
+    // A successful answer that carries no report the reader understands is a
+    // failed read, not an empty one: the watermark must not move on it. A
+    // changed report format must not make polling look healthy.
+    if (!readableAnswer(result)) return { error: "Slack read failed: the answer could not be read", timestamps }
+    timestamps.push(...timestampsOf(result))
+    const next = cursorOf(result)
+    if (!next || next === cursor) break
+    cursor = next
+  }
+  return { timestamps }
 }

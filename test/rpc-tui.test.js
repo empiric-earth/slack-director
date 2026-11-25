@@ -48,6 +48,7 @@ const CONFIG = {
   intake_repo: "empiric-earth/almeida-slack-intake",
   session_directory: "/home/someone/notes",
   poll_seconds: 60,
+  poll_minutes: 5,
   work_hours: HOURS,
   session_agent: "slack-director",
 }
@@ -700,7 +701,7 @@ test("e on the dialog opens the settings dialog", async () => {
   assert.equal(selections.length, 1, "one select list")
   assert.deepEqual(
     selections[0].options.map((option) => option.title),
-    ["flag_emoji", "intake_repo", "session_directory", "poll_seconds", "work_hours", "session_agent"],
+    ["flag_emoji", "intake_repo", "session_directory", "poll_seconds", "poll_minutes", "work_hours", "session_agent"],
     "every config field is a row",
   )
   assert.equal(selections[0].options[3].description, "60", "the row shows the field's current value")
@@ -1343,7 +1344,7 @@ test("the settings dialog shows a field's value, prompts for it and saves it thr
   await tui.setup(context)
   await layers[0].commands[1].run()
   assert.equal(selections.length, 1, "one select list")
-  assert.equal(selections[0].options[5].description, "slack-director", "the row shows the agent in use")
+  assert.equal(selections[0].options[6].description, "slack-director", "the row shows the agent in use")
   assert.equal(prompts[0].title, "Slack Director: session_agent")
   assert.match(toasts.at(-1).message, /session_agent saved/)
 })

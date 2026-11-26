@@ -13,11 +13,14 @@ import { SlackDirectorRpc } from "../rpc.js"
 import { schemaProblem } from "./schema.js"
 import {
   DIALOG_INSET,
+  NEW_ACTIVITY_MARK,
+  NO_SESSION_MARK,
   PAGE_TITLE,
-  STATE_MARK,
+  SESSION_MARK,
   countsText,
   footerParts,
   footerText,
+  hasSession,
   headerText,
   moveSelection,
   pageRows,
@@ -27,7 +30,16 @@ import {
   titleParts,
   todayText,
 } from "../src/page.js"
-import tui, { COMMAND_ID, SETTINGS_COMMAND_ID, createTui, dialogView, roleColour, selectedBackground } from "../tui.js"
+import tui, {
+  COMMAND_ID,
+  NO_SESSION_CLOSE_NOTICE,
+  NO_SESSION_OPEN_NOTICE,
+  SETTINGS_COMMAND_ID,
+  createTui,
+  dialogView,
+  roleColour,
+  selectedBackground,
+} from "../tui.js"
 
 const NOW = Date.parse("2026-11-19T14:32:00.000Z")
 const HOURS = { days: ["Mon", "Tue", "Wed", "Thu", "Fri"], start: "09:00", end: "18:00", time_zone: "UTC" }
@@ -82,13 +94,18 @@ const ITEM = {
   title: "Access to the staging dashboards",
   issueNumber: 41,
   issueUrl: "https://github.com/empiric-earth/almeida-slack-intake/issues/41",
+  requestState: "needs-me",
+  stateSince: null,
+  blockedOn: null,
+  waitingOn: [],
+  issueClosed: false,
   firstTurnEndedAt: "2026-11-19T14:31:00.000Z",
   firstTurnFailed: false,
   permissionPending: false,
   openedAt: null,
 }
 
-/** A second item, opened and quiet, so the dialog holds two rows. */
+/** A second item, in the Idle section, so the dialog holds two rows. */
 const SECOND = {
   ...ITEM,
   permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137220",
@@ -98,6 +115,35 @@ const SECOND = {
   issueUrl: "https://github.com/empiric-earth/almeida-slack-intake/issues/40",
   flaggedAt: "2026-11-19T13:32:00.000Z",
   openedAt: "2026-11-19T14:00:00.000Z",
+  requestState: "idle",
+}
+
+/** One unattended open issue, as the poller's last cycle serves it. */
+const UNATTENDED = {
+  number: 36,
+  url: "https://github.com/empiric-earth/almeida-slack-intake/issues/36",
+  title: "Nuno Ferreira — VPN profile for the contractors",
+  permalink: "https://nexar.slack.com/archives/C0IT/p1795194400999000",
+  state: "blocked",
+  state_since: "2026-11-19T09:32:00.000Z",
+  asked_at: "2026-11-18T08:32:00.000Z",
+  newActivity: true,
+}
+
+/** The status with one poller cycle, carrying the unattended issue. */
+const STATUS_WITH_POLLER = {
+  ...STATUS,
+  poller: {
+    lastCycle: "2026-11-19T14:32:00.000Z",
+    outcome: "ok",
+    issues: 11,
+    threads: 4,
+    conversations: 2,
+    unattended: [UNATTENDED],
+    ghError: null,
+    failed: [],
+    possiblyCut: false,
+  },
 }
 
 function fakeTuiContext({
@@ -113,6 +159,9 @@ function fakeTuiContext({
   // The item map the contract serves. `setItems` swaps it, so a test drives a
   // refresh with rows that appeared, reordered or left.
   let currentItems = items
+  // The status the contract serves. `setStatus` swaps it, so a test drives a
+  // refresh with a poller cycle that read another list of issues.
+  let currentStatus = status
   const layers = []
   const dropped = []
   const toasts = []
@@ -173,7 +222,7 @@ function fakeTuiContext({
           async status() {
             calls.push("status")
             if (rejection) throw rejection
-            return status
+            return currentStatus
           },
           async items() {
             calls.push("items")
@@ -241,6 +290,9 @@ function fakeTuiContext({
     setItems: (next) => {
       currentItems = next
     },
+    setStatus: (next) => {
+      currentStatus = next
+    },
   }
 }
 
@@ -298,11 +350,14 @@ const lineText = (line) =>
 
 const childWith = (line, text) => lineChildren(line).find((child) => child.props.content === text)
 
-const STATE_MARKS = Object.values(STATE_MARK)
-
-/** The dialog's row lines: each holds exactly one state mark. */
+/**
+ * The dialog's row lines: a row starts at its own inset, with a gutter bar, so
+ * its first part is one space and it carries more than one part. Every other
+ * line — the title, the header, the counts, a section header, the today line and
+ * the footer — starts with its own text.
+ */
 const rowLines = (view) =>
-  drawnLines(view).filter((line) => lineChildren(line).filter((child) => STATE_MARKS.includes(child.props.content)).length === 1)
+  drawnLines(view).filter((line) => lineChildren(line).length > 1 && lineChildren(line)[0].props.content === " ")
 
 /** Render the dialog with these rows and this theme, through the stub renderer. */
 function viewOf(rows, { status = STATUS, selected = () => 0, theme = THEME, now = () => NOW, hours = () => HOURS } = {}) {
@@ -401,6 +456,17 @@ test("the RPC contract defines every method and every event with a schema", () =
   assert.deepEqual(status.output.required, ["lastPoll", "outcome", "workspaces", "configError", "today"])
   assert.deepEqual(status.output.properties.workspaces.items.required, ["name", "ok", "error"])
   assert.deepEqual(status.output.properties.today.required, ["flagged", "nextStepsPosted", "skipped"])
+  const poller = status.output.properties.poller
+  assert.deepEqual(
+    poller.properties.unattended.items.required,
+    ["number", "url", "title", "permalink", "state", "state_since", "asked_at", "newActivity"],
+    "an unattended issue carries what a row needs, from the poller's own status",
+  )
+  assert.equal(
+    schemaProblem(status.output, STATUS_WITH_POLLER),
+    undefined,
+    "a status whose poller read one unattended issue fits the contract",
+  )
 })
 
 test("the contract's config schema carries the flag emoji and the session agent, and not the retired field", () => {
@@ -430,11 +496,19 @@ test("the contract's schemas describe the answers it names, and reject a value t
     "title",
     "issueNumber",
     "issueUrl",
+    "requestState",
+    "stateSince",
+    "blockedOn",
+    "waitingOn",
+    "issueClosed",
     "firstTurnEndedAt",
     "firstTurnFailed",
     "permissionPending",
     "openedAt",
   ])
+  assert.equal(item.properties.requestState.type, "string", "the request state the poller read is served")
+  assert.deepEqual(item.properties.waitingOn.items, { type: "string" })
+  assert.equal(item.properties.issueClosed.type, "boolean", "a closed issue is told from an open one")
   const config = SlackDirectorRpc.methods.getConfig.output
   assert.equal(schemaProblem(config, { config: CONFIG }), undefined, "the config fits")
   assert.match(schemaProblem(config, { config: { ...CONFIG, poll_seconds: "60" } }), /poll_seconds is not an integer/)
@@ -555,6 +629,77 @@ test("the keys act on the row the marker marks", async () => {
   secondModal.commands.find((entry) => entry.bind === "s").run()
   assert.deepEqual(spawned.at(-2).args, [SECOND.issueUrl], "i opens the marked row's intake issue")
   assert.deepEqual(spawned.at(-1).args, [SECOND.permalink], "s opens the marked row's Slack message")
+})
+
+test("an unattended open issue takes one row from the poller's status, with the no session and new activity marks", async () => {
+  const fake = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [ITEM] })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  const view = renderDialog(fake.dialogs)
+  const rows = rowLines(view)
+  const rowTexts = rows.map(lineText)
+  const texts = drawnLines(view).map(lineText)
+
+  assert.equal(rows.length, 2, "the item and the unattended issue take one row each")
+  const orphan = rowTexts.find((text) => text.includes(UNATTENDED.title.split(" — ")[1]))
+  assert.ok(orphan, "the unattended issue shows the request its issue title names")
+  assert.ok(orphan.includes(NO_SESSION_MARK), "its row carries the no session mark")
+  assert.ok(orphan.includes(NEW_ACTIVITY_MARK), "and the new activity flag the status carries")
+  assert.ok(texts.includes("Blocked"), "it sits in the section of the state its issue carries")
+  assert.ok(
+    lineText(rows[0]).includes(UNATTENDED.title.split(" — ")[1]) === false,
+    "the item with a session keeps its own row",
+  )
+})
+
+test("the unattended row leaves the dialog once the poller's list no longer carries its issue", async () => {
+  const fake = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [] })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  const view = renderDialog(fake.dialogs)
+  assert.equal(rowLines(view).length, 1, "the open issue no item record names takes a row")
+
+  const updated = fake.eventHandlers.find(([name]) => name === "updated")[1]
+  fake.setStatus({ ...STATUS_WITH_POLLER, poller: { ...STATUS_WITH_POLLER.poller, unattended: [] } })
+  updated({})
+  await tick()
+  assert.equal(rowLines(view).length, 0, "a complete list without the issue leaves no row behind")
+})
+
+test("enter and d on an unattended row open no session and close nothing", async () => {
+  const fake = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [] })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+  const modal = modalLayer(fake.layers)
+  const command = (bind) => modal.commands.find((entry) => entry.bind === bind)
+
+  command("return").run()
+  await tick()
+  assert.deepEqual(fake.opened, [], "no session is marked read, and none is opened")
+  assert.deepEqual(fake.navigations, [], "no session is opened for an unattended issue")
+  assert.ok(fake.toasts.at(-1).message.includes(NO_SESSION_OPEN_NOTICE), "the dialog says it has no session")
+  assert.equal(fake.cleared.length, 0, "the overview stays up, so the row is still there to act on")
+
+  command("d").run()
+  await tick()
+  assert.deepEqual(fake.doneInputs, [], "no close is requested")
+  assert.deepEqual(fake.confirms, [], "and no confirm is asked for it")
+  assert.ok(fake.toasts.at(-1).message.includes(NO_SESSION_CLOSE_NOTICE), "the dialog says the issue is closed on GitHub")
+})
+
+test("i and s on an unattended row open its issue and its message from the poller's status", async () => {
+  const spawned = []
+  const fake = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [] })
+  await renderedRecordedTui(spawned).setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+  const modal = modalLayer(fake.layers)
+
+  modal.commands.find((entry) => entry.bind === "i").run()
+  modal.commands.find((entry) => entry.bind === "s").run()
+  assert.deepEqual(spawned.at(-2).args, [UNATTENDED.url], "i opens the unattended issue")
+  assert.deepEqual(spawned.at(-1).args, [UNATTENDED.permalink], "s opens the message the poller reported")
 })
 
 test("an opener that cannot start is reported instead of failing silently", async () => {
@@ -968,7 +1113,7 @@ test("a click in a gap between two controls runs nothing", async () => {
   assert.equal(spacers.length, 5, "a spacer sits between each pair of controls")
   for (const spacer of spacers) assert.equal("onMouseUp" in spacer.props, false, "a gap cell carries no handler")
   assert.equal("onMouseUp" in childWith(drawnLines(view)[0], PAGE_TITLE).props, false, "the dialog's name is not a control")
-  assert.equal("onMouseUp" in childWith(drawnLines(view)[5], "Waiting for you").props, false, "a heading is not a control")
+  assert.equal("onMouseUp" in childWith(drawnLines(view)[5], "Needs me").props, false, "a heading is not a control")
 
   // Nothing happened: no link opened, no session opened, no poll, no dialog.
   assert.deepEqual(spawned, [], "no link was opened")
@@ -1371,7 +1516,7 @@ test("a settings dialog the user closes changes nothing", async () => {
 })
 
 test("the dialog draws the title, the header, the counts, the sections, the rows, the today line and the footer in order", () => {
-  const rows = pageRows([ITEM, SECOND], () => ({ running: false, pending: 0 }))
+  const rows = pageRows([ITEM, SECOND], (item) => ({ running: item.sessionID === ITEM.sessionID, pending: 0 }))
   const view = viewOf(rows)
   const lines = drawnLines(view)
 
@@ -1386,14 +1531,14 @@ test("the dialog draws the title, the header, the counts, the sections, the rows
   assert.equal(lineText(lines[2]), "", "a blank line separates the blocks")
   assert.equal(lineText(lines[3]), countsText(rows))
   assert.equal(lines[4].props.content, "", "the counts line is followed by a blank line")
-  const waiting = childWith(lines[5], "Waiting for you")
-  assert.ok(waiting, "the first section is Waiting for you")
+  const needsMe = childWith(lines[5], "Needs me")
+  assert.ok(needsMe, "the first section is Needs me")
   assert.equal(lines[5].props.paddingLeft, DIALOG_INSET, "a section header shares the title's left edge")
   assert.equal(lineText(lines[6]), rowText(rows[0], { selected: true, now: NOW, hours: HOURS }))
   assert.equal(
-    lineText(lines[6]).indexOf(STATE_MARK.waiting),
+    lineText(lines[6]).indexOf(SESSION_MARK.running),
     DIALOG_INSET,
-    "and the row's mark aligns with it",
+    "and the row's session mark aligns with it",
   )
   assert.equal(lineText(lines[7]), "", "exactly one blank line separates the two visible groups")
   assert.equal(childWith(lines[8], "Idle") !== undefined, true, "the idle section follows, with no empty section")
@@ -1405,27 +1550,27 @@ test("the dialog draws the title, the header, the counts, the sections, the rows
 })
 
 test("exactly one blank line separates two visible groups, and none sits under a heading", () => {
-  const rowOf = (state, sessionID) => ({ item: { ...ITEM, sessionID }, state })
+  const rowOf = (state, sessionID, session = {}) => ({ item: { ...ITEM, sessionID, requestState: state }, state, session })
   const texts = (view) => drawnLines(view).map((line) => lineText(line))
 
   // Three groups shown: one blank line between each pair, and each heading's
   // next line is its first row, never a blank.
-  const waiting = rowOf("waiting", "ses_1")
-  const working = rowOf("working", "ses_2")
+  const needsMe = rowOf("needs-me", "ses_1")
+  const blocked = rowOf("blocked", "ses_2")
   const idle = rowOf("idle", "ses_3")
-  const three = viewOf([waiting, working, idle])
+  const three = viewOf([needsMe, blocked, idle])
   const threeTexts = texts(three)
   assert.deepEqual(threeTexts, [
     partsText(titleParts()),
     headerText(STATUS),
     "",
-    countsText([waiting, working, idle]),
+    countsText([needsMe, blocked, idle]),
     "",
-    "Waiting for you",
-    rowText(waiting, { selected: true, now: NOW, hours: HOURS }),
+    "Needs me",
+    rowText(needsMe, { selected: true, now: NOW, hours: HOURS }),
     "",
-    "Working",
-    rowText(working, { selected: false, now: NOW, hours: HOURS }),
+    "Blocked",
+    rowText(blocked, { selected: false, now: NOW, hours: HOURS }),
     "",
     "Idle",
     rowText(idle, { selected: false, now: NOW, hours: HOURS }),
@@ -1441,14 +1586,14 @@ test("exactly one blank line separates two visible groups, and none sits under a
   const single = viewOf([idle])
   assert.deepEqual(texts(single).slice(4, 9), ["", "Idle", rowText(idle, { selected: true, now: NOW, hours: HOURS }), "", todayText(STATUS)])
 
-  // Two groups that are not adjacent — waiting and idle, with working absent —
+  // Two groups that are not adjacent — needs-me and idle, with blocked absent —
   // still take exactly one blank line between them.
-  const apart = viewOf([waiting, idle])
+  const apart = viewOf([needsMe, idle])
   const apartTexts = texts(apart)
   assert.deepEqual(apartTexts.slice(4, 9), [
     "",
-    "Waiting for you",
-    rowText(waiting, { selected: true, now: NOW, hours: HOURS }),
+    "Needs me",
+    rowText(needsMe, { selected: true, now: NOW, hours: HOURS }),
     "",
     "Idle",
   ])
@@ -1466,50 +1611,58 @@ test("a failing workspace's mark takes the warning colour, and the rest of the h
   assert.equal(childWith(header, "last poll 14:32").props.fg, THEME.text.muted)
 })
 
-test("only the mark takes a state colour: the title is base text and the rest of the row is muted", () => {
+test("only the session mark takes a state colour: the title is base text and the rest of the row is muted", () => {
   const rows = [
-    { item: ITEM, state: "waiting" },
-    { item: SECOND, state: "working" },
-    { item: { ...SECOND, sessionID: "ses_3" }, state: "idle" },
+    { item: { ...ITEM, requestState: "needs-me" }, state: "needs-me", session: { pending: 1 } },
+    { item: { ...SECOND, requestState: "blocked" }, state: "blocked", session: { running: true } },
+    { item: { ...SECOND, sessionID: "ses_3", requestState: "idle" }, state: "idle", session: {} },
   ]
   const view = viewOf(rows)
-  const [waiting, working, idle] = rowLines(view)
+  const [pending, running, idle] = rowLines(view)
 
   // The mark takes exactly step 200 of the theme's hue scale.
-  assert.equal(childWith(waiting, "●").props.fg, THEME.hue.orange[200])
-  assert.equal(childWith(working, "◐").props.fg, THEME.hue.blue[200])
-  assert.equal(childWith(idle, "○").props.fg, THEME.text.muted)
+  assert.equal(childWith(pending, SESSION_MARK.pending).props.fg, THEME.hue.orange[200])
+  assert.equal(childWith(running, SESSION_MARK.running).props.fg, THEME.hue.blue[200])
+  assert.equal(childWith(idle, NO_SESSION_MARK), undefined, "a quiet row carries no mark at all")
 
   // ITEM is base text, and it is not the state colour.
-  const waitingItem = lineChildren(waiting)[5]
-  assert.equal(waitingItem.props.fg, THEME.text.base, "ITEM is base text on a waiting row")
-  assert.notEqual(waitingItem.props.fg, THEME.hue.orange[200], "the whole row is not the state colour")
-  assert.equal(lineChildren(working)[5].props.fg, THEME.text.base, "ITEM is base text on a working row")
+  const pendingItem = lineChildren(pending)[5]
+  assert.equal(pendingItem.props.fg, THEME.text.base, "ITEM is base text on a row that needs the user")
+  assert.notEqual(pendingItem.props.fg, THEME.hue.orange[200], "the whole row is not the state colour")
+  assert.equal(lineChildren(running)[5].props.fg, THEME.text.base, "ITEM is base text on a blocked row")
   assert.equal(lineChildren(idle)[5].props.fg, THEME.text.muted, "an idle row is muted throughout")
 
   // ASKER, CHANNEL and the issue number are muted on every row.
-  for (const line of [waiting, working, idle]) {
+  for (const line of [pending, running, idle]) {
     for (const index of [7, 9, 11]) assert.equal(lineChildren(line)[index].props.fg, THEME.text.muted)
   }
 })
 
 test("a theme without an orange or a blue hue falls back to the warning and info colours", () => {
   const rows = [
-    { item: ITEM, state: "waiting" },
-    { item: SECOND, state: "working" },
+    { item: { ...ITEM, requestState: "needs-me" }, state: "needs-me", session: { pending: 1 } },
+    { item: { ...SECOND, requestState: "blocked" }, state: "blocked", session: { running: true } },
   ]
   const view = viewOf(rows, { theme: THEME_NO_HUES })
-  const [waiting, working] = rowLines(view)
-  assert.equal(childWith(waiting, "●").props.fg, THEME.text.feedback.warning.base, "the waiting mark falls back to warning")
-  assert.equal(childWith(working, "◐").props.fg, THEME.text.feedback.info.base, "the working mark falls back to info")
+  const [pending, running] = rowLines(view)
+  assert.equal(
+    childWith(pending, SESSION_MARK.pending).props.fg,
+    THEME.text.feedback.warning.base,
+    "the permission mark falls back to warning",
+  )
+  assert.equal(
+    childWith(running, SESSION_MARK.running).props.fg,
+    THEME.text.feedback.info.base,
+    "the running mark falls back to info",
+  )
   assert.equal(roleColour(THEME_NO_HUES, "state-waiting"), THEME.text.feedback.warning.base)
   assert.equal(roleColour(THEME, "state-waiting"), THEME.hue.orange[200])
 })
 
 test("the selected row takes the focused background and the bar, and no other row does", () => {
   const rows = [
-    { item: ITEM, state: "waiting" },
-    { item: SECOND, state: "working" },
+    { item: { ...ITEM, requestState: "needs-me" }, state: "needs-me", session: {} },
+    { item: { ...SECOND, requestState: "blocked" }, state: "blocked", session: {} },
   ]
   const view = viewOf(rows)
   const [first, second] = rowLines(view)
@@ -1519,18 +1672,20 @@ test("the selected row takes the focused background and the bar, and no other ro
   assert.equal(childWith(second, "┃"), undefined, "only the selected row draws the bar")
 })
 
-test("the counts line's marks take their state colours and its text is muted", () => {
+test("the counts line counts by request state, its numbers in base text and its labels muted", () => {
   const rows = [
-    { item: ITEM, state: "waiting" },
-    { item: SECOND, state: "working" },
-    { item: { ...SECOND, sessionID: "ses_3" }, state: "idle" },
+    { item: { ...ITEM, requestState: "needs-me" }, state: "needs-me", session: {} },
+    { item: { ...ITEM, sessionID: "ses_4", requestState: "needs-me" }, state: "needs-me", session: {} },
+    { item: { ...SECOND, requestState: "blocked" }, state: "blocked", session: {} },
   ]
   const view = viewOf(rows)
   const counts = drawnLines(view)[3]
-  assert.equal(childWith(counts, "●").props.fg, THEME.hue.orange[200])
-  assert.equal(childWith(counts, "◐").props.fg, THEME.hue.blue[200])
-  assert.equal(childWith(counts, "○").props.fg, THEME.text.muted)
-  assert.equal(childWith(counts, " 1 waiting for you").props.fg, THEME.text.muted)
+  assert.equal(childWith(counts, "2 ").props.fg, THEME.text.base, "a count is base text")
+  assert.equal(childWith(counts, "2 ").props.attributes, BOLD, "and bold")
+  assert.equal(childWith(counts, "needs me").props.fg, THEME.text.muted)
+  assert.equal(childWith(counts, "1 ").props.fg, THEME.text.base)
+  assert.equal(childWith(counts, "blocked").props.fg, THEME.text.muted)
+  assert.equal(childWith(counts, "waiting on requester").props.fg, THEME.text.muted)
 })
 
 test("the title and the section header and the footer's keys are bold, and their labels are muted", () => {
@@ -1539,7 +1694,7 @@ test("the title and the section header and the footer's keys are bold, and their
   assert.equal(childWith(lines[0], PAGE_TITLE).props.attributes, BOLD, "the title is bold")
   assert.equal(childWith(lines[0], PAGE_TITLE).props.fg, THEME.text.base)
   assert.equal(childWith(lines[0], "esc").props.fg, THEME.text.muted, "esc is muted")
-  const section = childWith(lines[5], "Waiting for you")
+  const section = childWith(lines[5], "Needs me")
   assert.equal(section.props.attributes, BOLD, "the section header is bold")
   assert.equal(section.props.fg, THEME.text.muted, "and muted")
   const footer = lines.at(-2)
@@ -1550,20 +1705,21 @@ test("the title and the section header and the footer's keys are bold, and their
 
 test("AGE's colour is the theme's own: base, then warning from 4 working hours, then error from one day", () => {
   const flagged = (text) => ({ ...ITEM, flaggedAt: text })
-  const warn = viewOf([{ item: flagged("2026-11-19T10:00:00Z"), state: "waiting" }], { now: () => Date.parse("2026-11-19T14:00:00Z") })
-  const error = viewOf([{ item: flagged("2026-11-19T09:00:00Z"), state: "waiting" }], { now: () => Date.parse("2026-11-19T18:00:00Z") })
-  const calm = viewOf([{ item: flagged("2026-11-19T14:30:00Z"), state: "waiting" }])
+  const rowOf = (item) => ({ item, state: "needs-me", session: {} })
+  const warn = viewOf([rowOf(flagged("2026-11-19T10:00:00Z"))], { now: () => Date.parse("2026-11-19T14:00:00Z") })
+  const error = viewOf([rowOf(flagged("2026-11-19T09:00:00Z"))], { now: () => Date.parse("2026-11-19T18:00:00Z") })
+  const calm = viewOf([rowOf(flagged("2026-11-19T14:30:00Z"))])
   assert.equal(lineChildren(rowLines(calm)[0])[13].props.fg, THEME.text.base, "under four working hours is base text")
   assert.equal(lineChildren(rowLines(warn)[0])[13].props.fg, THEME.text.feedback.warning.base, "exactly four working hours warns")
   assert.equal(lineChildren(rowLines(error)[0])[13].props.fg, THEME.text.feedback.error.base, "one working day errors")
 })
 
-test("the sidebar line carries the counts", async () => {
+test("the sidebar line carries the needs-me and blocked counts", async () => {
   const { context, slots } = fakeTuiContext()
   await tui.setup(context)
   const rows = pageRows([ITEM], () => ({ running: false, pending: 0 }))
-  assert.equal(sidebarText(rows), "Slack Director  1 waiting · 0 working")
-  assert.equal(countsText(rows), "● 1 waiting for you   ◐ 0 working   ○ 0 idle")
+  assert.equal(sidebarText(rows), "Slack Director  1 needs me · 0 blocked")
+  assert.equal(countsText(rows), "1 needs me   0 blocked   0 waiting on requester   0 idle")
   assert.equal(typeof slots[0].render, "function")
 })
 

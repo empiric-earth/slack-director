@@ -102,6 +102,7 @@ function harness({
   const prompts = []
   const mcpCalls = []
   const ghCalls = []
+  const stateCalls = []
   const cfg = {
     flag_emoji: "oc",
     intake_repo: "empiric-earth/almeida-slack-intake",
@@ -150,6 +151,10 @@ function harness({
     mcpServers: async () => servers,
     session,
     log: (message) => logs.push(message),
+    applyIssueStates: async (input) => {
+      stateCalls.push(input)
+      return true
+    },
   })
   return {
     storage,
@@ -159,6 +164,7 @@ function harness({
     prompts,
     mcpCalls,
     ghCalls,
+    stateCalls,
     poller,
     run: () => poller.run(),
     reads: (name) => mcpCalls.filter((call) => call.name === name),
@@ -1170,4 +1176,86 @@ test("a read the unload aborts mid-flight ends the cycle with the last status an
   assert.equal(result.status.lastCycle, previous.lastCycle, "the last cycle is answered unchanged")
   assert.deepEqual(storage.map.get(KEYS.poller), previous, "and nothing is written over it")
   assert.equal(storage.map.get(KEYS.watermarks), undefined, "and no watermark is written")
+})
+
+test("a cycle hands the request state of every open issue over, in scope or not", async () => {
+  const h = harness({
+    issues: [
+      openIssue(7, {
+        permalink: "p7",
+        workspace: "slack_nexar",
+        channel_id: "C0PLATFORM",
+        channel_name: "#platform-help",
+        thread_ts: tsOf(600),
+        state: "blocked",
+        state_since: "2026-11-18T09:00:00.000Z",
+        blocked_on: "https://example.test/decisions/1",
+      }),
+      openIssue(8, {
+        permalink: "p8",
+        workspace: "slack_nexar",
+        channel_id: "D03KHBF103X",
+        channel_name: "DM",
+        thread_ts: tsOf(700),
+        state: "waiting-requester",
+        state_since: "2026-11-18T10:00:00.000Z",
+        waiting_on: "[U0000000001, U0000000002]",
+      }),
+      openIssue(9, { permalink: "p9", category: "customer-data" }),
+      issueWithBody(10, ["permalink: p10", "workspace: slack_nexar"]),
+      { number: 11, url: "https://github.com/empiric-earth/almeida-slack-intake/issues/11", title: "Request 11", body: "no yaml block here" },
+    ],
+    reads: () => answer([]),
+  })
+  const result = await h.run()
+
+  assert.equal(h.stateCalls.length, 1, "one cycle hands its read over once")
+  const [call] = h.stateCalls
+  assert.equal(call.complete, true, "a list under the limit is a complete read")
+  assert.deepEqual(
+    call.issues.map((entry) => entry.number),
+    [7, 8, 9, 10, 11],
+    "every open issue is named, an out-of-scope one included",
+  )
+  assert.deepEqual(call.issues[0], {
+    number: 7,
+    state: "blocked",
+    stateSince: "2026-11-18T09:00:00.000Z",
+    blockedOn: "https://example.test/decisions/1",
+    waitingOn: [],
+  })
+  assert.equal(call.issues[1].state, "waiting-requester")
+  assert.deepEqual(call.issues[1].waitingOn, ["U0000000001", "U0000000002"], "a waiting_on list is read as its ids")
+  assert.equal(call.issues[2].state, undefined, "an out-of-scope issue names no state")
+  assert.equal(call.issues[3].state, undefined, "an issue whose block names no state carries none")
+  assert.deepEqual(
+    call.issues[4],
+    { number: 11, state: undefined, stateSince: undefined, blockedOn: undefined, waitingOn: [] },
+    "an issue whose block does not parse still names its number",
+  )
+  assert.equal(result.status.issues, 3, "the scope rules still decide which issues are read from Slack")
+})
+
+test("a list at the limit is handed over as possibly cut, and a failed list hands nothing over", async () => {
+  const cut = harness({
+    issues: Array.from({ length: ISSUE_LIST_LIMIT }, (_, index) => issueWithBody(index + 1, ["permalink: p", "state: idle"])),
+    reads: () => answer([]),
+  })
+  await cut.run()
+  assert.equal(cut.stateCalls[0].complete, false, "a list at the limit proves nothing about an issue it does not name")
+  assert.equal(cut.stateCalls[0].issues.length, ISSUE_LIST_LIMIT, "and still hands over every issue it names")
+  assert.equal(cut.stateCalls[0].issues[0].state, "idle")
+
+  const failed = harness({ gh: async () => ({ ok: false, code: 1, stdout: "", stderr: "not logged in" }) })
+  await failed.run()
+  assert.deepEqual(failed.stateCalls, [], "a failed list changes no record's state and no record's visibility")
+})
+
+test("a cycle the unload aborted hands no request state over, like its watermark", async () => {
+  const controller = new AbortController()
+  const h = harness({ issues: [issueWithBody(7, ["permalink: p7", "state: blocked"])], signal: controller.signal })
+  controller.abort()
+  const result = await h.run()
+  assert.deepEqual(h.stateCalls, [], "an aborted cycle writes no item state")
+  assert.equal(result.status.lastCycle, null, "and reports no cycle")
 })

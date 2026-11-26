@@ -50,12 +50,11 @@ the command palette:
 - the title row names the dialog, with `esc` on the right;
 - the header names the last poll, each workspace — a workspace that failed
   carries `✗` and the reason — and the poller's one cell;
-- the counts line counts the items by state, each state's mark in its own
-  colour;
-- the rows are grouped under `Waiting for you`, `Working` and `Idle`, one
-  section per state that has rows, in that order;
-- each row is the state mark, then the item's title, its asker, its channel, its
-  intake issue and how long ago it was flagged;
+- the counts line counts the rows by request state;
+- the rows are grouped under `Needs me`, `Blocked`, `Waiting on requester` and
+  `Idle`, one section per request state that has rows, in that order;
+- each row is one mark, then the item's title, its asker, its channel, its
+  intake issue and how long its request has been in its state;
 - the today line carries the day's counts;
 - the footer names the keys.
 
@@ -63,56 +62,70 @@ The dialog's shape, with one blank line between two groups that are shown:
 
 ```
 Slack Director                                                                            esc
-last poll 14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps · poller 14:32 ✓ 4 issues · 2 threads · 1 conversation
+last poll 14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps · poller 14:32 ✓ 11 issues · 4 threads · 2 conversations
 
-● 2 waiting for you   ◐ 1 working   ○ 1 idle
+2 needs me   1 blocked   1 waiting on requester   1 idle
 
-Waiting for you
- ┃ ● Access to the staging dashboards             Maria Costa     #platform-help   —      12m
-   ● Review of the Terraform module change        João Pereira    DM               —      1h
+Needs me
+ ┃ ◐ Why the nightly export job fails             Ana Silva       #data-eng        #<n>   2m
+   ● Access to the staging dashboards             Maria Costa     #platform-help   #<n>   12m
 
-Working
-   ◐ Why the nightly export job fails             Ana Silva       #data-eng        —      2m
+Blocked
+   ∅ VPN profile for the contractors              Nuno Ferreira                    #<n>   5h  new activity
+
+Waiting on requester
+     Onboarding steps for the new laptop          Tiago Lopes     #porto-office    #<n>   3d
 
 Idle
-   ○ Budget numbers for Q1 infra                  Rui Santos      GDM              —      1d
+     Budget numbers for Q1 infra                  Rui Santos      GDM              #<n>   1d
 
 today  4 flagged · 3 next steps posted
 
 ↵ session   i issue   s slack   r refresh   e settings   d done
 ```
 
-The issue cell shows `—` until the item's first turn has named its issue. A
-heading sits directly above its first row, and no blank line is drawn for a
-group that is not shown.
+The section a row sits under is the request state the poller read from its
+intake issue's yaml block, and the newest row comes first inside a section. The
+issue cell shows the intake issue's number, and `—` until the item's first turn
+has named its issue. A heading sits directly above its first row, and no blank
+line is drawn for a group that is not shown.
 
 Click an action or use its shortcut. The Esc hint closes the overview.
 
 There is no table header, and no state column of its own: the section a row
-sits under is its state, and the mark repeats it. The dialog follows OpenCode's
-own list dialog: an inset panel, a bold title, a bold muted section header, and
-a filled background with a `┃` bar on the row the selection is on.
+sits under is its request state, and the mark says what its session is doing.
+The dialog follows OpenCode's own list dialog: an inset panel, a bold title, a
+bold muted section header, and a filled background with a `┃` bar on the row
+the selection is on.
 
-Only the state mark takes a state colour: `●` for waiting and `◐` for working
-take their colour from the theme, and `○` for idle is muted. On a waiting or
-working row the title is normal text and the asker, the channel and the issue
-number are muted; an idle row is muted throughout. AGE is normal text under four
-working hours, the theme's warning colour from four working hours, and its error
-colour from one working day — where a working day is the length of one day's
-window, so time outside `work_hours` and on a day the window does not list does
-not count.
+The mark on a row is its session: `◐` while a turn runs, `●` while an OpenCode
+permission request waits, and nothing otherwise. Only that mark takes a state
+colour — `●` the theme's warning colour, `◐` its info colour. On a row outside
+the `Idle` section the title is normal text and the asker, the channel and the
+issue number are muted; an idle row is muted throughout. AGE counts the time in
+the request's state — from the issue's `state_since`, or from the flag when the
+issue names none — and keeps its working-hours colours: normal text under four
+working hours, the theme's warning colour from four working hours, and its
+error colour from one working day, where a working day is the length of one
+day's window, so time outside `work_hours` and on a day the window does not list
+does not count.
 
 The dialog carries no Slack message text: a row's title is the item session's
-own title.
+own title, and the poller keeps only Slack timestamps.
 
-An item's state is its session's live state: `working` while the session runs,
-`waiting` while it waits on a permission request or until you have opened it
-from the dialog, and `idle` once you have opened it and it is quiet. Waiting
-comes first, then working, then idle; the newest flag comes first inside each.
+An item's row leaves the dialog once its issue is closed: a poll whose list is
+complete and does not name the issue marks the item closed, and a poll whose
+list failed or may have been cut at 100 leaves every row exactly where it is.
 
-A row leaves the dialog when its session is deleted or archived: the item's
-record goes with the session, so the row is gone from the overview and stays
-gone.
+An open issue whose session was deleted or archived shows as a row of its own,
+marked `∅`: no session stands behind it, and the poller's own status carries its
+title, its state and its times. While the poller reports messages it has not
+seen on that request's source, the row carries `new activity` after its age.
+`i` opens its issue and `s` opens the message in Slack; `enter` and `d` do
+nothing on that row, because there is no session to open or close — the dialog
+says so, and the issue is closed on GitHub when you are done with it. No session
+is ever created for it. The row goes when a complete poll no longer lists the
+issue.
 
 Keys: `↑` and `↓` move the selection, `enter` opens the item's session, `i`
 opens its intake issue in your browser, `s` opens the Slack message, `r` polls
@@ -128,7 +141,7 @@ or a request that fails, keeps the item visible and shows the reason and what to
 do next; the overview stays usable, and you can try again through the confirm.
 
 While you are in a session, the sidebar carries one line:
-`Slack Director  2 waiting · 1 working`.
+`Slack Director  2 needs me · 1 blocked`.
 
 The settings dialog — `e`, or the `Slack Director: settings` entry in the
 palette — lists the config fields with their current values. `enter` on a row
@@ -225,6 +238,13 @@ stays.
   unattended issues, a `gh` failure, a rate-limited read, a possibly cut list),
   and the status lists each unattended issue with its `permalink`, `state`,
   `state_since` and `asked_at`, and a mark when its source has newer activity.
+- The overview groups its rows by the request state the poller read from each
+  open issue's yaml block — `needs-me`, `blocked`, `waiting-requester` or
+  `idle` — and the session's own state is one mark on the row. An issue that
+  names no state, an item that has no issue yet, and a state the dialog does not
+  know all read as `needs-me`. An issue the last complete poll does not name is
+  closed, and its row leaves the dialog; a failed or possibly cut list changes
+  no row's visibility.
 - A session is titled after the flagged message's channel and its author until
   its first turn ends, and after the intake issue's title from then on.
 - Removing the flag from a message you have handled keeps the scan short: the
@@ -238,9 +258,11 @@ stays.
   poll, when its message is still flagged and its earlier session is quiet: one
   new session on `session_agent`, whose first turn makes the issue that
   permalink was missing.
-- Deleting or archiving an item's session takes its row out of the overview for
-  good. The message is not picked up again: a permalink that has had a session
-  keeps its place, so a removed item gets no second session.
+- Deleting or archiving an item's session leaves its issue open and its row in
+  the overview, marked `∅`: the poller keeps reading the issue and the dialog
+  keeps showing its request state, and no new session is created for it. The
+  message is not picked up again: a permalink that has had a session keeps its
+  place, so a removed item gets no second session.
 - `d`, or a click on the footer's Done hint, closes the item for good: the
   item's own session posts a close-reason comment and closes the intake issue as
   completed, and the plugin deletes the session and every child session under it

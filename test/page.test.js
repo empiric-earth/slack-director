@@ -1,6 +1,6 @@
-// The overview dialog's own logic: the state of an item, the order of the rows,
-// the text and colour roles of every line, the AGE colour in working time, the
-// selection move, the URL opener and the settings dialog's values.
+// The overview dialog's own logic: the request state of a row, the order of the
+// rows, the text and colour roles of every line, the AGE colour in working time,
+// the selection move, the URL opener and the settings dialog's values.
 //
 // The expected lines are the approved layout's own lines, so this suite fails
 // when a column moves or a label changes, and the colour-role assertions fail
@@ -11,12 +11,16 @@ import assert from "node:assert/strict"
 import {
   AGE_WARNING_MINUTES,
   DIALOG_INSET,
+  NEW_ACTIVITY_MARK,
+  NO_SESSION_MARK,
   PAGE_TITLE,
+  REQUEST_STATES,
   ROW_WIDTHS,
   SECTION_TITLE,
-  STATE_MARK,
-  STATE_ORDER,
+  SESSION_MARK,
+  STATE_LABEL,
   ageRole,
+  ageStamp,
   ageText,
   askerName,
   countsParts,
@@ -24,6 +28,7 @@ import {
   fieldValue,
   footerParts,
   footerText,
+  hasSession,
   headerParts,
   headerText,
   issueLabel,
@@ -36,14 +41,16 @@ import {
   pollClock,
   pollerCell,
   reconcileSelection,
+  requestStateOf,
+  rowID,
   rowIDs,
   rowParts,
   rowText,
   sections,
   selectedItem,
+  sessionMark,
   settingsValue,
   sidebarText,
-  stateOf,
   titleParts,
   todayParts,
   todayText,
@@ -68,6 +75,11 @@ function item(over = {}) {
     title: "Access to the staging dashboards",
     issueNumber: 41,
     issueUrl: "https://github.com/empire/almeida-slack-intake/issues/41",
+    requestState: "needs-me",
+    stateSince: null,
+    blockedOn: null,
+    waitingOn: [],
+    issueClosed: false,
     firstTurnEndedAt: minutes(11),
     firstTurnFailed: false,
     permissionPending: false,
@@ -87,6 +99,8 @@ const ITEMS = [
     title: "Review of the Terraform module change",
     issueNumber: 40,
     channel: "DM",
+    requestState: "blocked",
+    blockedOn: "https://github.com/empiric-earth/almeida-slack-intake/issues/40",
   }),
   item({
     permalink: "p3",
@@ -106,6 +120,7 @@ const ITEMS = [
     issueNumber: 38,
     channel: "GDM",
     openedAt: minutes(60 * 23),
+    requestState: "idle",
   }),
   item({
     permalink: "p5",
@@ -116,8 +131,25 @@ const ITEMS = [
     issueNumber: 37,
     channel: "#porto-office",
     openedAt: minutes(60 * 24 * 2),
+    requestState: "waiting-requester",
+    waitingOn: ["U0000000001"],
   }),
 ]
+
+/** One unattended open issue, as the poller's status serves it. */
+function orphan(over = {}) {
+  return {
+    number: 36,
+    url: "https://github.com/empiric-earth/almeida-slack-intake/issues/36",
+    title: "Nuno Ferreira — VPN profile for the contractors",
+    permalink: "https://nexar.slack.com/archives/C0IT/p1795194400999000",
+    state: "blocked",
+    state_since: minutes(60 * 5),
+    asked_at: minutes(60 * 30),
+    newActivity: false,
+    ...over,
+  }
+}
 
 /** What the TUI knows about each of those sessions: only the third one runs. */
 const LIVE = { ses_3: { running: true, pending: 0 } }
@@ -134,38 +166,63 @@ const STATUS = {
   today: { flagged: 5, nextStepsPosted: 3, skipped: 1 },
 }
 
-test("the state follows the item record and the session's live state, first match winning", () => {
-  const unopened = { permissionPending: false, openedAt: null }
-  const opened = { permissionPending: false, openedAt: minutes(5) }
-
-  assert.equal(stateOf(unopened, { running: true }), "working", "a first turn that runs is working")
-  assert.equal(stateOf(unopened, { running: false }), "waiting", "a first turn that ended is waiting to be read")
-  assert.equal(stateOf(opened, { running: false }), "idle", "an item the user opened is idle once it is quiet")
-  assert.equal(stateOf(opened, { running: true }), "working", "a turn the user resumed is working again")
-  assert.equal(stateOf(opened, { running: false, pending: 1 }), "waiting", "a permission prompt is waiting")
-  assert.equal(
-    stateOf(unopened, { running: true, pending: 1 }),
-    "waiting",
-    "a session that runs and waits on a permission at once is waiting, not working",
-  )
-  assert.equal(
-    stateOf({ permissionPending: true, openedAt: minutes(5) }, { running: true }),
-    "waiting",
-    "the record's own pending permission wins over a running session",
-  )
-  assert.equal(stateOf(opened, {}), "idle", "a session the TUI does not know reads as quiet")
+test("the request state is the issue's own, and needs-me until the issue names another", () => {
+  assert.equal(requestStateOf(item()), "needs-me")
+  assert.equal(requestStateOf(item({ requestState: "blocked" })), "blocked")
+  assert.equal(requestStateOf(item({ requestState: "waiting-requester" })), "waiting-requester")
+  assert.equal(requestStateOf(item({ requestState: "idle" })), "idle")
+  assert.equal(requestStateOf(item({ requestState: undefined })), "needs-me", "an issue with no state reads as needs-me")
+  assert.equal(requestStateOf(item({ requestState: "in-progress" })), "needs-me", "an unknown value reads as needs-me")
+  assert.equal(requestStateOf({ issueNumber: null }), "needs-me", "an item with no issue yet reads as needs-me")
+  assert.deepEqual(REQUEST_STATES, ["needs-me", "blocked", "waiting-requester", "idle"])
 })
 
-test("the rows are waiting, then working, then idle, newest flag first in each", () => {
+test("a row's session mark is a running turn, a pending permission request, or no mark at all", () => {
+  assert.equal(sessionMark(item(), { running: true }), SESSION_MARK.running, "a running turn shows its mark")
+  assert.equal(
+    sessionMark(item(), { running: false, pending: 2 }),
+    SESSION_MARK.pending,
+    "a pending permission request shows its mark",
+  )
+  assert.equal(
+    sessionMark(item(), { running: true, pending: 1 }),
+    SESSION_MARK.pending,
+    "a session that runs and waits on a permission at once shows the permission's mark",
+  )
+  assert.equal(
+    sessionMark(item({ permissionPending: true }), { running: true }),
+    SESSION_MARK.pending,
+    "the record's own pending permission wins over a running session",
+  )
+  assert.equal(sessionMark(item(), {}), undefined, "a quiet session shows no mark at all")
+})
+
+test("the rows are grouped by request state, newest first inside each section", () => {
   const rows = pageRows(ITEMS, liveOf)
   assert.deepEqual(
     rows.map((row) => row.state),
-    ["waiting", "waiting", "working", "idle", "idle"],
+    ["needs-me", "needs-me", "blocked", "waiting-requester", "idle"],
+    "the sections come in the order of REQUEST_STATES",
   )
   assert.deepEqual(
     rows.map((row) => row.item.sessionID),
-    ["ses_1", "ses_2", "ses_3", "ses_4", "ses_5"],
-    "newest flag first inside each state",
+    ["ses_3", "ses_1", "ses_2", "ses_5", "ses_4"],
+    "the newest row comes first inside each section",
+  )
+})
+
+test("an item whose issue left a complete open-issue list takes no row", () => {
+  const closed = ITEMS.map((record) => (record.sessionID === "ses_1" ? { ...record, issueClosed: true } : record))
+  const rows = pageRows(closed, liveOf)
+  assert.deepEqual(
+    rows.map((row) => row.item.sessionID),
+    ["ses_3", "ses_2", "ses_5", "ses_4"],
+    "a closed issue's row is gone, and every other row stays",
+  )
+  assert.equal(
+    rows.some((row) => row.item.sessionID === "ses_1"),
+    false,
+    "the dialog shows no row for an item whose issue is closed",
   )
 })
 
@@ -176,13 +233,13 @@ test("the title row, the header line, the counts line, the today line and the fo
   assert.equal(headerText(STATUS), "last poll 14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps")
   assert.equal(headerText({ lastPoll: null, outcome: "never polled", workspaces: [] }), "last poll never")
   assert.equal(pollClock("2026-11-19T14:32:00.000Z"), "14:32")
-  assert.equal(countsText(rows), "● 2 waiting for you   ◐ 1 working   ○ 2 idle")
-  assert.equal(countsText([]), "● 0 waiting for you   ◐ 0 working   ○ 0 idle")
+  assert.equal(countsText(rows), "2 needs me   1 blocked   1 waiting on requester   1 idle")
+  assert.equal(countsText([]), "0 needs me   0 blocked   0 waiting on requester   0 idle")
   assert.equal(todayText(STATUS), "today  5 flagged · 3 next steps posted", "the skipped hits are gone")
   assert.equal(todayText(undefined), "today  0 flagged · 0 next steps posted")
   assert.equal(footerText(), "↵ session   i issue   s slack   r refresh   e settings   d done")
   assert.ok(footerText().includes("d done"), "the footer names the d key")
-  assert.equal(sidebarText(rows), "Slack Director  2 waiting · 1 working")
+  assert.equal(sidebarText(rows), "Slack Director  2 needs me · 1 blocked")
 })
 
 test("the poller cell shows its cycle time, its distinct reason and what the cycle read", () => {
@@ -245,14 +302,15 @@ test("no line names a STATE column, and the dialog carries no table header", () 
   assert.ok(!lines.some((line) => line.includes("ASKER")), "no ASKER header column")
 })
 
-test("the rows are grouped under their section, in state order, each entry carrying its index", () => {
+test("the rows are grouped under their section, in request-state order, each entry carrying its index", () => {
   const rows = pageRows(ITEMS, liveOf)
   const groups = sections(rows)
   assert.deepEqual(
     groups.map((group) => [group.state, group.title]),
     [
-      ["waiting", "Waiting for you"],
-      ["working", "Working"],
+      ["needs-me", "Needs me"],
+      ["blocked", "Blocked"],
+      ["waiting-requester", "Waiting on requester"],
       ["idle", "Idle"],
     ],
   )
@@ -261,12 +319,25 @@ test("the rows are grouped under their section, in state order, each entry carry
     [
       [0, 1],
       [2],
-      [3, 4],
+      [3],
+      [4],
     ],
     "each entry carries its position among all rows",
   )
   assert.deepEqual(sections([]), [], "a state with no rows has no section")
-  assert.deepEqual(STATE_ORDER, ["waiting", "working", "idle"])
+  assert.deepEqual(REQUEST_STATES, ["needs-me", "blocked", "waiting-requester", "idle"])
+  assert.deepEqual(SECTION_TITLE, {
+    "needs-me": "Needs me",
+    blocked: "Blocked",
+    "waiting-requester": "Waiting on requester",
+    idle: "Idle",
+  })
+  assert.deepEqual(STATE_LABEL, {
+    "needs-me": "needs me",
+    blocked: "blocked",
+    "waiting-requester": "waiting on requester",
+    idle: "idle",
+  })
 })
 
 test("the colour roles name the mark, the text and the bar each part takes", () => {
@@ -286,14 +357,17 @@ test("the colour roles name the mark, the text and the bar each part takes", () 
   assert.deepEqual(
     counts.map((entry) => [entry.text, entry.role]),
     [
-      ["●", "state-waiting"],
-      [" 2 waiting for you", "muted"],
+      ["2 ", "base"],
+      ["needs me", "muted"],
       ["   ", "muted"],
-      ["◐", "state-working"],
-      [" 1 working", "muted"],
+      ["1 ", "base"],
+      ["blocked", "muted"],
       ["   ", "muted"],
-      ["○", "state-idle"],
-      [" 2 idle", "muted"],
+      ["1 ", "base"],
+      ["waiting on requester", "muted"],
+      ["   ", "muted"],
+      ["1 ", "base"],
+      ["idle", "muted"],
     ],
   )
   assert.deepEqual(
@@ -321,35 +395,38 @@ test("the colour roles name the mark, the text and the bar each part takes", () 
   assert.deepEqual(todayParts(STATUS).map((entry) => entry.role), ["muted", "muted"])
 })
 
-test("one row is the bar, the mark, then ITEM, ASKER, CHANNEL, the issue and AGE", () => {
+test("one row is the bar, the session mark, then ITEM, ASKER, CHANNEL, the issue and AGE", () => {
   const rows = pageRows(ITEMS, liveOf)
   const parts = rowParts(rows[0], { selected: true, now: NOW, hours: HOURS })
 
+  assert.equal(rows[0].item.sessionID, "ses_3", "the first row is the newest of the first section")
   assert.equal(parts[0].text, " ".repeat(DIALOG_INSET - 2), "the row starts at its inset")
   assert.equal(parts[1].text, "┃", "the selected row draws the bar")
   assert.equal(parts[1].role, "bar")
-  assert.equal(parts[3].text, STATE_MARK.waiting)
-  assert.equal(parts[3].role, "state-waiting")
-  assert.equal(parts[5].text.trimEnd(), "Access to the staging dashboards")
-  assert.equal(parts[5].role, "base", "ITEM is base text on a waiting row")
-  assert.equal(parts[7].text.trimEnd(), "Maria Costa")
-  assert.equal(parts[9].text.trimEnd(), "#platform-help")
-  assert.equal(parts[11].text.trimEnd(), "#41")
-  assert.equal(parts[13].text, "12m", "AGE keeps its calendar text")
+  assert.equal(parts[3].text, SESSION_MARK.running, "a running turn shows its mark on the row")
+  assert.equal(parts[3].role, "state-working")
+  assert.equal(parts[5].text.trimEnd(), "Why the nightly export job fails")
+  assert.equal(parts[5].role, "base", "ITEM is base text on a row outside the Idle section")
+  assert.equal(parts[7].text.trimEnd(), "Ana Silva")
+  assert.equal(parts[9].text.trimEnd(), "#data-eng")
+  assert.equal(parts[11].text.trimEnd(), issueLabel(rows[0].item))
+  assert.equal(parts[13].text, "2m", "AGE keeps its calendar text")
 
-  const unselected = rowParts(rows[0], { selected: false, now: NOW, hours: HOURS })
-  assert.equal(unselected[1].text, " ")
-  assert.equal(unselected[1].role, "none")
+  const quiet = rowParts(rows[1], { selected: false, now: NOW, hours: HOURS })
+  assert.equal(quiet[1].text, " ")
+  assert.equal(quiet[1].role, "none")
+  assert.equal(quiet[3].text, " ", "a session with no mark leaves the marker column blank")
+  assert.equal(quiet[3].role, "none")
 
-  const idle = rowParts(rows[3], { selected: false, now: NOW, hours: HOURS })
-  assert.equal(idle[3].role, "state-idle")
+  const idle = rowParts(rows[4], { selected: false, now: NOW, hours: HOURS })
+  assert.equal(rows[4].state, "idle")
   assert.equal(idle[5].role, "muted", "an idle row is muted throughout")
   assert.equal(idle[7].role, "muted")
 })
 
 test("a value too long for its column is shortened with an ellipsis", () => {
   const long = item({ title: "B".repeat(80), asker: "A".repeat(40), channel: "C".repeat(40) })
-  const parts = rowParts({ item: long, state: "waiting" }, { now: NOW, hours: HOURS })
+  const parts = rowParts({ item: long, state: "needs-me" }, { now: NOW, hours: HOURS })
   assert.equal(parts[5].text, `${"B".repeat(ROW_WIDTHS.item - 1)}…`)
   assert.equal(parts[7].text, `${"A".repeat(ROW_WIDTHS.asker - 1)}…`, "ASKER is shortened to its column")
   assert.equal(parts[9].text, `${"C".repeat(ROW_WIDTHS.channel - 1)}…`)
@@ -375,7 +452,7 @@ test("a record an earlier build left without an asker shows the asker its title 
   })
   assert.equal(itemAsker(earlier), "André Almeida", "the ASKER cell is not left empty")
   assert.equal(itemTitle(earlier), "note-to-self to verify the dialog", "and ITEM keeps no asker prefix")
-  assert.equal(rowParts({ item: earlier, state: "waiting" }, { now: NOW, hours: HOURS })[7].text.trimEnd(), "André Almeida")
+  assert.equal(rowParts({ item: earlier, state: "needs-me" }, { now: NOW, hours: HOURS })[7].text.trimEnd(), "André Almeida")
 })
 
 test("the ASKER cell drops the id or the address the search reported beside the name", () => {
@@ -402,7 +479,7 @@ test("a record whose first turn has named no issue keeps its neutral title and s
   })
   assert.equal(itemAsker(fresh), "", "the neutral title's dash is not an asker separator")
   assert.equal(itemTitle(fresh), "Flagged message in DM — 1795263523.511709")
-  assert.equal(rowParts({ item: fresh, state: "waiting" }, { now: NOW, hours: HOURS })[7].text, " ".repeat(ROW_WIDTHS.asker))
+  assert.equal(rowParts({ item: fresh, state: "needs-me" }, { now: NOW, hours: HOURS })[7].text, " ".repeat(ROW_WIDTHS.asker))
 })
 
 test("the selection move wraps at both ends, and the marker picks the row the keys act on", () => {
@@ -411,15 +488,23 @@ test("the selection move wraps at both ends, and the marker picks the row the ke
   assert.equal(moveSelection(0, 5, -1), 4, "up from the first row goes to the last")
   assert.equal(moveSelection(2, 5, 1), 3, "down from a middle row is the next one")
   assert.equal(moveSelection(0, 0, 1), 0, "an empty table has no move")
-  assert.equal(selectedItem(rows, 4).sessionID, "ses_5", "the selected row's item is the one the keys act on")
-  assert.equal(selectedItem(rows, 0).sessionID, "ses_1")
+  assert.equal(selectedItem(rows, 4).sessionID, "ses_4", "the selected row's item is the one the keys act on")
+  assert.equal(selectedItem(rows, 0).sessionID, "ses_3")
   assert.equal(selectedItem([], 0), undefined)
 })
 
 test("the rows carry their identities in display order", () => {
   const rows = pageRows(ITEMS, liveOf)
-  assert.deepEqual(rowIDs(rows), ["ses_1", "ses_2", "ses_3", "ses_4", "ses_5"])
+  assert.deepEqual(rowIDs(rows), ["ses_3", "ses_1", "ses_2", "ses_5", "ses_4"])
   assert.deepEqual(rowIDs([]), [])
+  assert.deepEqual(
+    rowIDs(pageRows(ITEMS, liveOf, [orphan()])),
+    ["ses_3", "ses_1", "ses_2", "issue:36", "ses_5", "ses_4"],
+    "an unattended row is identified by its issue",
+  )
+  assert.equal(rowID({ item: { sessionID: "ses_9", issueNumber: 41 } }), "ses_9", "a session's own id wins")
+  assert.equal(rowID({ item: { issueNumber: 41 } }), "issue:41")
+  assert.equal(rowID({ item: {} }), undefined, "a row with neither has no identity")
 })
 
 test("the marker follows an identity through a reordering, and a removed item hands it to a neighbor", () => {
@@ -467,7 +552,7 @@ test("every footer control carries its own action, and the esc hint carries clos
   assert.equal(titleParts()[1].action, "close", "the esc hint carries the close action")
 })
 
-test("the age counts from the flag, in minutes, then hours, then days", () => {
+test("the age counts from the row's own time, in minutes, then hours, then days", () => {
   assert.equal(ageText(minutes(0), NOW), "0m")
   assert.equal(ageText(minutes(12), NOW), "12m")
   assert.equal(ageText(minutes(59), NOW), "59m")
@@ -476,20 +561,112 @@ test("the age counts from the flag, in minutes, then hours, then days", () => {
   assert.equal(ageText(minutes(60 * 24), NOW), "1d")
   assert.equal(ageText(minutes(60 * 24 * 3), NOW), "3d")
   assert.equal(ageText("not a time", NOW), "—")
+  assert.equal(ageText(undefined, NOW), "—", "a row that names no time shows a dash")
   assert.equal(ageText(minutes(-5), NOW), "0m", "a clock that runs behind reads as just now")
   assert.equal(issueLabel(item({ issueNumber: 41 })), "#41")
   assert.equal(issueLabel(item({ issueNumber: null })), "—")
 })
 
+test("a row's age counts from the issue's state_since when it has one, else from the flag", () => {
+  assert.equal(ageStamp(item()), minutes(12), "a record with no state_since counts from its flag")
+  assert.equal(
+    ageStamp(item({ stateSince: minutes(90) })),
+    minutes(90),
+    "the issue's state_since wins over the flag",
+  )
+  assert.equal(
+    ageStamp(item({ stateSince: "not a time" })),
+    minutes(12),
+    "an unreadable state_since falls back to the flag",
+  )
+  assert.equal(ageStamp({}), undefined, "a record with neither names no time")
+
+  const rows = pageRows([item({ stateSince: minutes(90) })], () => ({}))
+  assert.equal(rows[0].at, minutes(90))
+  assert.equal(
+    rowParts(rows[0], { now: NOW, hours: HOURS })[13].text,
+    "1h",
+    "AGE measures from state_since, not from the flag",
+  )
+})
+
+test("an unattended open issue shows one row, in its state's section, marked as having no session", () => {
+  const rows = pageRows(ITEMS, liveOf, [orphan()])
+  const row = rows.find((entry) => entry.item.issueNumber === 36)
+  assert.ok(row, "an open issue no item record names still takes a row")
+  assert.equal(row.state, "blocked", "it sits in the section of its issue's own state")
+  assert.ok(rowText(row, { now: NOW, hours: HOURS }).includes(NO_SESSION_MARK), "its row carries the no session mark")
+  assert.equal(row.unattended, true)
+  assert.equal(row.note, undefined, "with nothing unseen it carries no new activity flag")
+  assert.equal(hasSession(row.item), false, "no session stands behind the row")
+  assert.equal(row.item.issueUrl, orphan().url, "i opens the issue from the poller's status")
+  assert.equal(row.item.permalink, orphan().permalink, "s opens the message from the poller's status")
+  assert.equal(
+    rows.filter((entry) => entry.item.issueNumber === 36).length,
+    1,
+    "one open issue takes exactly one row",
+  )
+  const parts = rowParts(row, { now: NOW, hours: HOURS })
+  assert.equal(parts[3].text, NO_SESSION_MARK)
+  assert.equal(parts[3].role, "muted")
+  assert.equal(parts[5].text.trimEnd(), "VPN profile for the contractors", "the row keeps the issue's title")
+  assert.equal(parts[7].text.trimEnd(), "Nuno Ferreira", "and the asker the issue's title carries")
+})
+
+test("an unattended row carries the new activity flag while the poller reports unseen messages", () => {
+  const rows = pageRows(ITEMS, liveOf, [orphan({ newActivity: true })])
+  const row = rows.find((entry) => entry.item.issueNumber === 36)
+  assert.equal(row.note, NEW_ACTIVITY_MARK)
+  const parts = rowParts(row, { now: NOW, hours: HOURS })
+  assert.equal(parts.at(-1).text, NEW_ACTIVITY_MARK, "the flag follows the age cell")
+  const text = rowText(row, { now: NOW, hours: HOURS })
+  assert.ok(text.includes(NO_SESSION_MARK), "the row still carries the no session mark")
+  assert.ok(text.includes(NEW_ACTIVITY_MARK), "and the new activity flag")
+})
+
+test("an unattended row ages by its state_since, else by its asked_at", () => {
+  const withSince = pageRows([], () => ({}), [orphan()])[0]
+  assert.equal(withSince.at, minutes(60 * 5))
+  assert.equal(rowParts(withSince, { now: NOW, hours: HOURS })[13].text, "5h")
+  const noSince = pageRows([], () => ({}), [orphan({ state_since: undefined })])[0]
+  assert.equal(noSince.at, orphan().asked_at, "with no state_since the age counts from asked_at")
+  assert.equal(rowParts(noSince, { now: NOW, hours: HOURS })[13].text, "1d")
+})
+
+test("an unattended issue with no state or an unknown one reads as needs-me", () => {
+  const rows = pageRows([], () => ({}), [orphan({ state: undefined }), orphan({ number: 35, state: "unknown" })])
+  assert.deepEqual(
+    rows.map((row) => row.state),
+    ["needs-me", "needs-me"],
+    "a missing state and an unknown one both read as needs-me",
+  )
+  assert.deepEqual(
+    rows.map((row) => row.item.issueNumber),
+    [36, 35],
+  )
+  assert.deepEqual(
+    sections(rows).map((group) => group.state),
+    ["needs-me"],
+  )
+})
+
+test("the counts line and the sidebar count every row, unattended rows included", () => {
+  const rows = pageRows(ITEMS, liveOf, [orphan()])
+  assert.equal(countsText(rows), "2 needs me   2 blocked   1 waiting on requester   1 idle")
+  assert.equal(sidebarText(rows), "Slack Director  2 needs me · 2 blocked")
+  assert.equal(countsText([]), "0 needs me   0 blocked   0 waiting on requester   0 idle")
+  assert.equal(sidebarText([]), "Slack Director  0 needs me · 0 blocked")
+})
+
 test("AGE's colour uses working time: base under 4 working hours, warning from 4, error from one day", () => {
   const flagged = "2026-11-23T09:00:00Z"
-  const calm = ageRole("waiting", flagged, Date.parse("2026-11-23T12:59:00Z"), HOURS)
+  const calm = ageRole("needs-me", flagged, Date.parse("2026-11-23T12:59:00Z"), HOURS)
   assert.equal(calm, "age-calm", "239 working minutes is under the warning")
   assert.equal(AGE_WARNING_MINUTES, 4 * 60)
-  assert.equal(ageRole("waiting", flagged, Date.parse("2026-11-23T13:00:00Z"), HOURS), "age-warn", "exactly 4 working hours warns")
-  assert.equal(ageRole("waiting", flagged, Date.parse("2026-11-23T17:59:00Z"), HOURS), "age-warn", "under one working day")
-  assert.equal(ageRole("waiting", flagged, Date.parse("2026-11-23T18:00:00Z"), HOURS), "age-error", "exactly one working day errors")
-  assert.equal(ageRole("working", flagged, Date.parse("2026-11-24T10:00:00Z"), HOURS), "age-error", "one day plus an hour")
+  assert.equal(ageRole("needs-me", flagged, Date.parse("2026-11-23T13:00:00Z"), HOURS), "age-warn", "exactly 4 working hours warns")
+  assert.equal(ageRole("needs-me", flagged, Date.parse("2026-11-23T17:59:00Z"), HOURS), "age-warn", "under one working day")
+  assert.equal(ageRole("needs-me", flagged, Date.parse("2026-11-23T18:00:00Z"), HOURS), "age-error", "exactly one working day errors")
+  assert.equal(ageRole("blocked", flagged, Date.parse("2026-11-24T10:00:00Z"), HOURS), "age-error", "one day plus an hour")
   assert.equal(ageRole("idle", flagged, Date.parse("2026-12-31T00:00:00Z"), HOURS), "muted", "an idle row is muted throughout")
 })
 
@@ -497,12 +674,12 @@ test("AGE's colour counts working time, not calendar time", () => {
   // Friday 17:00 to Monday 10:00 is 65 calendar hours but only 2 working hours.
   const flagged = "2026-11-20T17:00:00Z"
   const now = Date.parse("2026-11-23T10:00:00Z")
-  assert.equal(ageRole("waiting", flagged, now, HOURS), "age-calm", "calendar time would have read as an error")
+  assert.equal(ageRole("needs-me", flagged, now, HOURS), "age-calm", "calendar time would have read as an error")
 })
 
 test("AGE's colour is calm outside the window and on a day it does not list", () => {
-  assert.equal(ageRole("waiting", "2026-11-21T12:00:00Z", Date.parse("2026-11-21T14:00:00Z"), HOURS), "age-calm")
-  assert.equal(ageRole("waiting", "not a time", NOW, HOURS), "age-calm", "an unreadable time is calm")
+  assert.equal(ageRole("needs-me", "2026-11-21T12:00:00Z", Date.parse("2026-11-21T14:00:00Z"), HOURS), "age-calm")
+  assert.equal(ageRole("needs-me", "not a time", NOW, HOURS), "age-calm", "an unreadable time is calm")
 })
 
 test("a workspace's name drops the Slack MCP server's own prefix", () => {

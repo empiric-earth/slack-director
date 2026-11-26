@@ -137,11 +137,31 @@ export function itemOfRecord(record) {
     title: record.title,
     issueNumber: record.issueNumber ?? null,
     issueUrl: record.issueUrl ?? null,
+    // The request state the poller read from the issue's yaml block. An item
+    // whose issue carries no state reads as `needs-me`, and so does one that has
+    // no issue yet.
+    requestState: typeof record.requestState === "string" && record.requestState !== "" ? record.requestState : "needs-me",
+    stateSince: record.stateSince ?? null,
+    blockedOn: record.blockedOn ?? null,
+    waitingOn: Array.isArray(record.waitingOn) ? record.waitingOn : [],
+    issueClosed: record.issueClosed === true,
     firstTurnEndedAt: record.firstTurnEndedAt ?? null,
     firstTurnFailed: record.firstTurnFailed === true,
     permissionPending: record.permissionPending === true,
     openedAt: record.openedAt ?? null,
   }
+}
+
+/** A field's value when it is a non-empty string, else the fallback. */
+const textOr = (value, fallback) => (typeof value === "string" && value !== "" ? value : fallback)
+
+/** Whether a record already carries exactly the request-state fields a read named. */
+function sameRequestState(record, next) {
+  if (record.requestState !== next.requestState) return false
+  if ((record.stateSince ?? null) !== next.stateSince) return false
+  if ((record.blockedOn ?? null) !== next.blockedOn) return false
+  const waiting = Array.isArray(record.waitingOn) ? record.waitingOn : []
+  return waiting.length === next.waitingOn.length && waiting.every((id, index) => id === next.waitingOn[index])
 }
 
 export function createWatcher({
@@ -317,6 +337,53 @@ export function createWatcher({
         removed = true
       }
       if (!removed) return false
+      await storage.set(KEYS.items, items)
+      changed()
+      return true
+    })
+  }
+
+  /**
+   * Apply the poller's last open-issue read to the item records, one writer at a
+   * time: every record that names an issue gets that issue's request state, the
+   * time it was set, and the fields that apply while it is blocked or waits on
+   * the requester. A record whose issue has left a **complete** read is closed,
+   * so its row leaves the dialog; a record whose issue is missing from a failed
+   * or possibly cut read keeps the visibility it had. Answers whether anything
+   * changed.
+   */
+  function applyIssueStates(input = {}) {
+    const complete = input.complete === true
+    const listed = new Map(
+      (Array.isArray(input.issues) ? input.issues : [])
+        .filter((entry) => entry && typeof entry.number === "number")
+        .map((entry) => [entry.number, entry]),
+    )
+    return serializedWrite(async () => {
+      const items = await readItems()
+      let dirty = false
+      for (const [permalink, record] of Object.entries(items)) {
+        if (!record || typeof record.issueNumber !== "number") continue
+        const entry = listed.get(record.issueNumber)
+        if (entry === undefined) {
+          if (complete && record.issueClosed !== true) {
+            items[permalink] = { ...record, issueClosed: true }
+            dirty = true
+          }
+          continue
+        }
+        const next = {
+          requestState: textOr(entry.state, "needs-me"),
+          stateSince: textOr(entry.stateSince, null),
+          blockedOn: textOr(entry.blockedOn, null),
+          waitingOn: Array.isArray(entry.waitingOn) ? entry.waitingOn : [],
+          issueClosed: false,
+        }
+        if (sameRequestState(record, next)) continue
+        items[permalink] = { ...record, ...next }
+        dirty = true
+      }
+      if (!dirty) return false
       await storage.set(KEYS.items, items)
       changed()
       return true
@@ -1204,5 +1271,5 @@ export function createWatcher({
     await storage.set(KEYS.suspended, {})
   }
 
-  return { poll, pollNow, status, items, getConfig, setConfig, markOpened, done, stop, observe, start, dropSessionRecord }
+  return { poll, pollNow, status, items, getConfig, setConfig, markOpened, done, stop, observe, start, dropSessionRecord, applyIssueStates }
 }

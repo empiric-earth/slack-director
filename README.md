@@ -255,16 +255,35 @@ stays.
 - One permalink gets one item session and one intake issue. Flagging the same
   message again, or sending the first prompt for it again, finds the issue that
   permalink already has, so no second issue appears. A second message in the
-  same thread is a different permalink, so it gets its own issue.
+  same thread is a different permalink, so it gets its own issue, unless a
+  closed issue of that thread is there to reopen.
 - An item an earlier build left without an issue is reissued once, on the next
   poll, when its message is still flagged and its earlier session is quiet: one
   new session on `session_agent`, whose first turn makes the issue that
   permalink was missing.
 - Deleting or archiving an item's session leaves its issue open and its row in
   the overview, marked `∅`: the poller keeps reading the issue and the dialog
-  keeps showing its request state, and no new session is created for it. The
-  message is not picked up again: a permalink that has had a session keeps its
-  place, so a removed item gets no second session.
+  keeps showing its request state, and no new session is created for it. Its
+  open issue is what holds the message in place, so a removed item gets no
+  second session while its issue stays open.
+- After a complete flag scan, the watcher forgets a message whose flag is gone
+  and whose issue is not open. A scan is complete when every connected Slack
+  workspace's search ended with no error, no rate limit, a sign-in that held,
+  no page-limit notice and no next page; the latest open-issue read must also be
+  whole — a successful list under its limit whose every body it could read. When
+  both hold, a permalink the scan no longer lists and no open issue carries is
+  forgotten: it leaves the watcher's seen set, and its item record and claim and
+  commit files go with it. The record's own session is never deleted. A scan
+  that is not complete, or a list that failed, was possibly cut or held an
+  unreadable body, forgets nothing, so a still-flagged message is never mistaken
+  for an unflagged one.
+- Flagging a message again whose intake issue is already closed reopens that
+  issue instead of making a second one: the new session's first turn finds the
+  issue by the same permalink, or, when the flag is on another message of the
+  same thread, by the same channel and thread, sets it back to `needs-me` and
+  comments what changed. A forgotten message gets that fresh session only when
+  it is flagged again; nothing brings it back on its own, and reinstalling an
+  earlier build does not undo the forgetting.
 - `d`, or a click on the footer's Done hint, closes the item for good: the
   item's own session posts a close-reason comment and closes the intake issue as
   completed, and the plugin deletes the session and every child session under it

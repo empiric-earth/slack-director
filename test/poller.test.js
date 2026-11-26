@@ -1318,6 +1318,48 @@ test("a list at the limit is handed over as possibly cut, and a failed list hand
   assert.deepEqual(failed.stateCalls, [], "a failed list changes no record's state and no record's visibility")
 })
 
+test("the open-issue read names every permalink and whether the read is whole, for the flag scan's forget rule", async () => {
+  const permalink = "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219"
+  const whole = harness({
+    issues: [
+      openIssue(7, {
+        permalink,
+        workspace: "slack_nexar",
+        channel_id: "C0PLATFORM",
+        channel_name: "platform-help",
+        thread_ts: tsOf(600),
+      }),
+      openIssue(8, { permalink: "p8", category: "customer-data" }),
+    ],
+    reads: () => answer([]),
+  })
+  await whole.run()
+  assert.deepEqual(
+    whole.storage.map.get(KEYS.open),
+    { at: new Date(NOW).toISOString(), complete: true, permalinks: [permalink, "p8"] },
+    "every open issue's permalink, out-of-scope ones included, and a whole read",
+  )
+
+  const cut = harness({
+    issues: Array.from({ length: ISSUE_LIST_LIMIT }, (_, index) => issueWithBody(index + 1, ["permalink: p", "state: idle"])),
+    reads: () => answer([]),
+  })
+  await cut.run()
+  assert.equal(cut.storage.map.get(KEYS.open).complete, false, "a list at its limit is not a whole read")
+
+  const unreadable = harness({
+    issues: [{ number: 9, url: "https://github.com/empiric-earth/almeida-slack-intake/issues/9", title: "Request 9", body: "no yaml block here" }],
+  })
+  await unreadable.run()
+  assert.equal(unreadable.storage.map.get(KEYS.open).complete, false, "an issue whose block will not parse makes the read not whole")
+  assert.deepEqual(unreadable.storage.map.get(KEYS.open).permalinks, [], "and names only the permalinks it could read")
+
+  const failed = harness({ gh: async () => ({ ok: false, code: 1, stdout: "", stderr: "not logged in" }) })
+  await failed.run()
+  assert.equal(failed.storage.map.get(KEYS.open).complete, false, "a failed list is not a whole read")
+  assert.deepEqual(failed.storage.map.get(KEYS.open).permalinks, [])
+})
+
 test("a cycle the unload aborted hands no request state over, like its watermark", async () => {
   const controller = new AbortController()
   const h = harness({ issues: [issueWithBody(7, ["permalink: p7", "state: blocked"])], signal: controller.signal })

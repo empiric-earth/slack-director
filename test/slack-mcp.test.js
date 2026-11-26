@@ -232,6 +232,21 @@ test("the scan reports its paging whole only when the last answer ends it and no
   assert.equal(stuck.complete, false, "a cursor that repeats leaves the scan cut")
 })
 
+test("the completeness check reads the live answer's shape: the pagination_info cursor line cuts it, its absence ends it", () => {
+  // The shape a read-only live probe recorded: a JSON object with `results`
+  // (markdown text) and `pagination_info`. The next cursor sits in
+  // `pagination_info` as a backticked token; the answer carried no page-limit
+  // notice. One suite test feeds both states to the completeness check.
+  const block0 = block(GRID, "DM (D03KHBF103X)", "1795008741.837299")
+  const cut = answer({
+    results: report([block0]),
+    pagination_info: "For the next page of results use cursor `Q1JVSURFQ0hBTk5FTDoxOjE3OTUwMDg3NDEuODM3Mjk5`\n",
+  })
+  const ended = answer({ results: report([block0]), pagination_info: "" })
+  assert.equal(scanComplete(cut), false, "a next cursor in `pagination_info` leaves the scan cut")
+  assert.equal(scanComplete(ended), true, "no cursor and no page-limit notice ends the scan")
+})
+
 test("an answer body is read from JSON or from an SSE stream", () => {
   assert.deepEqual(payloadOf('{"jsonrpc":"2.0","id":1,"result":{}}'), { jsonrpc: "2.0", id: 1, result: {} })
   assert.deepEqual(payloadOf('event: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"ok":true}}\n'), {

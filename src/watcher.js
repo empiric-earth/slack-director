@@ -97,6 +97,7 @@ const NO_REISSUE = {
   commit: async () => false,
   listCommits: () => [],
   removeStaleTemporaries: () => {},
+  forget: () => {},
 }
 
 const emptyToday = () => ({ flagged: 0, nextStepsPosted: 0, skipped: 0 })
@@ -393,6 +394,57 @@ export function createWatcher({
       await storage.set(KEYS.items, items)
       changed()
       return true
+    })
+  }
+
+  /**
+   * The latest open-issue read the poller left: whether it was complete — the
+   * list succeeded, was not possibly cut, and every issue's block could be read
+   * — and every open issue's `permalink`. A read that never happened, failed,
+   * was possibly cut, or held a body the reader could not parse answers
+   * `complete: false`: the flag scan then treats no unlisted permalink as a
+   * closed issue's.
+   */
+  async function readOpenIssues() {
+    const stored = await storage.get(KEYS.open)
+    if (!stored || stored.complete !== true || !Array.isArray(stored.permalinks)) {
+      return { complete: false, permalinks: new Set() }
+    }
+    return {
+      complete: true,
+      permalinks: new Set(stored.permalinks.filter((permalink) => typeof permalink === "string")),
+    }
+  }
+
+  /**
+   * Forget every seen permalink a complete scan no longer lists and no open
+   * issue carries: its seen entry, its item record, and its claim and commit
+   * files, so the next flag of the same message is a fresh one. The record's
+   * session is never deleted — a session the user kept stays, whether the item
+   * was closed or its session was archived. One writer at a time, and nothing
+   * at all unless the latest open-issue read was complete; the caller checks
+   * the scan is complete too. Answers the permalinks it forgot.
+   */
+  function forgetUnlisted({ listed, open }) {
+    if (!open.complete) return Promise.resolve([])
+    return serializedWrite(async () => {
+      const seen = new Set((await storage.get(KEYS.seen)) ?? [])
+      const items = await readItems()
+      const forgotten = []
+      for (const permalink of [...seen]) {
+        if (listed.has(permalink) || open.permalinks.has(permalink)) continue
+        seen.delete(permalink)
+        delete items[permalink]
+        const hash = permalinkHash(permalink)
+        claims.forget(hash)
+        reissue.forget(hash)
+        forgotten.push(permalink)
+      }
+      if (forgotten.length === 0) return []
+      await storage.set(KEYS.seen, [...seen])
+      await storage.set(KEYS.items, items)
+      changed()
+      return forgotten
     })
   }
 
@@ -760,7 +812,15 @@ export function createWatcher({
     // A failed scan is not an empty one: the workspace reports it.
     if (search.error) return { ok: false, error: search.error }
     if (search.rateLimited) return { ok: false, error: "rate limited" }
-    return { ok: true, error: null, skipped }
+    return {
+      ok: true,
+      error: null,
+      skipped,
+      // Every permalink this workspace's search listed, seen or new, and
+      // whether its paging saw the search's last page.
+      listed: search.hits.map((hit) => hit.permalink),
+      complete: search.complete === true,
+    }
   }
 
   /** Whether a config can run a poll at all. */
@@ -811,6 +871,10 @@ export function createWatcher({
     const candidates = await reissueCandidates()
     const workspaces = []
     const skipped = []
+    // Every permalink the scan listed, and whether each workspace's paging saw
+    // the search's last page. A scan forgets only when both are whole.
+    const listed = new Set()
+    const completions = []
     let discoveryError = null
     let servers
     try {
@@ -831,6 +895,18 @@ export function createWatcher({
       }
       workspaces.push({ name: server.name, ok: outcome.ok, error: outcome.error ?? null })
       skipped.push(...(outcome.skipped ?? []))
+      for (const permalink of outcome.listed ?? []) listed.add(permalink)
+      completions.push(outcome.ok === true && outcome.complete === true)
+    }
+    // A complete scan: there is at least one connected workspace and every one
+    // answered with no error, no rate limit, a sign-in that held, and a paging
+    // that saw the search's last page with no page-limit notice. Only after one
+    // may the watcher forget a message a flag is gone from.
+    const scanComplete =
+      servers.length > 0 && discoveryError === null && completions.length === servers.length && completions.every(Boolean)
+    if (scanComplete) {
+      const forgotten = await forgetUnlisted({ listed, open: await readOpenIssues() })
+      for (const permalink of forgotten) log(`forgot ${permalink}: its flag is gone and its issue is not open`)
     }
     const failed = workspaces.find((workspace) => !workspace.ok)
     const status = {

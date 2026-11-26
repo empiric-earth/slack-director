@@ -223,6 +223,17 @@ export function createPoller({
     return (await storage.get(KEYS.poller)) ?? defaultPollerStatus()
   }
 
+  /**
+   * Write the latest open-issue read for the flag scan's forget rule: whether
+   * the read was complete (the list succeeded, was not possibly cut, and every
+   * issue's block could be read) and every open issue's `permalink`. A failed
+   * or cut read is written `complete: false`, so the flag scan forgets nothing
+   * on it. The poller is the only writer of this key.
+   */
+  async function writeOpenIssues(snapshot) {
+    await storage.set(KEYS.open, snapshot)
+  }
+
   async function readWatermarks() {
     const stored = await storage.get(KEYS.watermarks)
     return stored && typeof stored === "object" ? stored : {}
@@ -272,6 +283,7 @@ export function createPoller({
     if (!listed || listed.ok !== true) {
       const detail = ghFailureText(listed)
       log(`poller: the issue list failed — ${detail}`)
+      await writeOpenIssues({ at: ranAt, complete: false, permalinks: [] })
       return failedCycle(previous, ranAt, detail)
     }
     let issues
@@ -280,6 +292,7 @@ export function createPoller({
     } catch (error) {
       const detail = messageOf(error)
       log(`poller: the issue list could not be read — ${detail}`)
+      await writeOpenIssues({ at: ranAt, complete: false, permalinks: [] })
       return failedCycle(previous, ranAt, detail)
     }
     const possiblyCut = issues.length === ISSUE_LIST_LIMIT
@@ -310,6 +323,11 @@ export function createPoller({
     // decided about it, so the item records and the dialog follow the issue even
     // for an issue whose Slack source is not read.
     const openIssues = []
+    // Every `permalink` the open issues name, and whether every issue's block
+    // could be read. Both feed the flag scan's forget rule: an issue whose block
+    // did not parse might carry a permalink, so its read is not a complete one.
+    const openPermalinks = []
+    let everyIssueRead = true
     let issuesRead = 0
     let threads = 0
     let conversations = 0
@@ -320,6 +338,9 @@ export function createPoller({
       if (cancelled()) return undefined
       const block = yamlBlockOf(issue.body)
       const fields = block === undefined ? undefined : blockFields(block)
+      if (!fields) everyIssueRead = false
+      const permalink = typeof fields?.permalink === "string" ? fields.permalink.trim() : ""
+      if (permalink !== "") openPermalinks.push(permalink)
       openIssues.push(requestStateOfIssue(issue, fields))
       if (!fields) {
         log(`poller: issue #${issue.number} skipped — its yaml block did not parse`)
@@ -464,6 +485,11 @@ export function createPoller({
     // An aborted cycle writes nothing: its watermark snapshot may already be
     // older than the progress the successor made, and must not overwrite it.
     if (cancelled()) return undefined
+    // The open-issue read the flag scan's forget rule reads: the permalinks
+    // every issue names, and whether the read is whole — a list under the limit
+    // whose every block could be read. A cut list or an unreadable body is no
+    // proof that a permalink is gone.
+    await writeOpenIssues({ at: ranAt, complete: !possiblyCut && everyIssueRead, permalinks: openPermalinks })
     // The request state the read carries reaches the item records, so the dialog
     // groups by it. A possibly cut list still names its issues' states; only a
     // complete one may hide an item whose issue it does not list.

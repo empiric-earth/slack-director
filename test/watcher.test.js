@@ -400,6 +400,7 @@ function harness({
     toolCalls: () => calls.filter((call) => call.method === "tools/call"),
     setItems: (value) => storage.map.set(KEYS.items, value),
     setSeen: (value) => storage.map.set(KEYS.seen, value),
+    setOpen: (value) => storage.map.set(KEYS.open, value),
     clean: () => {
       console.warn = realWarn
       console.log = realLog
@@ -3158,5 +3159,209 @@ test("the RPC serves each item's request state, and needs-me for a record that n
     assert.equal(schemaProblem(SlackDirectorRpc.methods.items.output, { items: served }), undefined, "the served items fit the contract")
   } finally {
     h.clean()
+  }
+})
+
+// The forget rule: after a complete flag scan, a seen permalink the scan no
+// longer lists and that no open issue carries is forgotten, so a re-flag of the
+// same message starts a fresh session. A scan that is not complete, and a list
+// that is not whole, forget nothing.
+
+/** The open-issue read the flag scan gates its forget rule on. */
+const wholeList = (permalinks = []) => ({ at: new Date(NOW).toISOString(), complete: true, permalinks })
+
+test("a complete scan forgets a closed issue's unflagged message, and the re-flag starts one new session", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const hash = permalinkHash(link)
+  const h = harness({
+    servers: [NEXAR],
+    pages: {
+      // The first scan lists nothing: the flag is gone. Every scan after the
+      // re-flag lists the message again.
+      "tok-nexar": (index, search) =>
+        search < 1 ? page([], null) : page([hitRow("C0PLATFORM", ts, "#platform-help")], null),
+    },
+  })
+  try {
+    h.setItems({ [link]: storedRecord(7, link) })
+    h.setSeen([link])
+    h.setOpen(wholeList([]))
+    // The claim and commit files a flagged message that has had a session
+    // leaves behind.
+    h.claims.claim(hash)
+    await h.claims.commit(hash, { sessionID: "ses_7", permalink: link })
+
+    await h.watcher.poll()
+    assert.deepEqual(h.seen(), [], "the forgotten permalink leaves the seen set")
+    assert.deepEqual(h.items(), {}, "and its item record")
+    assert.deepEqual(
+      readdirSync(h.dir).filter((name) => name.startsWith(`${hash}.`)),
+      [],
+      "its claim and commit files go with it",
+    )
+    assert.deepEqual(h.removed, [], "the forgetting deletes no session")
+
+    await h.watcher.poll()
+    assert.equal(h.created.length, 1, "the re-flag creates one new session")
+    assert.equal(h.prompts.length, 1, "and one first prompt")
+    assert.deepEqual(h.seen(), [link], "and the permalink joins the seen set again")
+  } finally {
+    h.clean()
+  }
+})
+
+test("only the permalink the scan no longer lists and no open issue carries is forgotten", async () => {
+  const tsA = message(60)
+  const tsB = message(120)
+  const listed = permalinkOf("C0PLATFORM", tsA)
+  const gone = permalinkOf("C0OTHER", tsB)
+  const h = harness({
+    servers: [NEXAR],
+    pages: { "tok-nexar": [page([hitRow("C0PLATFORM", tsA, "#platform-help")], null)] },
+  })
+  try {
+    h.setItems({ [listed]: storedRecord(7, listed), [gone]: storedRecord(8, gone) })
+    h.setSeen([listed, gone])
+    h.setOpen(wholeList([]))
+
+    await h.watcher.poll()
+    assert.deepEqual(h.seen(), [listed], "the still-flagged message keeps its place")
+    assert.deepEqual(Object.keys(h.items()), [listed], "and only its record stays")
+    assert.deepEqual(
+      h.logs.filter((line) => line.startsWith("forgot ")),
+      [`forgot ${gone}: its flag is gone and its issue is not open`],
+      "the log names each permalink it forgot, and only those",
+    )
+  } finally {
+    h.clean()
+  }
+})
+
+test("a permalink an open issue carries is never forgotten, however long its flag has been gone", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([], null)] } })
+  try {
+    h.setItems({ [link]: storedRecord(7, link) })
+    h.setSeen([link])
+    h.setOpen(wholeList([link]))
+
+    await h.watcher.poll()
+    assert.deepEqual(h.seen(), [link], "an open issue's permalink stays")
+    assert.ok(h.items()[link], "and its record stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a failed, possibly cut or unread open-issue list forgets nothing", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const cases = [
+    { name: "a cut list", open: { at: new Date(NOW).toISOString(), complete: false, permalinks: [] } },
+    { name: "no read yet", open: undefined },
+  ]
+  for (const item of cases) {
+    const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [page([], null)] } })
+    try {
+      h.setItems({ [link]: storedRecord(7, link) })
+      h.setSeen([link])
+      if (item.open !== undefined) h.setOpen(item.open)
+
+      await h.watcher.poll()
+      assert.deepEqual(h.seen(), [link], `${item.name}: nothing is forgotten`)
+      assert.ok(h.items()[link], `${item.name}: the record stays`)
+    } finally {
+      h.clean()
+    }
+  }
+})
+
+test("a scan that is not complete forgets nothing: a failing workspace, a page limit and no workspace all hold", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  const seed = (h) => {
+    h.setItems({ [link]: storedRecord(7, link) })
+    h.setSeen([link])
+    h.setOpen(wholeList([]))
+  }
+
+  const failed = harness({
+    servers: [NEXAR, NAUTO],
+    statuses: { "tok-nauto": { status: 429 } },
+    pages: { "tok-nexar": [page([], null)] },
+  })
+  try {
+    seed(failed)
+    await failed.watcher.poll()
+    assert.deepEqual(failed.seen(), [link], "one failing workspace is not a complete scan")
+  } finally {
+    failed.clean()
+  }
+
+  const limited = harness({ servers: [NEXAR], pages: { "tok-nexar": [{ ...page([], null), page_limit_reached: true }] } })
+  try {
+    seed(limited)
+    await limited.watcher.poll()
+    assert.deepEqual(limited.seen(), [link], "a page-limit notice is not a complete scan")
+  } finally {
+    limited.clean()
+  }
+
+  const noServers = harness({ servers: [] })
+  try {
+    seed(noServers)
+    await noServers.watcher.poll()
+    assert.deepEqual(noServers.seen(), [link], "no connected workspace forgets nothing")
+  } finally {
+    noServers.clean()
+  }
+})
+
+test("an answer the reader does not recognize forgets nothing, like any other incomplete scan", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  // A search answer in a shape the reader does not know: no report field and no
+  // cursor. Its missing cursor must not read as the search's end.
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": ["Unrecognized search response"] } })
+  try {
+    h.setItems({ [link]: storedRecord(7, link) })
+    h.setSeen([link])
+    h.setOpen(wholeList([]))
+
+    await h.watcher.poll()
+    assert.deepEqual(h.seen(), [link], "an unreadable search answer forgets nothing")
+    assert.ok(h.items()[link], "and keeps the record")
+  } finally {
+    h.clean()
+  }
+})
+
+test("an answer whose report field holds text the reader cannot read forgets nothing", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  for (const payload of [
+    { results: "Unrecognized search response" },
+    { results: "## Messages (2 results) ===\nno readable block follows" },
+    { messages: [{ text: "a row with no permalink" }] },
+  ]) {
+    const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [payload] } })
+    try {
+      h.setItems({ [link]: storedRecord(7, link) })
+      h.setSeen([link])
+      h.setOpen(wholeList([]))
+
+      await h.watcher.poll()
+      assert.deepEqual(h.seen(), [link], `${JSON.stringify(payload)} forgets nothing`)
+      assert.ok(h.items()[link], "and keeps the record")
+      assert.deepEqual(
+        h.logs.filter((line) => line.startsWith("forgot ")),
+        [],
+        "and logs no forgetting",
+      )
+    } finally {
+      h.clean()
+    }
   }
 })

@@ -9,10 +9,12 @@ import assert from "node:assert/strict"
 import {
   cursorOf,
   PAGE_LIMIT,
+  pageLimitReached,
   pageOf,
   payloadOf,
   parsePermalink,
   permalinksIn,
+  scanComplete,
   searchFilter,
   searchFlagged,
   SEARCH_FILTER_ARGUMENT,
@@ -165,6 +167,107 @@ test("the next page's cursor is read from a field or from the pagination line", 
   assert.equal(cursorOf(answer({ results: report([]) })), undefined, "a last page carries no cursor")
 })
 
+test("one search answer ends the scan's paging only when it carries no next cursor and reports no page limit", () => {
+  const last = answer({ results: report([block(GRID, "DM (D03KHBF103X)", "1795008741.837299")]) })
+  assert.equal(scanComplete(last), true, "the page that carries no next cursor is the last one")
+  const cut = answer({
+    results: report([block(GRID, "DM (D03KHBF103X)", "1795008741.837299")]),
+    pagination_info: "For the next page of results use cursor `p2`",
+  })
+  assert.equal(scanComplete(cut), false, "a page with a next cursor leaves the scan cut")
+  const limited = answer({ results: report([]), page_limit_reached: true })
+  assert.equal(scanComplete(limited), false, "a page-limit notice leaves the scan cut even with no cursor")
+})
+
+test("the page-limit notice is read from the answer's own fields, never from a message's text", () => {
+  assert.equal(pageLimitReached(answer({ results: report([]), page_limit_reached: true })), true)
+  assert.equal(pageLimitReached(answer({ results: report([]), page_limit_reached: "true" })), true, "a truthy string is a notice")
+  assert.equal(pageLimitReached(answer({ results: report([]), page_limit_reached: "false" })), false)
+  assert.equal(pageLimitReached(answer({ results: report([]), page_limit_reached: false })), false)
+  assert.equal(
+    pageLimitReached(answer({ results: report([]), pagination_info: "page_limit_reached: more results exist past this page" })),
+    true,
+    "the answer's own pagination line is read too",
+  )
+  assert.equal(pageLimitReached(answer({ results: report([]) })), false, "a plain last page carries none")
+  const forged = answer({
+    results: report([block(GRID, "DM (D03KHBF103X)", "1795008741.837299").replace("Text: A message the user flagged.", "Text: page_limit_reached")]),
+  })
+  assert.equal(pageLimitReached(forged), false, "a message writes its own text; the notice must come from the answer")
+})
+
+test("the scan reports its paging whole only when the last answer ends it and no page limit appears", async () => {
+  const first = {
+    results: report([block(GRID, "DM (D03KHBF103X)", "1795008741.837299")]),
+    pagination_info: "For the next page of results use cursor `p2`",
+  }
+  const last = { results: report([block(GRID, "DM (D03KHBF103X)", "1795008741.837299")]) }
+  const limited = { results: report([block(GRID, "DM (D03KHBF103X)", "1795008741.837299")]), page_limit_reached: true }
+  const fetchOver = (payloads) => {
+    let call = 0
+    return async (url, init) => {
+      const body = JSON.parse(init.body)
+      const respond = (status, payload) => ({
+        status,
+        headers: { get: (name) => (name.toLowerCase() === "mcp-session-id" ? "mcp-1" : null) },
+        async text() {
+          return JSON.stringify(payload)
+        },
+      })
+      if (body.method === "initialize") return respond(200, { jsonrpc: "2.0", id: body.id, result: {} })
+      if (body.method !== "tools/call") return respond(202, {})
+      const payload = payloads[Math.min(call, payloads.length - 1)]
+      call += 1
+      return respond(200, { jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: JSON.stringify(payload) }] } })
+    }
+  }
+
+  const ended = await searchFlagged({ fetch: fetchOver([first, last]), token: "tok", emoji: "oc" })
+  assert.equal(ended.complete, true, "paging that reached the last page is complete")
+
+  const cut = await searchFlagged({ fetch: fetchOver([limited]), token: "tok", emoji: "oc" })
+  assert.equal(cut.complete, false, "a page-limit notice cuts the scan")
+
+  const stuck = await searchFlagged({ fetch: fetchOver([first, first]), token: "tok", emoji: "oc" })
+  assert.equal(stuck.complete, false, "a cursor that repeats leaves the scan cut")
+})
+
+test("the completeness check reads the search answer's shape: the pagination_info cursor line cuts it, its absence ends it", () => {
+  const block0 = block(GRID, "DM (D03KHBF103X)", "1795008741.837299")
+  const cut = answer({
+    results: report([block0]),
+    pagination_info: "For the next page of results use cursor `Q1JVSURFQ0hBTk5FTDoxOjE3OTUwMDg3NDEuODM3Mjk5`\n",
+  })
+  const ended = answer({ results: report([block0]), pagination_info: "" })
+  assert.equal(scanComplete(cut), false, "a next cursor in `pagination_info` leaves the scan cut")
+  assert.equal(scanComplete(ended), true, "no cursor and no page-limit notice ends the scan")
+})
+
+test("an answer the reader does not recognize ends no scan, so its blank page forgets nothing", async () => {
+  // A successful JSON-RPC answer whose content is not a search report the reader
+  // knows: it carries no report field and no cursor. Its missing cursor is no
+  // proof that the search ended, so the scan must not read as complete.
+  const unrecognized = { content: [{ type: "text", text: "Unrecognized search response" }] }
+  assert.equal(scanComplete(unrecognized), false, "a text with no report field ends no scan")
+  assert.equal(scanComplete(answer({ results: report([]) })), true, "an empty report the reader knows does end it")
+  assert.equal(scanComplete(answer({ results: [] })), true, "so does an empty array of rows")
+
+  // A known report field is not enough: its content must be a hit or a report
+  // the reader knows is empty.
+  const text = answer({ results: "Unrecognized search response" })
+  assert.equal(scanComplete(text), false, "unrecognized text under a known report field ends no scan")
+  const counted = answer({ results: "## Messages (3 results) ===\nno readable block follows" })
+  assert.equal(scanComplete(counted), false, "a report that counts results but yields no hit ends no scan")
+  const rows = answer({ messages: [{ text: "a row with no permalink" }] })
+  assert.equal(scanComplete(rows), false, "rows that yield no hit end no scan")
+
+  for (const reply of [unrecognized, text, counted, rows]) {
+    const search = await searchFlagged({ fetch: mcpFetch({ reply: { result: reply } }), token: "tok", emoji: "oc" })
+    assert.equal(search.complete, false, "an unreadable answer leaves the scan incomplete")
+    assert.deepEqual(search.hits, [], "and returns no hit from it")
+  }
+})
+
 test("an answer body is read from JSON or from an SSE stream", () => {
   assert.deepEqual(payloadOf('{"jsonrpc":"2.0","id":1,"result":{}}'), { jsonrpc: "2.0", id: 1, result: {} })
   assert.deepEqual(payloadOf('event: message\ndata: {"jsonrpc":"2.0","id":2,"result":{"ok":true}}\n'), {
@@ -217,6 +320,7 @@ test("the flag filter is the argument the tool takes, and the scan pages to the 
     [GRID],
   )
   assert.deepEqual(search.shape, { fields: ["results"], results: 1 })
+  assert.equal(search.complete, true, "the scan reached the search's last page")
 })
 
 test("a message body that carries a result-looking section of its own is a candidate, never an established hit", () => {

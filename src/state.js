@@ -32,6 +32,11 @@ export const KEYS = {
   // issue. The poller is the only writer of both.
   poller: key("poller"),
   watermarks: key("watermarks"),
+  // The latest open-issue list's permalinks and whether that read was complete,
+  // written by the poller and read by the flag scan before it forgets a
+  // permalink. It is the one guard that says an absent permalink is a closed
+  // issue's, not an issue a cut list left out.
+  open: key("open"),
 }
 
 /** The claims directory, one per namespace. */

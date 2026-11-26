@@ -136,5 +136,19 @@ export function createClaims({ dir, fs = nodeFs, now = Date.now, randomID = rand
     }
   }
 
-  return { claim, removeClaim, commit, listCommits, removeStaleTemporaries, dir }
+  /**
+   * Remove every claim generation, the commit file and any temporary file of
+   * one permalink, so its next hit is a fresh one. A permalink's file names all
+   * start with its hash and a dot, and a hash is a fixed sixty-four characters,
+   * so no other permalink's files match. A caller forgets a permalink only once
+   * its message is unflagged and no open issue carries it (src/watcher.js).
+   */
+  function forget(hash) {
+    const prefix = `${hash}.`
+    for (const name of names()) {
+      if (name.startsWith(prefix)) fs.rmSync(path(name), { force: true })
+    }
+  }
+
+  return { claim, removeClaim, commit, listCommits, removeStaleTemporaries, forget, dir }
 }

@@ -9,6 +9,7 @@ import { createGhRunner, issueListArgs, ISSUE_LIST_LIMIT } from "../src/gh.js"
 import { blockFields, createPoller, tsBefore, tsOfIso, yamlBlockOf } from "../src/poller.js"
 import { newActivityPrompt } from "../src/first-prompt.js"
 import { cursorOf, newestTs, READ_CHANNEL_TOOL, READ_THREAD_TOOL, SLACK_MCP_URL, timestampsOf } from "../src/slack-mcp.js"
+import { pageRows } from "../src/page.js"
 import { KEYS, LEASE_MS } from "../src/state.js"
 
 const NOW = Date.UTC(2026, 10, 18, 12, 0, 0)
@@ -445,6 +446,92 @@ test("an unattended issue's asked_at falls back to the time the poller first rea
   assert.equal(entry.asked_at, new Date(NOW).toISOString(), "a missing asked_at falls back to the first read")
   assert.equal(entry.state_since, new Date(NOW).toISOString(), "and so does the state_since")
   assert.equal(entry.newActivity, false, "the first read marks nothing")
+})
+
+const toolError = (text) => ({ isError: true, content: [{ type: "text", text }] })
+
+/** The one open, in-scope, unattended issue of the failed-read tests. */
+const unattendedIssue = (extra = {}) =>
+  openIssue(11, {
+    permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
+    workspace: "slack_nexar",
+    channel_id: "C0PLATFORM",
+    channel_name: "platform-help",
+    thread_ts: "1795194443.137219",
+    ...extra,
+  })
+
+test("a failed Slack read never hides an unattended open issue, whichever way it fails", async () => {
+  const cases = {
+    "a tool error": { reads: () => toolError("the channel could not be read") },
+    "a rate limit": { reads: () => toolError("rate_limited: too many requests") },
+    "an answer the reader cannot read": { reads: () => reportAnswer({ messages: "an unrecognized report" }) },
+    "no credential": { token: null, reads: () => answer([{ ts: tsOf(30) }]) },
+    "no Slack server": { servers: [], reads: () => answer([{ ts: tsOf(30) }]) },
+  }
+  for (const [name, options] of Object.entries(cases)) {
+    const h = harness({ issues: [unattendedIssue()], ...options })
+    await h.run()
+    assert.deepEqual(h.status().failed, [11], `${name}: the failure is reported`)
+    assert.equal(h.prompts.length, 0, `${name}: no wake`)
+    assert.equal(h.watermarks()["11"], undefined, `${name}: no watermark is written`)
+    const [entry] = h.status().unattended
+    assert.equal(entry?.number, 11, `${name}: the open issue is still listed as unattended`)
+    assert.equal(entry.permalink, "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219", name)
+    assert.equal(entry.state, "needs-me", `${name}: its request state is the issue's`)
+    assert.equal(entry.newActivity, false, `${name}: the failed read marks nothing it did not see`)
+    const rows = pageRows([], () => ({}), h.status().unattended)
+    assert.equal(rows.filter((row) => row.unattended && row.item.issueNumber === 11).length, 1, `${name}: the overview shows its row`)
+  }
+})
+
+test("a failed read keeps an unattended issue's activity mark and the age it first had", async () => {
+  const h = harness({ issues: [unattendedIssue()], reads: () => answer([{ ts: tsOf(30) }]) })
+  h.setWatermarks({ 11: { ts: tsOf(600), firstReadAt: new Date(NOW - 3600_000).toISOString() } })
+  await h.run()
+  assert.equal(h.status().unattended[0].newActivity, true, "a healthy read marks the new message")
+  const healthy = h.status().unattended[0]
+
+  const failing = harness({ issues: [unattendedIssue()], reads: () => toolError("boom") })
+  failing.clock.ms = NOW + 300_000
+  failing.storage.map.set(KEYS.poller, structuredClone(h.status()))
+  failing.storage.map.set(KEYS.watermarks, structuredClone(h.watermarks()))
+  await failing.run()
+  const [entry] = failing.status().unattended
+  assert.equal(entry.number, 11, "the next cycle's failed read still lists the issue")
+  assert.equal(entry.newActivity, true, "and keeps the mark the last cycle found")
+  assert.equal(entry.asked_at, healthy.asked_at, "and its age")
+  assert.deepEqual(failing.status().failed, [11])
+})
+
+test("an unattended issue whose very first read fails keeps the time it was first seen", async () => {
+  const issue = unattendedIssue()
+  const first = harness({ issues: [issue], reads: () => toolError("boom") })
+  await first.run()
+  const seen = first.status().unattended[0].asked_at
+  assert.equal(seen, new Date(NOW).toISOString(), "a missing asked_at starts at the first cycle")
+
+  const later = harness({ issues: [issue], reads: () => toolError("boom") })
+  later.clock.ms = NOW + 600_000
+  later.storage.map.set(KEYS.poller, structuredClone(first.status()))
+  await later.run()
+  assert.equal(later.status().unattended[0].asked_at, seen, "a later failed read does not restart its age")
+})
+
+test("a recovered read after failed ones reads the issue normally again", async () => {
+  let healthy = false
+  const h = harness({
+    issues: [unattendedIssue()],
+    reads: () => (healthy ? answer([{ ts: tsOf(30) }]) : toolError("boom")),
+  })
+  await h.run()
+  await h.run()
+  assert.equal(h.status().unattended.length, 1, "the failed cycles list the issue")
+  healthy = true
+  await h.run()
+  assert.deepEqual(h.status().failed, [], "the healthy cycle reports no failure")
+  assert.equal(h.status().unattended.length, 1, "and still lists the issue once")
+  assert.equal(h.watermarks()["11"].ts, tsOf(30), "its first healthy read sets the watermark")
 })
 
 test("a failed gh read keeps the unattended rows the last cycle reported", async () => {

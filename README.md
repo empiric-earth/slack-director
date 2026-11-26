@@ -240,6 +240,9 @@ stays.
   unattended issues, a `gh` failure, a rate-limited read, a possibly cut list),
   and the status lists each unattended issue with its `permalink`, `state`,
   `state_since` and `asked_at`, and a mark when its source has newer activity.
+  An issue is listed because it is open and in scope, not because its Slack read
+  worked: a failed, rate-limited or unauthorized read leaves it listed, with the
+  mark and the age the last cycle gave it, and moves no watermark.
 - The overview groups its rows by the request state the poller read from each
   open issue's yaml block — `needs-me`, `blocked`, `waiting-requester` or
   `idle` — and the session's own state is one mark on the row. An issue that

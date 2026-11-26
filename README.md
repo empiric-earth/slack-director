@@ -281,7 +281,17 @@ stays.
   issue instead of making a second one: the new session's first turn finds the
   issue by the same permalink, or, when the flag is on another message of the
   same thread, by the same channel and thread, sets it back to `needs-me` and
-  comments what changed. A forgotten message gets that fresh session only when
+  comments what changed. To reopen from the very message you closed, close the
+  issue, remove the message's flag, leave the flag off until the watcher has
+  forgotten the message, then flag it again. The forgetting needs one complete
+  flag scan with the flag off whose open-issue read no longer carries the
+  issue; the thread poller supplies that read, so it must be running
+  (`poll_minutes` not `0`). You can tell it is safe to re-flag once the
+  header's `last poll` has moved past the moment you removed the flag and its
+  `poller` cell's last cycle is past the close — the defaults are `poll_seconds`
+  60 for the scan and `poll_minutes` 5 for the read. A flag toggled off and on
+  between two scans does nothing, because the message is still seen: remove the
+  flag and wait once more. A forgotten message gets that fresh session only when
   it is flagged again; nothing brings it back on its own, and reinstalling an
   earlier build does not undo the forgetting.
 - `d`, or a click on the footer's Done hint, closes the item for good: the

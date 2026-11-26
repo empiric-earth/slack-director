@@ -35,6 +35,14 @@ export const SORT_BY = "timestamp"
 /** Slack returns at most twenty results per page. */
 export const PAGE_LIMIT = 20
 
+/**
+ * The fields a search or a read answer carries its report in: the tool's
+ * markdown report under `results`, or rows under `messages` or `hits`. An
+ * answer with none of them — or with a value that is not a report — is not a
+ * report this reader understands.
+ */
+const REPORT_FIELDS = ["results", "messages", "hits"]
+
 const PROTOCOL_VERSION = "2025-06-18"
 const CLIENT = { name: "slack-director", version: "0.1.0" }
 
@@ -243,13 +251,29 @@ export function pageLimitReached(result) {
 }
 
 /**
- * Whether one search answer ends the scan's paging: it carries no next cursor
- * and reports no page limit. The page that carries neither is the last one, so
- * a scan whose last answer this judges complete has seen every flagged message
- * the search would return; any other page leaves the scan cut.
+ * Whether a search answer is one this reader recognizes: it carries the tool's
+ * report in a field the reader knows. An answer with none of them — a transport
+ * text, an error body, or a report in a shape the reader does not know — is
+ * unreadable, so its blank page is no proof that the search ended.
+ */
+function searchAnswerReadable(result) {
+  const payload = resultPayload(result)
+  return REPORT_FIELDS.some((field) => {
+    const value = payload[field]
+    return typeof value === "string" || Array.isArray(value)
+  })
+}
+
+/**
+ * Whether one search answer ends the scan's paging: it is a search report the
+ * reader recognizes, it carries no next cursor and it reports no page limit.
+ * The page that carries none is the last one, so a scan whose last answer this
+ * judges complete has seen every flagged message the search would return; any
+ * other page — a next cursor, a page limit, or an answer the reader does not
+ * know — leaves the scan cut.
  */
 export function scanComplete(result) {
-  return cursorOf(result) === undefined && !pageLimitReached(result)
+  return searchAnswerReadable(result) && cursorOf(result) === undefined && !pageLimitReached(result)
 }
 
 /** The field names and result-block count of an answer, for a log line that carries no Slack text. */
@@ -334,10 +358,11 @@ function toolErrorText(result) {
 /**
  * Search one workspace for the messages the user flagged, paging to the last
  * page. Returns the hits, whether the paging saw the search's last page
- * (`complete`: the last answer carried no next cursor and no answer reported a
- * page limit), whether the scan ended early because Slack rate limited it or
- * refused the credential, why it failed when the transport, the protocol or the
- * tool itself failed, and the last answer's shape.
+ * (`complete`: the last answer was a search report the reader recognizes with
+ * no next cursor, and no answer reported a page limit), whether the scan ended
+ * early because Slack rate limited it or refused the credential, why it failed
+ * when the transport, the protocol or the tool itself failed, and the last
+ * answer's shape.
  *
  * `isSeen` says whether an earlier poll already recorded a permalink. A page
  * with a candidate the poll has not seen is searched again one result at a
@@ -460,7 +485,10 @@ export async function searchFlagged({
     }
     const next = cursorOf(result)
     if (!next) {
-      ended = true
+      // A cursor-less answer ends the paging only when the reader recognizes it
+      // as a search report: an answer in a shape the reader does not know is no
+      // proof that the search ended, so the scan stays cut.
+      ended = searchAnswerReadable(result)
       break
     }
     if (next === cursor) break
@@ -567,12 +595,6 @@ export function newestTs(values) {
   return newest
 }
 
-// The fields a read answer carries its report in. The live read answers are one
-// JSON object with `messages`; a search answer uses `results` or `hits`. An
-// answer with none of them — or with a value that is not a report — is not a
-// report this reader understands.
-const READ_REPORT_FIELDS = ["messages", "results", "hits"]
-
 // A report text the live read answers give for a conversation with no message.
 const EMPTY_REPORT = /^no\s+(?:thread\s+)?mess+ages?\b/i
 
@@ -592,7 +614,7 @@ function emptyReport(value) {
 export function readableAnswer(result) {
   if (timestampsOf(result).length > 0) return true
   const payload = resultPayload(result)
-  return READ_REPORT_FIELDS.some((field) => emptyReport(payload[field]))
+  return REPORT_FIELDS.some((field) => emptyReport(payload[field]))
 }
 
 /**

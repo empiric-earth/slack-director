@@ -232,11 +232,7 @@ test("the scan reports its paging whole only when the last answer ends it and no
   assert.equal(stuck.complete, false, "a cursor that repeats leaves the scan cut")
 })
 
-test("the completeness check reads the live answer's shape: the pagination_info cursor line cuts it, its absence ends it", () => {
-  // The shape a read-only live probe recorded: a JSON object with `results`
-  // (markdown text) and `pagination_info`. The next cursor sits in
-  // `pagination_info` as a backticked token; the answer carried no page-limit
-  // notice. One suite test feeds both states to the completeness check.
+test("the completeness check reads the search answer's shape: the pagination_info cursor line cuts it, its absence ends it", () => {
   const block0 = block(GRID, "DM (D03KHBF103X)", "1795008741.837299")
   const cut = answer({
     results: report([block0]),
@@ -245,6 +241,19 @@ test("the completeness check reads the live answer's shape: the pagination_info 
   const ended = answer({ results: report([block0]), pagination_info: "" })
   assert.equal(scanComplete(cut), false, "a next cursor in `pagination_info` leaves the scan cut")
   assert.equal(scanComplete(ended), true, "no cursor and no page-limit notice ends the scan")
+})
+
+test("an answer the reader does not recognize ends no scan, so its blank page forgets nothing", async () => {
+  // A successful JSON-RPC answer whose content is not a search report the reader
+  // knows: it carries no report field and no cursor. Its missing cursor is no
+  // proof that the search ended, so the scan must not read as complete.
+  const unrecognized = { content: [{ type: "text", text: "Unrecognized search response" }] }
+  assert.equal(scanComplete(unrecognized), false, "a text with no report field ends no scan")
+  assert.equal(scanComplete(answer({ results: report([]) })), true, "an empty report the reader knows does end it")
+
+  const search = await searchFlagged({ fetch: mcpFetch({ reply: { result: unrecognized } }), token: "tok", emoji: "oc" })
+  assert.equal(search.complete, false, "an unreadable answer leaves the scan incomplete")
+  assert.deepEqual(search.hits, [], "and returns no hit from it")
 })
 
 test("an answer body is read from JSON or from an SSE stream", () => {

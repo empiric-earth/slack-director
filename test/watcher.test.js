@@ -3313,3 +3313,22 @@ test("a scan that is not complete forgets nothing: a failing workspace, a page l
     noServers.clean()
   }
 })
+
+test("an answer the reader does not recognize forgets nothing, like any other incomplete scan", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  // A search answer in a shape the reader does not know: no report field and no
+  // cursor. Its missing cursor must not read as the search's end.
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": ["Unrecognized search response"] } })
+  try {
+    h.setItems({ [link]: storedRecord(7, link) })
+    h.setSeen([link])
+    h.setOpen(wholeList([]))
+
+    await h.watcher.poll()
+    assert.deepEqual(h.seen(), [link], "an unreadable search answer forgets nothing")
+    assert.ok(h.items()[link], "and keeps the record")
+  } finally {
+    h.clean()
+  }
+})

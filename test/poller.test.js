@@ -534,6 +534,28 @@ test("a recovered read after failed ones reads the issue normally again", async 
   assert.equal(h.watermarks()["11"].ts, tsOf(30), "its first healthy read sets the watermark")
 })
 
+test("a recovered unattended issue keeps the time it was first seen on every later cycle", async () => {
+  let healthy = false
+  const h = harness({
+    issues: [unattendedIssue()],
+    reads: () => (healthy ? answer([{ ts: tsOf(30) }]) : toolError("boom")),
+  })
+  const seen = new Date(NOW).toISOString()
+  await h.run()
+  await h.run()
+  assert.equal(h.status().unattended[0].asked_at, seen, "the failed cycles start the age at the first cycle")
+
+  healthy = true
+  for (const minutes of [10, 15, 20]) {
+    h.clock.ms = NOW + minutes * 60_000
+    await h.run()
+    const [entry] = h.status().unattended
+    assert.equal(entry.asked_at, seen, `healthy cycle at +${minutes} minutes keeps the age`)
+    assert.equal(entry.state_since, seen, `and the state_since fallback at +${minutes} minutes`)
+  }
+  assert.equal(h.watermarks()["11"].firstReadAt, seen, "the stored baseline carries the first-seen time")
+})
+
 test("a failed gh read keeps the unattended rows the last cycle reported", async () => {
   const link = "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219"
   const listed = JSON.stringify([

@@ -323,12 +323,9 @@ export function createPoller({
     // One unattended issue's status entry. It is built from the open-issue list
     // alone, so a failed Slack read never hides the issue; `newActivity` is what
     // the read found, or, on a failed read, what the last cycle already knew.
-    const unattendedEntry = (issue, fields, firstReadAt, firstReadKnown, newActivity) => {
+    const unattendedEntry = (issue, fields, firstReadAt, newActivity) => {
       const before = previousUnattended.find((row) => row?.number === issue.number)
-      // With no `asked_at` of its own, an issue ages from the time the poller
-      // first read it: the stored time, else the one its last status entry
-      // carried, else this cycle's.
-      const askedAt = fields.asked_at ?? (firstReadKnown ? firstReadAt : (before?.asked_at ?? firstReadAt))
+      const askedAt = fields.asked_at ?? firstReadAt
       return {
         number: issue.number,
         url: issue.url,
@@ -376,8 +373,13 @@ export function createPoller({
       const key = String(issue.number)
       const stored = watermarks[key]
       const storedTs = typeof stored?.ts === "string" ? stored.ts : undefined
-      const firstReadKnown = typeof stored?.firstReadAt === "string"
-      const firstReadAt = firstReadKnown ? stored.firstReadAt : ranAt
+      // With no `asked_at` of its own, an issue ages from the time the poller
+      // first saw it: the stored time, else the one its last status entry
+      // carried (a failed read stores none), else this cycle's. The baseline
+      // write below stores this same time.
+      const carriedAt = previousUnattended.find((row) => row?.number === issue.number)?.asked_at
+      const firstReadAt =
+        typeof stored?.firstReadAt === "string" ? stored.firstReadAt : typeof carriedAt === "string" ? carriedAt : ranAt
       const record = recordFor(issue, fields)
 
       // The effective watermark: what was stored, else the flag of an item this
@@ -399,7 +401,7 @@ export function createPoller({
         failed.push(issue.number)
         if (outcome === "ok") outcome = `read failed: #${issue.number}`
         log(`poller: issue #${issue.number} was not read — ${!server ? "no Slack server" : !token?.access ? "no credential" : "the issue names no channel or thread"}`)
-        if (!record) unattendedListed.push(unattendedEntry(issue, fields, firstReadAt, firstReadKnown))
+        if (!record) unattendedListed.push(unattendedEntry(issue, fields, firstReadAt))
         continue
       }
 
@@ -432,7 +434,7 @@ export function createPoller({
         const reason = stop.rateLimited ? "rate limited" : stop.unauthorized ? "sign-in expired" : "read failed"
         if (outcome === "ok") outcome = `${reason}: #${issue.number}`
         log(`poller: issue #${issue.number} ${reason} — no watermark moved`)
-        if (!record) unattendedListed.push(unattendedEntry(issue, fields, firstReadAt, firstReadKnown))
+        if (!record) unattendedListed.push(unattendedEntry(issue, fields, firstReadAt))
         continue
       }
 
@@ -454,7 +456,7 @@ export function createPoller({
         } else if (newActivity) {
           // The watermark stays; only the mark moves.
         }
-        unattendedListed.push(unattendedEntry(issue, fields, firstReadAt, firstReadKnown, newActivity))
+        unattendedListed.push(unattendedEntry(issue, fields, firstReadAt, newActivity))
         continue
       }
 

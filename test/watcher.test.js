@@ -3228,6 +3228,11 @@ test("only the permalink the scan no longer lists and no open issue carries is f
     await h.watcher.poll()
     assert.deepEqual(h.seen(), [listed], "the still-flagged message keeps its place")
     assert.deepEqual(Object.keys(h.items()), [listed], "and only its record stays")
+    assert.deepEqual(
+      h.logs.filter((line) => line.startsWith("forgot ")),
+      [`forgot ${gone}: its flag is gone and its issue is not open`],
+      "the log names each permalink it forgot, and only those",
+    )
   } finally {
     h.clean()
   }
@@ -3330,5 +3335,33 @@ test("an answer the reader does not recognize forgets nothing, like any other in
     assert.ok(h.items()[link], "and keeps the record")
   } finally {
     h.clean()
+  }
+})
+
+test("an answer whose report field holds text the reader cannot read forgets nothing", async () => {
+  const ts = message(60)
+  const link = permalinkOf("C0PLATFORM", ts)
+  for (const payload of [
+    { results: "Unrecognized search response" },
+    { results: "## Messages (2 results) ===\nno readable block follows" },
+    { messages: [{ text: "a row with no permalink" }] },
+  ]) {
+    const h = harness({ servers: [NEXAR], pages: { "tok-nexar": [payload] } })
+    try {
+      h.setItems({ [link]: storedRecord(7, link) })
+      h.setSeen([link])
+      h.setOpen(wholeList([]))
+
+      await h.watcher.poll()
+      assert.deepEqual(h.seen(), [link], `${JSON.stringify(payload)} forgets nothing`)
+      assert.ok(h.items()[link], "and keeps the record")
+      assert.deepEqual(
+        h.logs.filter((line) => line.startsWith("forgot ")),
+        [],
+        "and logs no forgetting",
+      )
+    } finally {
+      h.clean()
+    }
   }
 })

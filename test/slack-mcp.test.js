@@ -250,10 +250,22 @@ test("an answer the reader does not recognize ends no scan, so its blank page fo
   const unrecognized = { content: [{ type: "text", text: "Unrecognized search response" }] }
   assert.equal(scanComplete(unrecognized), false, "a text with no report field ends no scan")
   assert.equal(scanComplete(answer({ results: report([]) })), true, "an empty report the reader knows does end it")
+  assert.equal(scanComplete(answer({ results: [] })), true, "so does an empty array of rows")
 
-  const search = await searchFlagged({ fetch: mcpFetch({ reply: { result: unrecognized } }), token: "tok", emoji: "oc" })
-  assert.equal(search.complete, false, "an unreadable answer leaves the scan incomplete")
-  assert.deepEqual(search.hits, [], "and returns no hit from it")
+  // A known report field is not enough: its content must be a hit or a report
+  // the reader knows is empty.
+  const text = answer({ results: "Unrecognized search response" })
+  assert.equal(scanComplete(text), false, "unrecognized text under a known report field ends no scan")
+  const counted = answer({ results: "## Messages (3 results) ===\nno readable block follows" })
+  assert.equal(scanComplete(counted), false, "a report that counts results but yields no hit ends no scan")
+  const rows = answer({ messages: [{ text: "a row with no permalink" }] })
+  assert.equal(scanComplete(rows), false, "rows that yield no hit end no scan")
+
+  for (const reply of [unrecognized, text, counted, rows]) {
+    const search = await searchFlagged({ fetch: mcpFetch({ reply: { result: reply } }), token: "tok", emoji: "oc" })
+    assert.equal(search.complete, false, "an unreadable answer leaves the scan incomplete")
+    assert.deepEqual(search.hits, [], "and returns no hit from it")
+  }
 })
 
 test("an answer body is read from JSON or from an SSE stream", () => {

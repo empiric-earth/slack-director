@@ -906,7 +906,7 @@ export function createWatcher({
       servers.length > 0 && discoveryError === null && completions.length === servers.length && completions.every(Boolean)
     if (scanComplete) {
       const forgotten = await forgetUnlisted({ listed, open: await readOpenIssues() })
-      if (forgotten.length > 0) log(`forgot ${forgotten.length} unflagged permalink(s) whose issue is not open`)
+      for (const permalink of forgotten) log(`forgot ${permalink}: its flag is gone and its issue is not open`)
     }
     const failed = workspaces.find((workspace) => !workspace.ok)
     const status = {

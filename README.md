@@ -284,16 +284,21 @@ stays.
   comments what changed. To reopen from the very message you closed, close the
   issue, remove the message's flag, leave the flag off until the watcher has
   forgotten the message, then flag it again. The forgetting needs one complete
-  flag scan with the flag off whose open-issue read no longer carries the
-  issue; the thread poller supplies that read, so it must be running
-  (`poll_minutes` not `0`). You can tell it is safe to re-flag once the
-  header's `last poll` has moved past the moment you removed the flag and its
-  `poller` cell's last cycle is past the close — the defaults are `poll_seconds`
-  60 for the scan and `poll_minutes` 5 for the read. A flag toggled off and on
-  between two scans does nothing, because the message is still seen: remove the
-  flag and wait once more. A forgotten message gets that fresh session only when
-  it is flagged again; nothing brings it back on its own, and reinstalling an
-  earlier build does not undo the forgetting.
+  flag scan with the flag off that runs after the thread poller's read of the
+  open issues has stopped listing the issue; the poller supplies that read, so
+  it must be running (`poll_minutes` not `0`). The one reliable sign is the
+  plugin's log: when the watcher forgets a message it writes one line,
+  `slack-director: forgot <permalink>: its flag is gone and its issue is not
+  open`, naming the message's own permalink. Flag the message again only after
+  that line appears. The header's `last poll` and the `poller` cell's last cycle
+  are not that sign: `last poll` moves on a scan that was not complete too, and
+  a scan can run before the poller's next read, so both can look right while the
+  message is still seen. The defaults are `poll_seconds` 60 for the scan and
+  `poll_minutes` 5 for the read, so the line takes up to a few minutes. A flag
+  put back before that line does nothing, because the message is still seen: if
+  that happens, remove the flag again and wait for the line. A forgotten message
+  gets a fresh session only when it is flagged again; nothing brings it back on
+  its own, and reinstalling an earlier build does not undo the forgetting.
 - `d`, or a click on the footer's Done hint, closes the item for good: the
   item's own session posts a close-reason comment and closes the intake issue as
   completed, and the plugin deletes the session and every child session under it

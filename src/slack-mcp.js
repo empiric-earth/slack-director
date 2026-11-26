@@ -250,18 +250,36 @@ export function pageLimitReached(result) {
   return false
 }
 
+// The count line a search report opens with when it holds no message.
+const EMPTY_SEARCH_REPORT = /^#{1,3}[ \t]*Messages[ \t]*\(0 results\)/im
+
 /**
- * Whether a search answer is one this reader recognizes: it carries the tool's
- * report in a field the reader knows. An answer with none of them — a transport
- * text, an error body, or a report in a shape the reader does not know — is
- * unreadable, so its blank page is no proof that the search ended.
+ * Whether a report field is a search report that holds no message: an empty
+ * array of rows, or a text whose count line says no result and that carries no
+ * result block.
+ */
+function emptySearchReport(value) {
+  if (Array.isArray(value)) return value.length === 0
+  return typeof value === "string" && EMPTY_SEARCH_REPORT.test(value) && value.search(RESULT_MARKER) === -1
+}
+
+/**
+ * Whether a search answer is one this reader recognizes: its report field
+ * yields at least one hit, or is a report the reader knows holds none. An
+ * answer with no such field — a transport text, an error body, a report in a
+ * shape the reader does not know, or a known field holding text the reader
+ * cannot read — is unreadable, so its blank page is no proof that the search
+ * ended.
  */
 function searchAnswerReadable(result) {
   const payload = resultPayload(result)
-  return REPORT_FIELDS.some((field) => {
+  const reported = REPORT_FIELDS.some((field) => {
     const value = payload[field]
     return typeof value === "string" || Array.isArray(value)
   })
+  if (!reported) return false
+  if (pageOf(result).established.length > 0) return true
+  return REPORT_FIELDS.some((field) => emptySearchReport(payload[field]))
 }
 
 /**

@@ -140,6 +140,16 @@ const item = {
     title: { type: "string" },
     issueNumber: nullableInteger,
     issueUrl: nullableString,
+    // The request state the poller read from the issue's yaml block, the time it
+    // was set, and the fields that apply only while the issue is blocked or
+    // waiting on the requester.
+    requestState: { type: "string" },
+    stateSince: nullableString,
+    blockedOn: nullableString,
+    waitingOn: { type: "array", items: { type: "string" } },
+    // Set once the issue has left a complete open-issue list: the item is done,
+    // and its row leaves the dialog.
+    issueClosed: { type: "boolean" },
     firstTurnEndedAt: nullableString,
     firstTurnFailed: { type: "boolean" },
     permissionPending: { type: "boolean" },
@@ -155,6 +165,11 @@ const item = {
     "title",
     "issueNumber",
     "issueUrl",
+    "requestState",
+    "stateSince",
+    "blockedOn",
+    "waitingOn",
+    "issueClosed",
     "firstTurnEndedAt",
     "firstTurnFailed",
     "permissionPending",

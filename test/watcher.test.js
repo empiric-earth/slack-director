@@ -3021,3 +3021,142 @@ test("a refused close reaches the dialog as a refusal with what to do next", asy
     gone.h.clean()
   }
 })
+
+// One item record as the store holds it, complete enough for the RPC contract.
+const storedRecord = (number, permalink, extra = {}) => ({
+  permalink,
+  workspace: "slack_nexar",
+  channel: "#platform-help",
+  asker: "Maria Costa",
+  flaggedAt: new Date(NOW).toISOString(),
+  sessionID: `ses_${number}`,
+  title: `Request ${number}`,
+  issueNumber: number,
+  issueUrl: `https://github.com/empiric-earth/almeida-slack-intake/issues/${number}`,
+  firstTurnEndedAt: null,
+  firstTurnFailed: false,
+  permissionPending: false,
+  openedAt: null,
+  recordFormat: RECORD_FORMAT,
+  ...extra,
+})
+
+test("the poller's open-issue read lands on the item records, and a complete one closes an issue it does not list", async () => {
+  const h = harness()
+  try {
+    const one = permalinkOf("C0PLATFORM", "1795194443.137219")
+    const two = permalinkOf("C0PLATFORM", "1795194443.137220")
+    const three = permalinkOf("C0PLATFORM", "1795194443.137221")
+    h.setItems({
+      [one]: storedRecord(7, one),
+      [two]: storedRecord(8, two),
+      [three]: storedRecord(null, three, { issueNumber: null, issueUrl: null }),
+    })
+    const before = h.changes.length
+
+    const written = await h.watcher.applyIssueStates({
+      complete: true,
+      issues: [
+        { number: 7, state: "blocked", stateSince: "2026-11-18T09:00:00.000Z", blockedOn: "https://example.test/d/1", waitingOn: ["U0000000001"] },
+      ],
+    })
+
+    assert.equal(written, true, "the read changed the records")
+    const items = h.items()
+    assert.equal(items[one].requestState, "blocked", "the issue's state reaches its item record")
+    assert.equal(items[one].stateSince, "2026-11-18T09:00:00.000Z")
+    assert.equal(items[one].blockedOn, "https://example.test/d/1")
+    assert.deepEqual(items[one].waitingOn, ["U0000000001"])
+    assert.equal(items[one].issueClosed, false, "an issue the read names is open")
+    assert.equal(items[two].issueClosed, true, "an issue missing from a complete read is closed")
+    assert.equal(items[three].issueClosed, undefined, "a record with no issue yet is left alone")
+    assert.equal(h.changes.length, before + 1, "one change notice went out")
+
+    const again = await h.watcher.applyIssueStates({
+      complete: true,
+      issues: [
+        { number: 7, state: "blocked", stateSince: "2026-11-18T09:00:00.000Z", blockedOn: "https://example.test/d/1", waitingOn: ["U0000000001"] },
+      ],
+    })
+    assert.equal(again, false, "the same read writes nothing")
+    assert.equal(h.changes.length, before + 1, "and sends no second change notice")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a failed or possibly cut read changes no record's visibility, and an issue with no state reads as needs-me", async () => {
+  const h = harness()
+  try {
+    const one = permalinkOf("C0PLATFORM", "1795194443.137219")
+    h.setItems({ [one]: storedRecord(7, one, { requestState: "blocked", stateSince: "2026-11-17T09:00:00.000Z" }) })
+
+    await h.watcher.applyIssueStates({ complete: false, issues: [{ number: 9, state: "idle" }] })
+    assert.equal(h.items()[one].requestState, "blocked", "an issue the cut read does not name keeps its state")
+    assert.equal(h.items()[one].stateSince, "2026-11-17T09:00:00.000Z")
+    assert.equal(h.items()[one].issueClosed, undefined, "and stays visible")
+
+    await h.watcher.applyIssueStates({ complete: false, issues: [{ number: 7 }] })
+    assert.equal(h.items()[one].requestState, "needs-me", "an issue that names no state reads as needs-me")
+    assert.equal(h.items()[one].stateSince, null, "and its own time goes with it")
+    assert.equal(h.items()[one].blockedOn, null)
+    assert.deepEqual(h.items()[one].waitingOn, [])
+    assert.equal(h.items()[one].issueClosed, false)
+  } finally {
+    h.clean()
+  }
+})
+
+test("an issue that returns to an open read is visible again, with no change to its yaml", async () => {
+  const h = harness()
+  try {
+    const one = permalinkOf("C0PLATFORM", "1795194443.137219")
+    h.setItems({
+      [one]: storedRecord(7, one, {
+        requestState: "blocked",
+        stateSince: "2026-11-18T09:00:00.000Z",
+        blockedOn: "https://example.test/d/1",
+        waitingOn: ["U0000000001"],
+        issueClosed: true,
+      }),
+    })
+
+    const written = await h.watcher.applyIssueStates({
+      complete: true,
+      issues: [
+        { number: 7, state: "blocked", stateSince: "2026-11-18T09:00:00.000Z", blockedOn: "https://example.test/d/1", waitingOn: ["U0000000001"] },
+      ],
+    })
+
+    assert.equal(written, true, "reopening writes the record even when its yaml did not change")
+    assert.equal(h.items()[one].issueClosed, false, "the reopened issue shows its row again")
+  } finally {
+    h.clean()
+  }
+})
+
+test("the RPC serves each item's request state, and needs-me for a record that names none", async () => {
+  const h = harness()
+  try {
+    const one = permalinkOf("C0PLATFORM", "1795194443.137219")
+    const two = permalinkOf("C0PLATFORM", "1795194443.137220")
+    h.setItems({
+      [one]: storedRecord(7, one, { requestState: "waiting-requester", stateSince: "2026-11-18T09:00:00.000Z", waitingOn: ["U0000000001"], issueClosed: true }),
+      [two]: storedRecord(8, two),
+    })
+
+    const served = (await h.watcher.items()).items
+    assert.equal(served.length, 2)
+    assert.equal(served[0].requestState, "waiting-requester")
+    assert.equal(served[0].stateSince, "2026-11-18T09:00:00.000Z")
+    assert.deepEqual(served[0].waitingOn, ["U0000000001"])
+    assert.equal(served[0].issueClosed, true)
+    assert.equal(served[1].requestState, "needs-me", "a record that names no state reads as needs-me")
+    assert.equal(served[1].stateSince, null)
+    assert.deepEqual(served[1].waitingOn, [])
+    assert.equal(served[1].issueClosed, false)
+    assert.equal(schemaProblem(SlackDirectorRpc.methods.items.output, { items: served }), undefined, "the served items fit the contract")
+  } finally {
+    h.clean()
+  }
+})

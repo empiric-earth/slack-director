@@ -25,6 +25,7 @@ import {
   countsParts,
   fieldValue,
   footerParts,
+  hasSession,
   headerParts,
   moveSelection,
   openerCommand,
@@ -45,6 +46,18 @@ export const COMMAND_ID = "slack-director.page"
 
 /** The settings dialog's palette entry. */
 export const SETTINGS_COMMAND_ID = "slack-director.settings"
+
+/**
+ * What `enter` says on a row whose open issue has no session behind it: the row
+ * is opened in the browser, and the request is handled on GitHub.
+ */
+export const NO_SESSION_OPEN_NOTICE = "this request has no session — its issue is open on GitHub"
+
+/**
+ * What `d` says on the same row: there is no session to close, and the issue is
+ * closed by hand on GitHub.
+ */
+export const NO_SESSION_CLOSE_NOTICE = "this request has no session — close its issue on GitHub"
 
 /** A message for a toast or a log: an error's own text, whatever its shape. */
 const messageOf = (error) => {
@@ -287,6 +300,7 @@ async function setup(context, spawnProcess, rendererOverride) {
 
     /** What the TUI knows about one item's session, read where it is drawn. */
     const live = (item) => {
+      if (!hasSession(item)) return {}
       try {
         return {
           running: context.data.session.status(item.sessionID) === "running",
@@ -297,7 +311,11 @@ async function setup(context, spawnProcess, rendererOverride) {
       }
     }
 
-    const rows = () => pageRows(items(), live)
+    /**
+     * The rows the dialog shows: one per item whose issue is still open, and one
+     * per unattended open issue the poller's last cycle reported.
+     */
+    const rows = () => pageRows(items(), live, status()?.poller?.unattended ?? [])
     const current = () => selectedItem(rows(), selected())
 
     // The marker follows an item's identity, not its index: the identity the
@@ -509,6 +527,12 @@ async function setup(context, spawnProcess, rendererOverride) {
     const closeOverview = () => closeDialog()
     const openSelected = () => {
       const item = current()
+      // An unattended row has no session to open: its issue is opened with `i`,
+      // and the overview stays up so the marked row is still there.
+      if (item && !hasSession(item)) {
+        toast(`${PAGE_TITLE}: ${NO_SESSION_OPEN_NOTICE}`)
+        return
+      }
       closeDialog()
       void openItem(item)
     }
@@ -519,7 +543,16 @@ async function setup(context, spawnProcess, rendererOverride) {
       closeDialog()
       void openSettings()
     }
-    const closeSelectedItem = () => void closeItem(current())
+    const closeSelectedItem = () => {
+      const item = current()
+      // An unattended row has no session to close: the user closes its issue on
+      // GitHub, and nothing here removes the row.
+      if (item && !hasSession(item)) {
+        toast(`${PAGE_TITLE}: ${NO_SESSION_CLOSE_NOTICE}`)
+        return
+      }
+      void closeItem(item)
+    }
 
     /** The overview's own keys, as one modal layer its dialog owns. */
     function overviewKeys() {

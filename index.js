@@ -124,6 +124,9 @@ export default {
       session: ctx.session,
       log,
       onChange: () => emitUpdated(),
+      // The request state the poller reads reaches the item records through the
+      // watcher, which owns the one writer of the item map.
+      applyIssueStates: (input) => watcher.applyIssueStates(input),
     })
     const rpcRegistration = await ctx.rpc.register(SlackDirectorRpc, {
       status: () => watcher.status(),

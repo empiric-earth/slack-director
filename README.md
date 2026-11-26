@@ -85,7 +85,9 @@ today  4 flagged · 3 next steps posted
 ```
 
 The section a row sits under is the request state the poller read from its
-intake issue's yaml block, and the newest row comes first inside a section. The
+intake issue's yaml block. Inside a section the newest comes first: the newest
+flag for a row with a session behind it, and the newest state time for an
+unattended row, which has no flag. The
 issue cell shows the intake issue's number, and `—` until the item's first turn
 has named its issue. A heading sits directly above its first row, and no blank
 line is drawn for a group that is not shown.

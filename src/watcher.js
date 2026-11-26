@@ -155,8 +155,14 @@ export function itemOfRecord(record) {
 /** A field's value when it is a non-empty string, else the fallback. */
 const textOr = (value, fallback) => (typeof value === "string" && value !== "" ? value : fallback)
 
-/** Whether a record already carries exactly the request-state fields a read named. */
+/**
+ * Whether a record already carries exactly the fields a read names, closure
+ * included. The closure is part of what the write sets: an issue that returns to
+ * an open read is written even when its yaml block did not change, so reopening
+ * an issue without touching its body shows its row again.
+ */
 function sameRequestState(record, next) {
+  if ((record.issueClosed === true) !== (next.issueClosed === true)) return false
   if (record.requestState !== next.requestState) return false
   if ((record.stateSince ?? null) !== next.stateSince) return false
   if ((record.blockedOn ?? null) !== next.blockedOn) return false

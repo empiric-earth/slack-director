@@ -447,6 +447,73 @@ test("an unattended issue's asked_at falls back to the time the poller first rea
   assert.equal(entry.newActivity, false, "the first read marks nothing")
 })
 
+test("a failed gh read keeps the unattended rows the last cycle reported", async () => {
+  const link = "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219"
+  const listed = JSON.stringify([
+    openIssue(11, {
+      permalink: link,
+      workspace: "slack_nexar",
+      channel_id: "C0PLATFORM",
+      channel_name: "platform-help",
+      thread_ts: "1795194443.137219",
+    }),
+  ])
+  let calls = 0
+  const h = harness({
+    gh: () => {
+      calls += 1
+      return calls === 1
+        ? { ok: true, code: 0, stdout: listed, stderr: "" }
+        : { ok: false, code: 1, stdout: "", stderr: "not logged in" }
+    },
+    reads: () => answer([{ ts: tsOf(30) }]),
+  })
+  await h.run()
+  assert.equal(h.status().unattended.length, 1, "the first cycle lists the unattended issue")
+  await h.run()
+  assert.equal(h.status().unattended.length, 1, "a failed read hides no unattended row")
+  assert.equal(h.status().unattended[0].number, 11)
+  assert.match(h.status().ghError, /not logged in/, "and the failure is still reported")
+})
+
+test("a possibly cut list keeps an unattended row it does not name", async () => {
+  const link = "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219"
+  const first = JSON.stringify([
+    openIssue(11, {
+      permalink: link,
+      workspace: "slack_nexar",
+      channel_id: "C0PLATFORM",
+      channel_name: "platform-help",
+      thread_ts: "1795194443.137219",
+    }),
+  ])
+  const cut = JSON.stringify(
+    Array.from({ length: ISSUE_LIST_LIMIT }, (_, index) =>
+      openIssue(index + 100, {
+        permalink: `https://nexar.slack.com/archives/C0PLATFORM/p${index}`,
+        workspace: "slack_nexar",
+        channel_id: "C0PLATFORM",
+        channel_name: "platform-help",
+        thread_ts: `179519444${index}.137219`,
+      }),
+    ),
+  )
+  let calls = 0
+  const h = harness({
+    gh: () => (calls++ === 0 ? { ok: true, code: 0, stdout: first, stderr: "" } : { ok: true, code: 0, stdout: cut, stderr: "" }),
+    reads: () => answer([{ ts: tsOf(30) }]),
+  })
+  await h.run()
+  assert.equal(h.status().unattended.length, 1)
+  await h.run()
+  assert.equal(h.status().possiblyCut, true, "the second list is cut")
+  assert.ok(
+    h.status().unattended.some((entry) => entry.number === 11),
+    "the row the cut list does not name stays",
+  )
+  assert.equal(h.status().unattended.length, ISSUE_LIST_LIMIT + 1, "the cut list's own rows join it")
+})
+
 test("an issue whose yaml block carries a category gets no Slack read and no wake", async () => {
   const h = harness({
     issues: [

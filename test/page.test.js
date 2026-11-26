@@ -211,6 +211,34 @@ test("the rows are grouped by request state, newest first inside each section", 
   )
 })
 
+test("a row with a session orders by its flag, while its age counts from its state time", () => {
+  const older = item({
+    permalink: "pa",
+    sessionID: "ses_a",
+    flaggedAt: minutes(60 * 24),
+    stateSince: minutes(5),
+    requestState: "needs-me",
+  })
+  const newer = item({
+    permalink: "pb",
+    sessionID: "ses_b",
+    flaggedAt: minutes(2),
+    stateSince: minutes(60),
+    requestState: "needs-me",
+  })
+  const rows = pageRows([older, newer], () => ({}))
+  assert.deepEqual(
+    rows.map((row) => row.item.sessionID),
+    ["ses_b", "ses_a"],
+    "the newest flag comes first, not the newest state change",
+  )
+  assert.equal(
+    rows.find((row) => row.item.sessionID === "ses_a").at,
+    minutes(5),
+    "while its age still counts from its state_since",
+  )
+})
+
 test("an item whose issue left a complete open-issue list takes no row", () => {
   const closed = ITEMS.map((record) => (record.sessionID === "ses_1" ? { ...record, issueClosed: true } : record))
   const rows = pageRows(closed, liveOf)

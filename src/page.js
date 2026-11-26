@@ -116,9 +116,9 @@ export function ageStamp(item) {
   return typeof item?.flaggedAt === "string" ? item.flaggedAt : undefined
 }
 
-/** The instant a row's age counts from, or 0 when it names no usable time. */
-function atTime(row) {
-  const at = Date.parse(row?.at)
+/** The instant one row stamp names, or 0 when it names no usable time. */
+function atTime(stamp) {
+  const at = Date.parse(stamp)
   return Number.isNaN(at) ? 0 : at
 }
 
@@ -131,6 +131,7 @@ function atTime(row) {
 function unattendedRow(entry) {
   const at = typeof entry?.state_since === "string" ? entry.state_since : undefined
   const asked = typeof entry?.asked_at === "string" ? entry.asked_at : undefined
+  const stamp = at !== undefined && !Number.isNaN(Date.parse(at)) ? at : asked
   return {
     item: {
       permalink: typeof entry?.permalink === "string" ? entry.permalink : "",
@@ -145,7 +146,8 @@ function unattendedRow(entry) {
     session: {},
     note: entry?.newActivity === true ? NEW_ACTIVITY_MARK : undefined,
     unattended: true,
-    at: at !== undefined && !Number.isNaN(Date.parse(at)) ? at : asked,
+    at: stamp,
+    sortAt: stamp,
   }
 }
 
@@ -155,7 +157,8 @@ function unattendedRow(entry) {
  * last cycle reported. An item whose issue left a complete open-issue list is
  * closed and takes no row; a failed or possibly cut list leaves every row in
  * place. Rows are grouped by request state in the order of `REQUEST_STATES`, and
- * the newest first inside a section, by the time the row's own age counts from.
+ * the newest first inside a section: the newest flag for a row with a session
+ * behind it, and the newest state time for an unattended row, which has no flag.
  */
 export function pageRows(items, liveOf = () => ({}), unattended = []) {
   const named = (items ?? [])
@@ -167,12 +170,13 @@ export function pageRows(items, liveOf = () => ({}), unattended = []) {
       note: undefined,
       unattended: false,
       at: ageStamp(item),
+      sortAt: typeof item?.flaggedAt === "string" ? item.flaggedAt : undefined,
     }))
   const orphan = (unattended ?? []).map(unattendedRow)
   return [...named, ...orphan].sort((left, right) => {
     const byState = REQUEST_STATES.indexOf(left.state) - REQUEST_STATES.indexOf(right.state)
     if (byState !== 0) return byState
-    return atTime(right) - atTime(left)
+    return atTime(right.sortAt) - atTime(left.sortAt)
   })
 }
 

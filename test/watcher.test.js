@@ -3107,6 +3107,34 @@ test("a failed or possibly cut read changes no record's visibility, and an issue
   }
 })
 
+test("an issue that returns to an open read is visible again, with no change to its yaml", async () => {
+  const h = harness()
+  try {
+    const one = permalinkOf("C0PLATFORM", "1795194443.137219")
+    h.setItems({
+      [one]: storedRecord(7, one, {
+        requestState: "blocked",
+        stateSince: "2026-11-18T09:00:00.000Z",
+        blockedOn: "https://example.test/d/1",
+        waitingOn: ["U0000000001"],
+        issueClosed: true,
+      }),
+    })
+
+    const written = await h.watcher.applyIssueStates({
+      complete: true,
+      issues: [
+        { number: 7, state: "blocked", stateSince: "2026-11-18T09:00:00.000Z", blockedOn: "https://example.test/d/1", waitingOn: ["U0000000001"] },
+      ],
+    })
+
+    assert.equal(written, true, "reopening writes the record even when its yaml did not change")
+    assert.equal(h.items()[one].issueClosed, false, "the reopened issue shows its row again")
+  } finally {
+    h.clean()
+  }
+})
+
 test("the RPC serves each item's request state, and needs-me for a record that names none", async () => {
   const h = harness()
   try {

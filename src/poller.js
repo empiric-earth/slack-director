@@ -38,6 +38,34 @@ export function defaultPollerStatus() {
   }
 }
 
+/**
+ * The status of a cycle whose issue list failed: nothing was read, so every row
+ * keeps the visibility the last cycle gave it. The unattended rows of the last
+ * cycle are carried over, so a failed read hides no open request.
+ */
+function failedCycle(previous, ranAt, detail) {
+  return {
+    ...defaultPollerStatus(),
+    lastCycle: ranAt,
+    outcome: `gh failed: ${detail}`,
+    ghError: detail,
+    unattended: Array.isArray(previous?.unattended) ? previous.unattended : [],
+  }
+}
+
+/**
+ * The unattended rows of a possibly cut list: the ones it names, plus every row
+ * the last cycle carried whose issue this list does not name. A cut list proves
+ * nothing about the issues it leaves out, so it hides none of them; a row this
+ * list names is the fresh one.
+ */
+function carriedUnattended(previous, listed) {
+  const carried = (Array.isArray(previous?.unattended) ? previous.unattended : []).filter(
+    (row) => row && typeof row.number === "number" && !listed.some((fresh) => fresh.number === row.number),
+  )
+  return [...carried, ...listed]
+}
+
 /** The fenced yaml block at the top of an intake issue's body, or undefined. */
 export function yamlBlockOf(body) {
   const match = typeof body === "string" ? /```ya?ml\r?\n([\s\S]*?)```/.exec(body) : null
@@ -238,13 +266,13 @@ export function createPoller({
     })
   }
 
-  async function cycle(config, ranAt) {
+  async function cycle(config, ranAt, previous) {
     if (cancelled()) return undefined
     const listed = await runGh(issueListArgs(config.intake_repo))
     if (!listed || listed.ok !== true) {
       const detail = ghFailureText(listed)
       log(`poller: the issue list failed — ${detail}`)
-      return { ...defaultPollerStatus(), lastCycle: ranAt, outcome: `gh failed: ${detail}`, ghError: detail }
+      return failedCycle(previous, ranAt, detail)
     }
     let issues
     try {
@@ -252,7 +280,7 @@ export function createPoller({
     } catch (error) {
       const detail = messageOf(error)
       log(`poller: the issue list could not be read — ${detail}`)
-      return { ...defaultPollerStatus(), lastCycle: ranAt, outcome: `gh failed: ${detail}`, ghError: detail }
+      return failedCycle(previous, ranAt, detail)
     }
     const possiblyCut = issues.length === ISSUE_LIST_LIMIT
     if (possiblyCut) log(`poller: the issue list is possibly cut at ${ISSUE_LIST_LIMIT}`)
@@ -276,7 +304,7 @@ export function createPoller({
           (typeof fields.permalink === "string" && record.permalink === fields.permalink),
       )
 
-    const unattended = []
+    const unattendedListed = []
     const failed = []
     // The request state every open issue carries, read before anything else is
     // decided about it, so the item records and the dialog follow the issue even
@@ -382,7 +410,7 @@ export function createPoller({
           // The watermark stays; only the mark moves.
         }
         const askedAt = fields.asked_at ?? firstReadAt
-        unattended.push({
+        unattendedListed.push({
           number: issue.number,
           url: issue.url,
           title: issue.title,
@@ -447,7 +475,7 @@ export function createPoller({
       issues: issuesRead,
       threads,
       conversations,
-      unattended,
+      unattended: possiblyCut ? carriedUnattended(previous, unattendedListed) : unattendedListed,
       ghError: null,
       failed,
       possiblyCut,
@@ -473,7 +501,7 @@ export function createPoller({
     await storage.set(KEYS.lease, { owner, expires: now() + leaseMs })
     let status
     try {
-      status = await cycle(config, new Date(now()).toISOString())
+      status = await cycle(config, new Date(now()).toISOString(), previous)
     } catch (error) {
       // A read the unload aborted is not a failure: the cycle ends with the last
       // cycle in place, and the successor carries on.

@@ -702,6 +702,36 @@ test("i and s on an unattended row open its issue and its message from the polle
   assert.deepEqual(spawned.at(-1).args, [UNATTENDED.permalink], "s opens the message the poller reported")
 })
 
+test("the marker stays on an unattended row across a refresh, and its shortcuts stay its own", async () => {
+  const spawned = []
+  const fake = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [ITEM] })
+  await renderedRecordedTui(spawned).setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  const view = renderDialog(fake.dialogs)
+  const modal = modalLayer(fake.layers)
+  const command = (bind) => modal.commands.find((entry) => entry.bind === bind)
+
+  // Row 0 is the item, row 1 the unattended issue; the marker moves to it.
+  command("down").run()
+  assert.equal(markedItem(view), "VPN profile for the contractors", "the marker sits on the unattended row")
+
+  // A routine poll answers with the same rows: the marker must stay on the
+  // unattended row, whose identity is its issue, not slide to the item above it.
+  const updated = fake.eventHandlers.find(([name]) => name === "updated")[1]
+  updated({})
+  await tick()
+  assert.equal(
+    markedItem(view),
+    "VPN profile for the contractors",
+    "the marker stays on the unattended row after a refresh",
+  )
+
+  command("i").run()
+  command("s").run()
+  assert.deepEqual(spawned.at(-2).args, [UNATTENDED.url], "i still opens the unattended row's issue")
+  assert.deepEqual(spawned.at(-1).args, [UNATTENDED.permalink], "s still opens its message")
+})
+
 test("an opener that cannot start is reported instead of failing silently", async () => {
   const spawned = []
   const handlers = []

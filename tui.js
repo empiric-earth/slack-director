@@ -31,6 +31,7 @@ import {
   openerCommand,
   pageRows,
   reconcileSelection,
+  rowID,
   rowIDs,
   rowParts,
   sections,
@@ -318,10 +319,12 @@ async function setup(context, spawnProcess, rendererOverride) {
     const rows = () => pageRows(items(), live, status()?.poller?.unattended ?? [])
     const current = () => selectedItem(rows(), selected())
 
-    // The marker follows an item's identity, not its index: the identity the
-    // user last selected, and the display order they last saw. Both survive a
-    // refresh, a confirmation and a restore, so the same item stays marked when
-    // the rows are reordered and a removed item hands the marker to a neighbor.
+    // The marker follows a row's identity, not its index: the identity the
+    // `rowID` helper gives the row the user last selected — an item's session,
+    // or an unattended issue's number — and the display order they last saw.
+    // Both survive a refresh, a confirmation and a restore, so the same row
+    // stays marked when the rows are reordered and a removed row hands the
+    // marker to a neighbor.
     let selectedID = null
     let order = []
 
@@ -329,7 +332,7 @@ async function setup(context, spawnProcess, rendererOverride) {
     function select(index) {
       const list = rows()
       setSelected(index)
-      selectedID = list[index]?.item?.sessionID ?? null
+      selectedID = rowID(list[index])
     }
 
     /**
@@ -341,7 +344,7 @@ async function setup(context, spawnProcess, rendererOverride) {
       const at = reconcileSelection(list, identity, order)
       order = rowIDs(list)
       setSelected(at)
-      selectedID = list[at]?.item?.sessionID ?? null
+      selectedID = rowID(list[at])
     }
 
     /** The overview's own key layer, while its dialog is open. */

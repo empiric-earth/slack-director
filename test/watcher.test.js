@@ -9,11 +9,20 @@ import * as nodeFs from "node:fs"
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { createClaims, permalinkHash, STALE_MS } from "../src/claims.js"
+import { createClaims, createFence, issueHash, permalinkHash, STALE_MS } from "../src/claims.js"
 import { DEFAULT_SESSION_AGENT, fieldProblem } from "../src/config.js"
+import { itemFirstPrompt } from "../src/first-prompt.js"
 import { SEARCH_TOOL, SLACK_MCP_URL } from "../src/slack-mcp.js"
-import { claimsDir, KEYS, NAMESPACE, reissueDir } from "../src/state.js"
-import { createWatcher, LEASE_MS, RECORD_FORMAT, REFRESH_AGENT, SESSION_EVENT_TYPES, SUSPENDED_ERROR } from "../src/watcher.js"
+import { claimsDir, issueDir, KEYS, NAMESPACE, reissueDir } from "../src/state.js"
+import {
+  ADOPT_REFUSAL,
+  createWatcher,
+  LEASE_MS,
+  RECORD_FORMAT,
+  REFRESH_AGENT,
+  SESSION_EVENT_TYPES,
+  SUSPENDED_ERROR,
+} from "../src/watcher.js"
 import { SlackDirectorRpc } from "../rpc.js"
 import { schemaProblem } from "./schema.js"
 
@@ -210,6 +219,7 @@ function harness({
   const stateHome = join(root, "state")
   const dir = claimsDir({ XDG_STATE_HOME: stateHome })
   const reissueDirPath = reissueDir({ XDG_STATE_HOME: stateHome })
+  const issueDirPath = issueDir({ XDG_STATE_HOME: stateHome })
   const storage = memoryStorage()
   const clock = { ms: NOW }
   const now = () => clock.ms
@@ -339,11 +349,28 @@ function harness({
     remove: (key) => storage.remove(key),
   })
 
-  const newWatcher = (own = storage) =>
+  // One issue lock per watcher, over the one directory every server process
+  // shares, and one holder identity per watcher, so a test plays two processes
+  // inside one. A watcher's holder is alive unless a test says otherwise.
+  let nextPid = 1000
+  const newFence = ({ identity, gone, pid } = {}) => {
+    nextPid += 1
+    const mine = pid ?? nextPid
+    return createFence({
+      dir: issueDirPath,
+      now,
+      fs: pinnedFs(now),
+      identity: identity ?? (() => ({ namespace: "ns:test", pid: mine, start: "1" })),
+      gone: gone ?? (() => false),
+    })
+  }
+
+  const newWatcher = (own = storage, lock = newFence()) =>
     createWatcher({
       storage: own,
       claims,
       reissue,
+      issueLock: lock,
       now,
       fetch,
       readConfig: () => ({ config }),
@@ -370,6 +397,7 @@ function harness({
     root,
     dir,
     reissueDir: reissueDirPath,
+    issueDir: issueDirPath,
     storage,
     clock,
     now,
@@ -392,11 +420,28 @@ function harness({
     claims,
     reissue,
     newWatcher,
+    newFence,
     facade,
     watcher: newWatcher(),
     items: () => storage.map.get(KEYS.items) ?? {},
     seen: () => storage.map.get(KEYS.seen) ?? [],
     status: () => storage.map.get(KEYS.status) ?? {},
+    poller: () => storage.map.get(KEYS.poller) ?? {},
+    setPoller: (value) => storage.map.set(KEYS.poller, value),
+    leftovers: () => {
+      try {
+        return readdirSync(issueDirPath).filter((name) => name.includes(".leftover."))
+      } catch {
+        return []
+      }
+    },
+    lockFiles: () => {
+      try {
+        return readdirSync(issueDirPath).sort()
+      } catch {
+        return []
+      }
+    },
     toolCalls: () => calls.filter((call) => call.method === "tools/call"),
     setItems: (value) => storage.map.set(KEYS.items, value),
     setSeen: (value) => storage.map.set(KEYS.seen, value),
@@ -3553,6 +3598,581 @@ test("a reissue hit in another link form reissues its record once, and makes no 
     assert.ok(h.items()[queried], "the earlier record keeps its key")
     assert.equal(h.items()[queried].recordFormat, RECORD_FORMAT, "and takes this build's record form")
     assert.equal(h.status().today.skipped, 0, "a reissued hit is not counted as skipped")
+  } finally {
+    h.clean()
+  }
+})
+
+// --- The adopt path: `enter` on a row with no session. ---
+
+const ADOPTED_ISSUE = "https://github.com/empiric-earth/almeida-slack-intake/issues/36"
+
+/** One unattended entry, as the thread poller's status carries it. */
+const unattendedRow = (extra = {}) => ({
+  number: 36,
+  url: ADOPTED_ISSUE,
+  title: "Nuno Ferreira — VPN profile for the contractors",
+  permalink: "https://nexar.slack.com/archives/C0IT/p1795194400999000",
+  state: "needs-me",
+  state_since: "2026-11-19T09:32:00.000Z",
+  asked_at: "2026-11-18T08:32:00.000Z",
+  newActivity: false,
+  asker: "Nuno Ferreira",
+  channel_name: "eng-infra",
+  workspace: "slack_nexar",
+  channel_id: "C0IT",
+  thread_ts: "1795194400.999000",
+  ...extra,
+})
+
+/** A poller status with one cycle and the given unattended entries. */
+const pollerStatus = (unattended = [unattendedRow()]) => ({
+  lastCycle: new Date(NOW).toISOString(),
+  outcome: "ok",
+  issues: unattended.length,
+  threads: unattended.length,
+  conversations: 0,
+  unattended,
+  ghError: null,
+  failed: [],
+  possiblyCut: false,
+})
+
+/** The lock key `adopt` computes for one issue and the harness's intake repo. */
+const adoptKey = (number = 36) => issueHash("empiric-earth/almeida-slack-intake", number)
+
+/** The first prompt an unattended entry's own fields build. */
+const adoptPrompt = (config, entry = unattendedRow()) =>
+  itemFirstPrompt(
+    {
+      permalink: entry.permalink,
+      workspace: entry.workspace,
+      channel: { id: entry.channel_id, label: entry.channel_name },
+      ts: entry.thread_ts,
+      asker: entry.asker,
+    },
+    config.intake_repo,
+  )
+
+/** One current-format item record, the shape an adopt writes. */
+const adoptedRecord = (h, extra = {}) => ({
+  permalink: unattendedRow().permalink,
+  workspace: "slack_nexar",
+  channel: "eng-infra",
+  channelID: "C0IT",
+  ts: "1795194400.999000",
+  asker: "Nuno Ferreira",
+  flaggedAt: new Date(h.now()).toISOString(),
+  pollerFrom: new Date(h.now()).toISOString(),
+  title: "Nuno Ferreira — VPN profile for the contractors",
+  sessionID: "ses_recorded",
+  issueNumber: 99,
+  issueUrl: "https://github.com/empiric-earth/almeida-slack-intake/issues/99",
+  firstTurnEndedAt: null,
+  firstTurnFailed: false,
+  permissionPending: false,
+  openedAt: null,
+  recordFormat: RECORD_FORMAT,
+  ...extra,
+})
+
+test("adopt creates one session on the configured agent, records it and sends the unchanged first prompt", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    const answer = await h.watcher.adopt({ issueNumber: 36 })
+    assert.equal(h.created.length, 1, "exactly one session create")
+    assert.equal(answer.sessionID, h.created[0].id, "the answer names the session it made")
+    assert.equal(h.created[0].agent, DEFAULT_SESSION_AGENT, "on the configured session agent")
+    assert.deepEqual(h.created[0].location, { directory: h.config.session_directory }, "in the configured directory")
+
+    const entry = unattendedRow()
+    const record = h.items()[entry.permalink]
+    assert.ok(record, "one item record names the issue's permalink")
+    assert.equal(record.sessionID, answer.sessionID)
+    assert.equal(record.issueNumber, 36)
+    assert.equal(record.issueUrl, ADOPTED_ISSUE)
+    assert.equal(record.permalink, entry.permalink)
+    assert.equal(record.workspace, entry.workspace)
+    assert.equal(record.channelID, entry.channel_id)
+    assert.equal(record.ts, entry.thread_ts)
+    assert.equal(record.channel, entry.channel_name)
+    assert.equal(record.asker, entry.asker)
+    assert.equal(record.recordFormat, RECORD_FORMAT, "a normal current-format record")
+    assert.equal(record.firstTurnFailed, true, "waiting on its first turn")
+    assert.equal(record.firstTurnEndedAt, null)
+
+    assert.equal(h.prompts.length, 1, "exactly one first prompt")
+    assert.equal(h.prompts[0].sessionID, answer.sessionID)
+    assert.equal(h.prompts[0].text, adoptPrompt(h.config), "the unchanged first prompt, filled from those fields")
+
+    assert.deepEqual(h.leftovers(), [], "its leftover file is removed once the record is written and the prompt sent")
+    assert.deepEqual(
+      h.lockFiles().sort(),
+      [`${adoptKey()}.lock.0`, `${adoptKey()}.release.0`],
+      "the lock keeps its highest generation file and gains a release marker",
+    )
+
+    const served = (await h.watcher.items()).items
+    assert.equal(served.length, 1)
+    assert.equal(
+      schemaProblem(SlackDirectorRpc.methods.items.output.properties.items.items, served[0]),
+      undefined,
+      "the record is what the items RPC serves",
+    )
+  } finally {
+    h.clean()
+  }
+})
+
+test("adopt refuses an issue that is not in the poller's last unattended list", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus([]))
+    const answer = await h.watcher.adopt({ issueNumber: 36 })
+    assert.equal(answer.sessionID, undefined)
+    assert.equal(answer.refused, ADOPT_REFUSAL.changed)
+    assert.equal(h.created.length, 0, "no session is created")
+    assert.deepEqual(h.items(), {}, "and no record is written")
+  } finally {
+    h.clean()
+  }
+})
+
+test("adopt refuses an unattended entry that lacks or empties any one of the four fields", async () => {
+  for (const missing of ["permalink", "workspace", "channel_id", "thread_ts"]) {
+    for (const how of ["absent", "empty"]) {
+      const h = harness()
+      try {
+        const entry = unattendedRow()
+        if (how === "absent") delete entry[missing]
+        else entry[missing] = ""
+        h.setPoller(pollerStatus([entry]))
+        const answer = await h.watcher.adopt({ issueNumber: 36 })
+        assert.equal(answer.refused, ADOPT_REFUSAL.fields, `${missing} ${how} is refused`)
+        assert.equal(h.created.length, 0, `${missing} ${how} creates no session`)
+        assert.deepEqual(h.items(), {}, `${missing} ${how} writes no record`)
+      } finally {
+        h.clean()
+      }
+    }
+  }
+})
+
+test("adopt refuses an issue an item record already names, by number and by permalink", async () => {
+  for (const how of ["number", "permalink"]) {
+    const h = harness()
+    try {
+      h.setPoller(pollerStatus())
+      const record =
+        how === "number"
+          ? { ...adoptedRecord(h), issueNumber: 36, issueUrl: ADOPTED_ISSUE, permalink: "https://nexar.slack.com/archives/C0IT/p1795194400888000" }
+          : { ...adoptedRecord(h), issueNumber: 99 }
+      h.setItems({ [record.permalink]: record })
+      const answer = await h.watcher.adopt({ issueNumber: 36 })
+      assert.equal(answer.refused, ADOPT_REFUSAL.recorded, `a record naming the issue's ${how} refuses the adopt`)
+      assert.equal(h.created.length, 0, `no session is created (${how})`)
+      assert.equal(Object.keys(h.items()).length, 1, `the map still holds one record (${how})`)
+    } finally {
+      h.clean()
+    }
+  }
+})
+
+test("a second adopt of one issue while the first is in flight is refused and creates nothing", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    let release
+    h.session.onCreate = () => new Promise((resolve) => (release = resolve))
+    const first = h.watcher.adopt({ issueNumber: 36 })
+    await waitFor(() => release !== undefined, "the first adopt to reach its session create")
+    const second = await h.watcher.adopt({ issueNumber: 36 })
+    assert.equal(second.refused, ADOPT_REFUSAL.inFlight, "the second call is refused in flight")
+    assert.equal(h.created.length, 0, "and it created nothing")
+    release()
+    const answer = await first
+    assert.equal(answer.sessionID, h.created[0].id, "the first call completes")
+    assert.equal(h.prompts.length, 1, "one first prompt")
+    assert.equal(Object.keys(h.items()).length, 1, "one record")
+  } finally {
+    h.clean()
+  }
+})
+
+test("an adopted session's first turn sets the record's issue fields and leaves the first-turn state", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    const { sessionID } = await h.watcher.adopt({ issueNumber: 36 })
+    assert.equal(h.items()[unattendedRow().permalink].firstTurnFailed, true, "the record starts waiting")
+    const issue = "https://github.com/empiric-earth/almeida-slack-intake/issues/41"
+    h.contexts.set(sessionID, [
+      { type: "user", text: "A Slack message was flagged for triage." },
+      {
+        type: "assistant",
+        content: [{ type: "text", text: `Findings and next steps.\n\nIntake issue: ${issue}\nTitle: Access to the staging dashboards` }],
+      },
+    ])
+    await h.watcher.observe({ type: "session.execution.succeeded", data: { sessionID } })
+    const record = h.items()[unattendedRow().permalink]
+    assert.equal(record.issueUrl, issue, "the reply's intake line sets the record's issue")
+    assert.equal(record.issueNumber, 41)
+    assert.equal(record.title, "Access to the staging dashboards")
+    assert.equal(record.firstTurnFailed, false, "the record leaves the first-turn state")
+    assert.equal(typeof record.firstTurnEndedAt, "string")
+    assert.deepEqual(h.retitles, [{ sessionID, title: "Access to the staging dashboards" }], "the session is retitled")
+  } finally {
+    h.clean()
+  }
+})
+
+test("(a) two watchers that adopt one issue at once make one session, one record and one first prompt", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    const left = h.newWatcher()
+    const right = h.newWatcher()
+    h.session.onCreate = async () => {
+      await yieldTimes(1)
+    }
+    const answers = await Promise.all([left.adopt({ issueNumber: 36 }), right.adopt({ issueNumber: 36 })])
+    assert.equal(answers.filter((answer) => answer.sessionID).length, 1, "exactly one call answers a session id")
+    const refused = answers.filter((answer) => answer.refused)
+    assert.equal(refused.length, 1, "and the other is refused")
+    assert.ok(
+      [ADOPT_REFUSAL.inFlight, ADOPT_REFUSAL.recorded].includes(refused[0].refused),
+      "with the in-flight or the already-has-a-session reason",
+    )
+    assert.equal(h.created.length, 1, "one session create")
+    assert.equal(h.prompts.length, 1, "one first prompt")
+    assert.equal(Object.keys(h.items()).length, 1, "one record")
+  } finally {
+    h.clean()
+  }
+})
+
+test("(b) a call that stalls in its session create keeps the lock, and the second is refused", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    const left = h.newWatcher()
+    const right = h.newWatcher()
+    let release
+    h.session.onCreate = () => new Promise((resolve) => (release = resolve))
+    const first = left.adopt({ issueNumber: 36 })
+    await waitFor(() => release !== undefined, "the first adopt to reach its session create")
+    assert.ok(
+      h.lockFiles().some((name) => name.includes(".lock.")),
+      "the stalled call holds the issue's lock",
+    )
+    // The clock moves an hour past every stale age: a live holder still holds.
+    h.clock.ms += 60 * 60 * 1000
+    const refused = await right.adopt({ issueNumber: 36 })
+    assert.equal(refused.refused, ADOPT_REFUSAL.inFlight, "a live holder keeps the lock however long it stalls")
+    assert.equal(h.created.length, 0, "the second call created nothing")
+    release()
+    const answer = await first
+    assert.ok(answer.sessionID, "the first call completes and releases the lock")
+    const again = await right.adopt({ issueNumber: 36 })
+    assert.equal(again.refused, ADOPT_REFUSAL.recorded, "the retry finds the record the first call wrote")
+    assert.equal(h.created.length, 1, "exactly one session")
+    assert.equal(h.prompts.length, 1, "one first prompt")
+    assert.equal(Object.keys(h.items()).length, 1, "one record")
+  } finally {
+    h.clean()
+  }
+})
+
+test("(c) a call that stalls in its first prompt keeps the lock, after its record is written", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    const left = h.newWatcher()
+    const right = h.newWatcher()
+    let release
+    h.session.onPrompt = () => new Promise((resolve) => (release = resolve))
+    const first = left.adopt({ issueNumber: 36 })
+    await waitFor(() => release !== undefined, "the first adopt to reach its first prompt")
+    assert.equal(Object.keys(h.items()).length, 1, "its record is written before the prompt")
+    assert.ok(
+      h.lockFiles().some((name) => name.includes(".lock.")),
+      "the stalled call still holds the issue's lock",
+    )
+    h.clock.ms += 60 * 60 * 1000
+    const refused = await right.adopt({ issueNumber: 36 })
+    // A's record is already written, so the second call is refused by the record
+    // it finds — the same "one session only" answer, before any lock is reached.
+    assert.equal(refused.refused, ADOPT_REFUSAL.recorded, "the record A wrote refuses the second call")
+    assert.equal(h.created.length, 1, "and no second session is created")
+    release()
+    const answer = await first
+    assert.ok(answer.sessionID, "the first call completes")
+    assert.deepEqual(h.leftovers(), [], "and its leftover file is gone")
+  } finally {
+    h.clean()
+  }
+})
+
+test("(d) a call takes a dead holder's lock over and removes the leftover session it finds", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    // The dead call left its lock in place, its holder gone, and a leftover file
+    // naming the session its create returned.
+    const dead = h.newFence({ identity: () => ({ namespace: "ns:test", pid: 7, start: "1" }) })
+    assert.equal(dead.acquire(adoptKey()), 0)
+    assert.equal(dead.writeLeftover(adoptKey(), "ses_left"), true)
+    const live = h.newWatcher(undefined, h.newFence({ gone: (entry) => entry.pid === 7 }))
+    const answer = await live.adopt({ issueNumber: 36 })
+    assert.ok(answer.sessionID, "the adopt takes the dead holder's lock and succeeds")
+    assert.deepEqual(h.removed, ["ses_left"], "the session the leftover file named is removed first")
+    assert.deepEqual(h.leftovers(), [], "and its file goes with it")
+    assert.equal(h.created.length, 1, "one new session")
+    assert.equal(h.prompts.length, 1, "one first prompt")
+    assert.equal(Object.keys(h.items()).length, 1, "one record")
+  } finally {
+    h.clean()
+  }
+})
+
+test("(e) two watchers that both find a dead holder take over, and only one adopts", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    const dead = h.newFence({ identity: () => ({ namespace: "ns:test", pid: 7, start: "1" }) })
+    assert.equal(dead.acquire(adoptKey()), 0)
+    const gone = (entry) => entry.pid === 7
+    const left = h.newWatcher(undefined, h.newFence({ gone }))
+    const right = h.newWatcher(undefined, h.newFence({ gone }))
+    h.session.onCreate = async () => {
+      await yieldTimes(1)
+    }
+    const answers = await Promise.all([left.adopt({ issueNumber: 36 }), right.adopt({ issueNumber: 36 })])
+    assert.equal(answers.filter((answer) => answer.sessionID).length, 1, "only one caller reaches the lock")
+    assert.equal(h.created.length, 1, "one session")
+    assert.equal(h.prompts.length, 1, "one first prompt")
+    assert.equal(Object.keys(h.items()).length, 1, "one record")
+  } finally {
+    h.clean()
+  }
+})
+
+test("(f) a delayed acquirer across release and reuse withdraws, and the live holder keeps the lock", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    const dead = h.newFence({ identity: () => ({ namespace: "ns:test", pid: 7, start: "1" }) })
+    assert.equal(dead.acquire(adoptKey()), 0)
+    const later = h.newFence({ gone: (entry) => entry.pid === 7 })
+    const reuse = h.newFence()
+    let reused = null
+    // The delayed acquirer's own look at the lock runs the two later holders:
+    // one takes over from the dead holder and releases, the next takes the lock
+    // and stays alive. The delayed acquirer then creates its own generation.
+    const delayed = h.newWatcher(
+      undefined,
+      h.newFence({
+        gone: (entry) =>
+          entry.pid === 7
+            ? (() => {
+                assert.equal(later.acquire(adoptKey()), 1, "the first later caller takes the dead holder's lock")
+                later.release(adoptKey(), 1)
+                reused = reuse.acquire(adoptKey())
+                return true
+              })()
+            : false,
+      }),
+    )
+    const answer = await delayed.adopt({ issueNumber: 36 })
+    assert.equal(answer.refused, ADOPT_REFUSAL.inFlight, "a higher generation exists, so the delayed acquirer withdraws")
+    assert.equal(reused, 2, "the third caller holds generation 2 and stays alive")
+    assert.equal(h.created.length, 0, "the delayed acquirer created no session")
+    assert.deepEqual(
+      h.lockFiles().filter((name) => name.endsWith(".lock.2")),
+      [`${adoptKey()}.lock.2`],
+      "exactly one generation file is left: the live holder's",
+    )
+  } finally {
+    h.clean()
+  }
+})
+
+test("adopt rolls back when the host rejects the first prompt, and a retry then succeeds", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    h.session.onPrompt = async () => {
+      throw new Error("prompt refused")
+    }
+    const refused = await h.watcher.adopt({ issueNumber: 36 })
+    assert.equal(refused.refused, ADOPT_REFUSAL.prompt, "the refusal says to press enter to try again")
+    assert.deepEqual(h.items(), {}, "the item map holds no record for the issue")
+    assert.deepEqual(h.removed, ["ses_1"], "the created session was removed")
+    assert.deepEqual(h.leftovers(), [], "no leftover file names it")
+    assert.deepEqual(
+      h.lockFiles().sort(),
+      [`${adoptKey()}.lock.0`, `${adoptKey()}.release.0`],
+      "the lock is released",
+    )
+    h.session.onPrompt = null
+    const answer = await h.watcher.adopt({ issueNumber: 36 })
+    assert.ok(answer.sessionID, "a second adopt of the same issue then succeeds")
+    assert.equal(h.created.length, 2, "it created its own session")
+    assert.equal(h.prompts.length, 1, "prompted once")
+    assert.equal(Object.keys(h.items()).length, 1, "one record")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a rollback whose removal also fails leaves exactly one leftover file naming the session", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    h.session.onPrompt = async () => {
+      throw new Error("prompt refused")
+    }
+    h.session.onRemove = async ({ sessionID }) => {
+      if (sessionID === "ses_1") throw new Error("remove refused")
+    }
+    const refused = await h.watcher.adopt({ issueNumber: 36 })
+    assert.equal(refused.refused, ADOPT_REFUSAL.prompt, "the answer is still the retry reason")
+    assert.deepEqual(h.items(), {}, "no record is left")
+    assert.deepEqual(h.leftovers(), [`${adoptKey()}.leftover.ses_1`], "one file names the session that was not removed")
+    assert.ok(
+      h.logs.some((line) => line.includes("ses_1")),
+      "the log names the session",
+    )
+  } finally {
+    h.clean()
+  }
+})
+
+test("a retry removes the leftover session first, then adopts exactly once", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    h.session.onPrompt = async () => {
+      throw new Error("prompt refused")
+    }
+    h.session.onRemove = async ({ sessionID }) => {
+      if (sessionID === "ses_1") throw new Error("remove refused")
+    }
+    await h.watcher.adopt({ issueNumber: 36 })
+    assert.deepEqual(h.leftovers(), [`${adoptKey()}.leftover.ses_1`])
+
+    // The removal works now.
+    h.session.onRemove = null
+    h.session.onPrompt = null
+    const answer = await h.watcher.adopt({ issueNumber: 36 })
+    assert.ok(answer.sessionID, "the retry adopts")
+    assert.deepEqual(h.removed, ["ses_1"], "the leftover session is removed before anything is created")
+    assert.equal(h.created.length, 2, "one new session is created")
+    assert.equal(h.prompts.length, 1, "prompted once")
+    assert.equal(Object.keys(h.items()).length, 1, "one record")
+    assert.deepEqual(h.leftovers(), [], "and no leftover file is left")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a retry while the leftover session cannot be removed refuses and keeps the file", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    h.session.onPrompt = async () => {
+      throw new Error("prompt refused")
+    }
+    h.session.onRemove = async ({ sessionID }) => {
+      if (sessionID === "ses_1") throw new Error("remove refused")
+    }
+    await h.watcher.adopt({ issueNumber: 36 })
+    h.session.onPrompt = null
+
+    const refused = await h.watcher.adopt({ issueNumber: 36 })
+    assert.equal(
+      refused.refused,
+      "an earlier session for this issue could not be removed (ses_1) — delete it in OpenCode, then try again",
+      "the refusal names the session and the remedy",
+    )
+    assert.equal(h.created.length, 1, "no second session is created")
+    assert.deepEqual(h.items(), {}, "and no record is written")
+    assert.deepEqual(h.leftovers(), [`${adoptKey()}.leftover.ses_1`], "the file is kept")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a cleanup removes only the leftover session no item record names", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    const lock = h.newFence()
+    assert.equal(lock.writeLeftover(adoptKey(), "ses_recorded"), true)
+    assert.equal(lock.writeLeftover(adoptKey(), "ses_loose"), true)
+    // A record names one of the two sessions: another issue's adopted record.
+    const other = adoptedRecord(h, {
+      permalink: "https://nexar.slack.com/archives/C0IT/p1795194400777000",
+      issueNumber: 99,
+      sessionID: "ses_recorded",
+    })
+    h.setItems({ [other.permalink]: other })
+
+    const answer = await h.watcher.adopt({ issueNumber: 36 })
+    assert.ok(answer.sessionID, "the adopt goes ahead")
+    assert.deepEqual(h.removed, ["ses_loose"], "only the session no record names is removed")
+    assert.deepEqual(h.leftovers(), [], "both files are removed")
+    assert.equal(h.items()[other.permalink].sessionID, "ses_recorded", "the recorded session and its record are intact")
+    assert.equal(Object.keys(h.items()).length, 2, "the new record joins it")
+  } finally {
+    h.clean()
+  }
+})
+
+test("an adopt whose leftover file cannot be written removes the session it made", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    const lock = h.newFence()
+    lock.writeLeftover = () => false
+    const watcher = h.newWatcher(undefined, lock)
+    const refused = await watcher.adopt({ issueNumber: 36 })
+    assert.equal(refused.refused, ADOPT_REFUSAL.record, "the refusal says to press enter to try again")
+    assert.deepEqual(h.items(), {}, "no record is written")
+    assert.deepEqual(h.removed, ["ses_1"], "the session it just made is removed")
+  } finally {
+    h.clean()
+  }
+})
+
+test("an unwritable leftover file whose removal also fails names the session and releases the lock", async () => {
+  const h = harness()
+  try {
+    h.setPoller(pollerStatus())
+    h.session.onRemove = async () => {
+      throw new Error("remove refused")
+    }
+    const lock = h.newFence()
+    lock.writeLeftover = () => false
+    const watcher = h.newWatcher(undefined, lock)
+    const refused = await watcher.adopt({ issueNumber: 36 })
+    assert.equal(
+      refused.refused,
+      "a session made for this issue could not be recorded or removed (ses_1) — delete it in OpenCode",
+      "the refusal names the session",
+    )
+    assert.deepEqual(h.items(), {}, "no record is written")
+    assert.ok(
+      h.logs.some((line) => line.includes("ses_1")),
+      "the log names the session",
+    )
+    assert.deepEqual(h.leftovers(), [], "no leftover file names it")
+    assert.deepEqual(
+      h.lockFiles().sort(),
+      [`${adoptKey()}.lock.0`, `${adoptKey()}.release.0`],
+      "the lock was released on the answer",
+    )
   } finally {
     h.clean()
   }

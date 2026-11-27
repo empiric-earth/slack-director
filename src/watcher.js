@@ -38,6 +38,15 @@
 // ran. The plugin's unload stops the watcher, and every close still in flight is
 // abandoned before it can remove anything.
 //
+// The `adopt` RPC gives one unattended open issue the session the board's
+// `enter` asks for: the watcher takes the issue's lock under the holder fence
+// (so one issue never gets two sessions, in this process or another), creates
+// one session on the configured agent, records it as the issue's item and sends
+// the unchanged first prompt. Every session a call creates is named by a
+// leftover file of its own until its record is written and its prompt admitted,
+// so a call that dies or a rollback that could not remove its session leaves a
+// session the next call on the issue finds and removes.
+//
 // The completion binds to the first execution: only a turn of a session this
 // instance started may complete the item, and only the first one to end, and
 // only when its reply names the issue it made. A turn that ended in error, a
@@ -47,12 +56,12 @@
 // binding is the set of sessions this instance started, held for the instance's
 // lifetime: a new instance accepts no first turn it did not start.
 import { randomUUID } from "node:crypto"
-import { permalinkHash, STALE_MS } from "./claims.js"
+import { createFence, issueHash, permalinkHash, STALE_MS } from "./claims.js"
 import { DEFAULT_POLL_SECONDS } from "./config.js"
 import { itemFirstPrompt, closePrompt, refreshPrompt } from "./first-prompt.js"
 import { closeReply, contextMessages, parseReply, replyText } from "./reply.js"
 import { flagIdentity, REQUEST_TIMEOUT_MS, searchFlagged, SLACK_MCP_URL } from "./slack-mcp.js"
-import { KEYS, LEASE_MS } from "./state.js"
+import { issueDir, KEYS, LEASE_MS } from "./state.js"
 import { inWorkHours } from "./work-hours.js"
 
 export { LEASE_MS }
@@ -65,6 +74,22 @@ export const RECORD_FORMAT = 2
 
 /** The status of a workspace whose credential cannot be renewed. */
 export const SUSPENDED_ERROR = "sign-in expired — run /mcps"
+
+/**
+ * The reasons `adopt` answers with when it refuses. Each says the cause and the
+ * remedy, and each leaves no item record behind.
+ */
+export const ADOPT_REFUSAL = {
+  changed: "this row changed — press r to poll, then try again",
+  fields:
+    "this row's issue lacks the fields a session needs — press r to poll again; if it persists, fix the issue's yaml block",
+  recorded: "this issue already has a session — press r to refresh",
+  inFlight: "a session for this issue is being made — wait for the board to refresh",
+  create: "the session could not be created — press enter to try again",
+  record: "the session could not be recorded — press enter to try again",
+  prompt: "the new session did not take its first prompt — press enter to try again",
+  unconfigured: "the intake repo or the session directory is not configured — fix them in the settings dialog",
+}
 
 /** The events an item session's progress arrives in. */
 export const SESSION_EVENT_TYPES = [
@@ -189,6 +214,10 @@ export function createWatcher({
   requestTimeoutMs = REQUEST_TIMEOUT_MS,
   inHours = inWorkHours,
   reissue = NO_REISSUE,
+  // The issue lock and its leftover files: one lock per intake issue under the
+  // holder fence, in the claim subdirectory every server process shares. A
+  // watcher built without one locks the plugin's own issue directory.
+  issueLock = createFence({ dir: issueDir() }),
   owner = randomUUID(),
 }) {
   // The item sessions this instance started and whose first turn it is still
@@ -1219,6 +1248,177 @@ export function createWatcher({
   }
 
   /**
+   * Whether an item record already names one session.
+   */
+  async function itemNamesSession(sessionID) {
+    return Object.values(await readItems()).some((record) => record?.sessionID === sessionID)
+  }
+
+  /**
+   * Whether an item record already names one issue: by its number, or by its
+   * permalink. The poller matches a record the same way, so this is the same
+   * fact the row's own disappearance follows.
+   */
+  async function itemNamesIssue(number, permalink) {
+    return Object.values(await readItems()).some(
+      (record) =>
+        (typeof record?.issueNumber === "number" && record.issueNumber === number) ||
+        (typeof record?.permalink === "string" && record.permalink === permalink),
+    )
+  }
+
+  /** Remove one session, answering whether it is gone. */
+  async function removeSessionFor(sessionID) {
+    try {
+      await session.remove({ sessionID })
+      return true
+    } catch (error) {
+      if (notFound(error)) return true
+      log(`session ${sessionID} was not removed: ${messageOf(error)}`)
+      return false
+    }
+  }
+
+  /**
+   * Handle every leftover file of one issue, right after its lock was taken: a
+   * session an item record names has its file removed alone, and any other
+   * session is removed first, then its file. Answers a refusal reason when a
+   * removal fails, keeping that file and creating nothing.
+   */
+  async function cleanLeftovers(key) {
+    for (const sessionID of issueLock.leftovers(key)) {
+      if (await itemNamesSession(sessionID)) {
+        issueLock.removeLeftover(key, sessionID)
+        continue
+      }
+      if (!(await removeSessionFor(sessionID))) {
+        return `an earlier session for this issue could not be removed (${sessionID}) — delete it in OpenCode, then try again`
+      }
+      issueLock.removeLeftover(key, sessionID)
+    }
+    return undefined
+  }
+
+  /**
+   * Adopt one unattended intake issue: find it among the last poller status's
+   * unattended entries, take its lock, clean its leftover sessions, create one
+   * session on the configured agent, record it as the issue's item, send it the
+   * unchanged first prompt and answer its session id. Every refusal answers a
+   * reason and leaves no item record behind; a session a rollback could not
+   * remove stays named by its own leftover file for the next call on the issue.
+   * The lock is released on every answer.
+   */
+  async function adopt(input = {}) {
+    const number = input?.issueNumber
+    if (!Number.isInteger(number)) return { refused: ADOPT_REFUSAL.changed }
+    const { config } = readConfig()
+    if (!usable(config)) return { refused: ADOPT_REFUSAL.unconfigured }
+    const poller = await readPoller()
+    const unattended = Array.isArray(poller.unattended) ? poller.unattended : []
+    const entry = unattended.find((row) => row?.number === number)
+    if (!entry) return { refused: ADOPT_REFUSAL.changed }
+    // The four fields a session is created from. An entry the older build
+    // stored lacks the last three, and the toast says to poll again.
+    const permalink = textOr(entry.permalink, "")
+    const workspace = textOr(entry.workspace, "")
+    const channelID = textOr(entry.channel_id, "")
+    const threadTs = textOr(entry.thread_ts, "")
+    if (permalink === "" || workspace === "" || channelID === "" || threadTs === "") {
+      return { refused: ADOPT_REFUSAL.fields }
+    }
+    if (await itemNamesIssue(number, permalink)) return { refused: ADOPT_REFUSAL.recorded }
+    const key = issueHash(config.intake_repo, number)
+    const generation = issueLock.acquire(key)
+    if (generation === null) return { refused: ADOPT_REFUSAL.inFlight }
+    try {
+      const leftoverReason = await cleanLeftovers(key)
+      if (leftoverReason) return { refused: leftoverReason }
+      // Read the item map again: a call that finished while this one waited for
+      // the lock has recorded the issue, and it now has its session.
+      if (await itemNamesIssue(number, permalink)) return { refused: ADOPT_REFUSAL.recorded }
+      const title = neutralTitle({
+        // The yaml `channel_name` is the label the row shows; an issue without
+        // one falls back to its workspace, so the neutral title never reads with
+        // an empty channel.
+        channel: { label: textOr(entry.channel_name, textOr(entry.workspace, "")) },
+        ts: threadTs,
+        asker: textOr(entry.asker, ""),
+      })
+      let created
+      try {
+        created = await session.create({
+          title,
+          agent: config.session_agent,
+          location: { directory: config.session_directory },
+        })
+      } catch (error) {
+        log(`adopt session create failed for issue #${number}: ${messageOf(error)}`)
+        return { refused: ADOPT_REFUSAL.create }
+      }
+      // From the create's return the session is named by a leftover file of its
+      // own, so a call that dies before its record write leaves a findable
+      // session behind.
+      if (!issueLock.writeLeftover(key, created.id)) {
+        if (!(await removeSessionFor(created.id))) {
+          log(`a session made for issue #${number} could not be recorded or removed (${created.id})`)
+          return {
+            refused: `a session made for this issue could not be recorded or removed (${created.id}) — delete it in OpenCode`,
+          }
+        }
+        return { refused: ADOPT_REFUSAL.record }
+      }
+      const adoptedAt = new Date(now()).toISOString()
+      // A normal current-format record: the poller matches it by number or
+      // permalink, so the issue leaves the unattended list and its row becomes
+      // a normal one. `adoptedAt` is the instant the session was made, and the
+      // poller wakes the session for no message older than it.
+      const record = {
+        permalink,
+        workspace,
+        channel: textOr(entry.channel_name, ""),
+        channelID,
+        ts: threadTs,
+        asker: textOr(entry.asker, ""),
+        flaggedAt: adoptedAt,
+        pollerFrom: adoptedAt,
+        adoptedAt,
+        title,
+        sessionID: created.id,
+        issueNumber: number,
+        issueUrl: textOr(entry.url, ""),
+        firstTurnEndedAt: null,
+        firstTurnFailed: true,
+        permissionPending: false,
+        openedAt: null,
+        recordFormat: RECORD_FORMAT,
+      }
+      try {
+        await recordItem(record)
+      } catch (error) {
+        log(`adopt record write failed for issue #${number}: ${messageOf(error)}`)
+        if (await removeSessionFor(created.id)) issueLock.removeLeftover(key, created.id)
+        return { refused: ADOPT_REFUSAL.record }
+      }
+      firstTurns.add(created.id)
+      try {
+        await session.prompt({ sessionID: created.id, text: itemFirstPrompt(hitOfRecord(record), config.intake_repo) })
+      } catch (error) {
+        // The host did not admit the first prompt: the adopt rolls back. A
+        // record leaves the map, the session goes, and the retry is `enter`.
+        firstTurns.delete(created.id)
+        log(`adopt first prompt failed for issue #${number}: ${messageOf(error)}`)
+        await dropSessionRecord(created.id)
+        if (await removeSessionFor(created.id)) issueLock.removeLeftover(key, created.id)
+        return { refused: ADOPT_REFUSAL.prompt }
+      }
+      issueLock.removeLeftover(key, created.id)
+      return { sessionID: created.id }
+    } finally {
+      issueLock.release(key, generation)
+    }
+  }
+
+  /**
    * Close one item for good: its own session closes its intake issue, and the
    * session is deleted only on the close turn's own proof. The call starts the
    * close and answers once it has started or refused it; the close itself runs
@@ -1372,5 +1572,5 @@ export function createWatcher({
     await storage.set(KEYS.suspended, {})
   }
 
-  return { poll, pollNow, status, items, getConfig, setConfig, markOpened, done, stop, observe, start, dropSessionRecord, applyIssueStates }
+  return { poll, pollNow, status, items, getConfig, setConfig, markOpened, adopt, done, stop, observe, start, dropSessionRecord, applyIssueStates }
 }

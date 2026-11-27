@@ -348,6 +348,27 @@ test("the README install and uninstall steps match the Makefile", () => {
   }
 })
 
+test("the README describes enter on an unattended row as adopting and opening its session", () => {
+  const readme = read("README.md")
+  assert.ok(
+    /`enter` adopts the issue/.test(readme),
+    "the README says `enter` adopts an unattended row's issue",
+  )
+  assert.ok(/creates a session for it/.test(readme), "and that the plugin creates its session")
+  assert.ok(
+    !/No session\s+is ever created for it/.test(readme) && !/no session is ever created/i.test(readme),
+    "no README sentence says no session is ever created for such a row",
+  )
+  assert.ok(
+    !/never given a new session/.test(readme),
+    "and none says an unattended issue is never given a new session",
+  )
+  assert.ok(
+    readme.includes("`d` still does nothing on that"),
+    "while `d` on that row still does nothing, until the close key handles it",
+  )
+})
+
 test("the item first prompt carries the item, the skill, the writes it allows and the reply's two lines", () => {
   const hit = {
     permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
@@ -854,6 +875,9 @@ test("every RPC handler answers what the contract's own schema for it describes"
         getConfig: {},
         setConfig: { field: "poll_seconds", value: 90 },
         pollNow: {},
+        // No poller cycle has run in this fixture, so the issue is not in an
+        // unattended list: `adopt` answers its declared refusal and writes nothing.
+        adopt: { issueNumber: 41 },
         done: { sessionID: "ses_fixture" },
         markOpened: { sessionID: "ses_fixture" },
       }
@@ -861,6 +885,17 @@ test("every RPC handler answers what the contract's own schema for it describes"
         const answer = handlers[name](inputs[name], context)
         assert.equal(typeof answer?.then, "function", `${name} answers a promise, which the RPC layer awaits`)
         const output = await answer
+        // A call the fixture cannot satisfy answers the contract's own error
+        // instead of its output; every other one answers its output schema.
+        const refusal = output?.error
+        if (refusal) {
+          assert.equal(
+            schemaProblem(method.errors?.[refusal.name], refusal.data),
+            undefined,
+            `${name} answers its declared ${refusal.name} error schema`,
+          )
+          continue
+        }
         assert.equal(schemaProblem(method.output, output), undefined, `${name} answers its output schema`)
       }
       assert.equal(JSON.parse(readFileSync(configFile, "utf8")).poll_seconds, 90, "setConfig wrote the field")

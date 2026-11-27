@@ -432,6 +432,48 @@ test("an unattended issue is read, never woken, keeps its watermark and is liste
   assert.equal(entry.state_since, "2026-11-18T12:00:00.000Z", "a missing state_since falls back to asked_at")
   assert.equal(entry.asked_at, "2026-11-18T12:00:00.000Z", "the given asked_at is kept")
   assert.equal(entry.newActivity, true, "a newer message marks it")
+  // The three fields an adopt needs to create the issue's session.
+  assert.equal(entry.workspace, "slack_nexar", "the entry carries the workspace")
+  assert.equal(entry.channel_id, "C0PLATFORM", "the channel id")
+  assert.equal(entry.thread_ts, "1795194443.137219", "and the thread ts")
+})
+
+test("an adopted item is never woken for a message older than its adopt time, and is for a newer one", async () => {
+  const link = "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219"
+  const issue = openIssue(11, {
+    permalink: link,
+    workspace: "slack_nexar",
+    channel_id: "C0PLATFORM",
+    channel_name: "platform-help",
+    thread_ts: "1795194443.137219",
+  })
+  // The adopt happened 300 seconds ago: the adopt time's ts is the floor.
+  const adoptedAt = new Date(NOW - 300 * 1000).toISOString()
+
+  const older = harness({ issues: [issue], reads: () => answer([{ ts: tsOf(600) }]) })
+  older.setItems({ [link]: recordFor(11, link, { adoptedAt }) })
+  await older.run()
+  assert.equal(older.prompts.length, 0, "a message older than the adopt time wakes nothing")
+
+  // A watermark the issue already carried from its unattended cycles is old: it
+  // never wakes the adopted session for a message the first turn already read.
+  const carried = harness({ issues: [issue], reads: () => answer([{ ts: tsOf(600) }]) })
+  carried.setItems({ [link]: recordFor(11, link, { adoptedAt }) })
+  carried.setWatermarks({ 11: { ts: tsOf(1000), firstReadAt: adoptedAt } })
+  await carried.run()
+  assert.equal(carried.prompts.length, 0, "the adopt time outranks an older stored watermark")
+
+  const newer = harness({ issues: [issue], reads: () => answer([{ ts: tsOf(30) }]) })
+  newer.setItems({ [link]: recordFor(11, link, { adoptedAt }) })
+  newer.setWatermarks({ 11: { ts: tsOf(1000), firstReadAt: adoptedAt } })
+  await newer.run()
+  assert.equal(newer.prompts.length, 1, "a message newer than the adopt time wakes the session once")
+  assert.ok(
+    newer.prompts[0].text.includes((Date.parse(adoptedAt) / 1000).toFixed(6)),
+    "and the wake names the adopt time it is newer than",
+  )
+  assert.equal(newer.prompts[0].sessionID, "ses_1", "the wake goes to the adopted record's session")
+  assert.equal(newer.watermarks()["11"].ts, tsOf(30), "the watermark moves to the newest ts read")
 })
 
 test("an unattended issue's status entry carries its requester and its type for the dialog's row", async () => {

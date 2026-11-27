@@ -52,3 +52,11 @@ export const REISSUE_DIR = "reissue"
 export function reissueDir(env = process.env) {
   return join(claimsDir(env), REISSUE_DIR)
 }
+
+/** The subdirectory one intake issue's lock and leftover files live in. */
+export const ISSUE_DIR = "issue"
+
+/** The issue directory, beside the claims it belongs to. */
+export function issueDir(env = process.env) {
+  return join(claimsDir(env), ISSUE_DIR)
+}

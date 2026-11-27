@@ -139,17 +139,21 @@ An open issue whose session was deleted or archived shows as a row of its own,
 marked `∅`: no session stands behind it, and the poller's own status carries its
 title, its requester, its type, its state and its times. While the poller
 reports messages it has not seen on that request's source, the row carries a
-`★` after its age. `i` opens its issue and `s` opens the message in Slack;
-`enter` and `d` do
-nothing on that row, because there is no session to open or close — the dialog
-says so, and the issue is closed on GitHub when you are done with it. No session
-is ever created for it. The row goes when a complete poll no longer lists the
+`★` after its age. `i` opens its issue and `s` opens the message in Slack.
+`enter` adopts the issue: the plugin creates a session for it, records it as the
+issue's item and sends it the same first turn a flagged message gets, and the
+board opens it — so the row becomes a normal one the poller wakes from then on.
+A row it cannot adopt — its issue's yaml block is missing the fields a session
+needs — shows the reason and stays where it is. `d` still does nothing on that
+row: there is no session to close yet, and the issue is closed on GitHub when
+you are done with it. The row goes when a complete poll no longer lists the
 issue.
 
-Keys: `↑` and `↓` move the selection, `enter` opens the item's session, `i`
-opens its intake issue in your browser, `s` opens the Slack message, `r` polls
-now, `e` opens the settings dialog, `d` closes the item and deletes its session,
-and `esc` closes the dialog.
+Keys: `↑` and `↓` move the selection, `enter` opens the item's session — and
+adopts an unattended row's issue when it has none — `i` opens its intake issue
+in your browser, `s` opens the Slack message, `r` polls now, `e` opens the
+settings dialog, `d` closes the item and deletes its session, and `esc` closes
+the dialog.
 
 Click Done or press `d` to close the item and delete its session. The confirm
 names the item and says the delete cannot be restored. Cancel or Esc returns to
@@ -251,8 +255,9 @@ stays.
   text. The newest-seen `ts` per issue stays in the plugin's local storage, never
   on the issue.
 - An open, in-scope issue whose session was deleted or archived is **unattended**:
-  the poller still reads it — so a new message is noticed — but it is never
-  woken and never given a new session. The overview's `Poller` line shows the
+  the poller still reads it — so a new message is noticed — but the poller never
+  wakes it, and a session is created for it only when you press `enter` on its
+  row. The overview's `Poller` line shows the
   poller's last cycle (its time, the issues read, every issue whose read failed,
   the unattended count, a `gh` failure, a rate-limited read, a possibly cut
   list), and the status lists each unattended issue with its `permalink`, its
@@ -288,9 +293,9 @@ stays.
   permalink was missing.
 - Deleting or archiving an item's session leaves its issue open and its row in
   the overview, marked `∅`: the poller keeps reading the issue and the dialog
-  keeps showing its request state, and no new session is created for it. Its
-  open issue is what holds the message in place, so a removed item gets no
-  second session while its issue stays open.
+  keeps showing its request state, and a session is created for it again only
+  when you press `enter` on its row. Its open issue is what holds the message in
+  place, so a removed item gets no second session unless you adopt it.
 - After a complete flag scan, the watcher forgets a message whose flag is gone
   and whose issue is not open. A scan is complete when every connected Slack
   workspace's search ended with no error, no rate limit, a sign-in that held,

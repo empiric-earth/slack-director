@@ -11,12 +11,12 @@ import { randomUUID } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { SlackDirectorRpc } from "./rpc.js"
-import { createClaims } from "./src/claims.js"
+import { createClaims, createFence } from "./src/claims.js"
 import { createConfigReader, DEFAULT_POLL_SECONDS } from "./src/config.js"
 import { createGhRunner } from "./src/gh.js"
 import { createPoller, DEFAULT_POLL_MINUTES } from "./src/poller.js"
 import { processOwner, registerInstance, ownerPollNow } from "./src/singleton.js"
-import { claimsDir, reissueDir } from "./src/state.js"
+import { claimsDir, issueDir, reissueDir } from "./src/state.js"
 import { createWatcher, SESSION_EVENT_TYPES } from "./src/watcher.js"
 
 /** The skill this package ships. */
@@ -96,6 +96,10 @@ export default {
       claims: createClaims({ dir: claimsDir(), randomID: () => randomUUID() }),
       // The reissue's own claim and commit files, beside the main claims.
       reissue: createClaims({ dir: reissueDir(), randomID: () => randomUUID() }),
+      // The issue lock and its leftover files, one subdirectory beside the
+      // reissue's: every server process on this storage shares it, so one
+      // intake issue never gets two sessions from two processes.
+      issueLock: createFence({ dir: issueDir() }),
       now: () => Date.now(),
       fetch: (url, init) => fetch(url, init),
       readConfig: () => config.read(),
@@ -155,6 +159,14 @@ export default {
       done: async (input) => {
         void watcher.done(input).catch((error) => log(`the close failed: ${messageOf(error)}`))
         return {}
+      },
+      // Adopt an unattended row: the call creates the issue's session, records
+      // it and sends the first prompt, so it waits for the host's answer; a
+      // refusal is the contract's own error and reaches the board as a toast.
+      adopt: async (input, context) => {
+        const result = await watcher.adopt(input)
+        if (result.refused) return context.error("refused", result.refused, { reason: result.refused })
+        return result
       },
       markOpened: (input) => watcher.markOpened(input),
     })

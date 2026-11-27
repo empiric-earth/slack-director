@@ -351,7 +351,7 @@ stays.
 
 The `slack-director` agent starts from the OpenCode rules you already have, so
 the shell, the edits, the writes, the reads, the web and the subagents resolve
-the way they do for your other agents. On top of them it sets three things:
+the way they do for your other agents. On top of them it sets four things:
 
 - every Slack send asks first — send a message, schedule one, add a reaction,
   create or update a canvas, open a conversation — while reads, searches,
@@ -362,6 +362,16 @@ the way they do for your other agents. On top of them it sets three things:
   clients, such as `git push` and `ssh`, stay allowed by your own rules: the
   first turn's restraint there rests on its prompt alone, and after it each step
   runs only on your approval of a proposed step;
+- on your ask the director may open one work session, with exactly two shell
+  calls, each pinned to one command whose body `jq` reduces to the allowed
+  fields: a create call whose body keeps only `id`, `agent`, `title` and
+  `location.directory`, then a prompt call whose body keeps only `id` and
+  `text`. The agent file allows only those two command forms and denies nothing
+  else, so every other `opencode api` call, and the `jq` and `rm` these calls
+  use, resolve by your own shell rules. A shell pattern matches a command's text
+  only, so the prompt's allow cannot be tied to the session id the create call
+  returns: the director's skill alone keeps the prompt on the session it just
+  made;
 - the director works only in its session directory. OpenCode enforces that with
   its `external_directory` rule: file tools are confined to the workspace, and
   the shell is checked only for its working directory and `cd` targets and can

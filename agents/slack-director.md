@@ -51,6 +51,18 @@ permissions:
   - action: "external_directory"
     resource: "*"
     effect: deny
+  # Opening a work session on the user's ask: exactly these two calls, nothing
+  # else. Each body is a file the director writes in its own session folder and
+  # `jq` reduces to the allowed fields before the shell hands it to the call, so
+  # no command names a path outside that folder, and no other field — a session
+  # permission list, a parent, a model — can get through. The prompt call reaches any
+  # session id; only the skill keeps it on the session the create call made.
+  - action: "shell"
+    resource: "opencode api post /api/session -d \"$(jq -c '{id: .id, agent: .agent, title: .title, location: {directory: .location.directory}}' open-session-create.json)\""
+    effect: allow
+  - action: "shell"
+    resource: "opencode api post /api/session/*/prompt -d \"$(jq -c '{id: .id, text: .text}' open-session-prompt.json)\""
+    effect: allow
 ---
 
 The plugin starts one session per Slack message the user flags by reacting to it

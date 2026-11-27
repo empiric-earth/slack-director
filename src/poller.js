@@ -322,7 +322,9 @@ export function createPoller({
     const previousUnattended = Array.isArray(previous?.unattended) ? previous.unattended : []
     // One unattended issue's status entry. It is built from the open-issue list
     // alone, so a failed Slack read never hides the issue; `newActivity` is what
-    // the read found, or, on a failed read, what the last cycle already knew.
+    // the read found, or, on a failed read, what the last cycle already knew. The
+    // requester and the type come from the issue's yaml block, the same two
+    // values a session row keeps, so the dialog's row shows them too.
     const unattendedEntry = (issue, fields, firstReadAt, newActivity) => {
       const before = previousUnattended.find((row) => row?.number === issue.number)
       const askedAt = fields.asked_at ?? firstReadAt
@@ -335,6 +337,8 @@ export function createPoller({
         state_since: fields.state_since ?? askedAt,
         asked_at: askedAt,
         newActivity: newActivity ?? before?.newActivity === true,
+        asker: fields.asker ?? "",
+        channel_name: fields.channel_name ?? "",
       }
     }
     // The request state every open issue carries, read before anything else is

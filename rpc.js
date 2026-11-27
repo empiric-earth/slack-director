@@ -59,7 +59,9 @@ const workspace = {
 }
 
 // One open, in-scope issue whose session was deleted or archived. It is shown,
-// never woken, and never given a new session.
+// never woken, and never given a new session. The requester and the type are
+// optional: a status the older build stored carries neither, and the row shows
+// them empty until the next cycle writes them.
 const unattended = {
   type: "object",
   properties: {
@@ -71,6 +73,8 @@ const unattended = {
     state_since: { type: "string" },
     asked_at: { type: "string" },
     newActivity: { type: "boolean" },
+    asker: { type: "string" },
+    channel_name: { type: "string" },
   },
   required: ["number", "url", "title", "permalink", "state", "state_since", "asked_at", "newActivity"],
   additionalProperties: false,

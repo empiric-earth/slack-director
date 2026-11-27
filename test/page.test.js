@@ -11,6 +11,7 @@ import assert from "node:assert/strict"
 import {
   AGE_WARNING_MINUTES,
   DIALOG_INSET,
+  MARK_LEGEND,
   NEW_ACTIVITY_MARK,
   NO_SESSION_MARK,
   PAGE_TITLE,
@@ -29,17 +30,19 @@ import {
   footerParts,
   footerText,
   hasSession,
-  headerParts,
-  headerText,
+  headerLines,
   issueLabel,
   itemAsker,
   itemTitle,
+  legendParts,
+  legendText,
   moveSelection,
   openerCommand,
   pageRows,
   partsText,
   pollClock,
-  pollerCell,
+  pollerLineParts,
+  pollerLineText,
   reconcileSelection,
   requestStateOf,
   rowID,
@@ -51,9 +54,13 @@ import {
   sessionMark,
   settingsValue,
   sidebarText,
+  slackLineParts,
+  slackLineText,
+  timeOf,
   titleParts,
   todayParts,
   todayText,
+  typeLabel,
   workspaceLabel,
 } from "../src/page.js"
 
@@ -147,6 +154,8 @@ function orphan(over = {}) {
     state_since: minutes(60 * 5),
     asked_at: minutes(60 * 30),
     newActivity: false,
+    asker: "Nuno Ferreira (U0000000036)",
+    channel_name: "eng-infra",
     ...over,
   }
 }
@@ -165,6 +174,22 @@ const STATUS = {
   configError: null,
   today: { flagged: 5, nextStepsPosted: 3, skipped: 1 },
 }
+
+/** One poller cycle whose last read failed on three issues. */
+const POLLER = {
+  lastCycle: "2026-11-19T14:32:00.000Z",
+  outcome: "rate limited: #7",
+  issues: 11,
+  threads: 4,
+  conversations: 2,
+  unattended: [orphan()],
+  ghError: null,
+  failed: [7, 8, 9],
+  possiblyCut: false,
+}
+
+/** The status carrying that cycle, so the header draws its second line. */
+const STATUS_WITH_POLLER = { ...STATUS, poller: POLLER }
 
 test("the request state is the issue's own, and needs-me until the issue names another", () => {
   assert.equal(requestStateOf(item()), "needs-me")
@@ -258,23 +283,31 @@ test("the title row, the header line, the counts line, the today line and the fo
   const rows = pageRows(ITEMS, liveOf)
 
   assert.equal(partsText(titleParts()), `${PAGE_TITLE}esc`, "the title row holds the name and esc")
-  assert.equal(headerText(STATUS), "last poll 14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps")
-  assert.equal(headerText({ lastPoll: null, outcome: "never polled", workspaces: [] }), "last poll never")
+  assert.equal(slackLineText(STATUS), "Slack  14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps")
+  assert.equal(slackLineText({ lastPoll: null, outcome: "never polled", workspaces: [] }), "Slack  never")
+  assert.equal(
+    pollerLineText(POLLER),
+    "Poller 14:32 ✗ rate limited: #7 · 11 issues · 3 failed: #7 #8 #9 · 1 unattended",
+  )
   assert.equal(pollClock("2026-11-19T14:32:00.000Z"), "14:32")
   assert.equal(countsText(rows), "2 needs me   1 blocked   1 waiting on requester   1 idle")
   assert.equal(countsText([]), "0 needs me   0 blocked   0 waiting on requester   0 idle")
   assert.equal(todayText(STATUS), "today  5 flagged · 3 next steps posted", "the skipped hits are gone")
   assert.equal(todayText(undefined), "today  0 flagged · 0 next steps posted")
+  assert.equal(
+    legendText(),
+    "◐ turn running · ● waiting for your permission · ∅ no session · ★ new activity",
+  )
   assert.equal(footerText(), "↵ session   i issue   s slack   r refresh   e settings   d done")
   assert.ok(footerText().includes("d done"), "the footer names the d key")
   assert.equal(sidebarText(rows), "Slack Director  2 needs me · 1 blocked")
 })
 
-test("the poller cell shows its cycle time, its distinct reason and what the cycle read", () => {
-  assert.equal(pollerCell(undefined), undefined, "nothing is shown before a cycle")
-  assert.equal(pollerCell({ lastCycle: null }), undefined)
+test("the poller line names its cycle time, the issues it read, every failed issue and the reason", () => {
+  assert.equal(pollerLineParts(undefined), undefined, "nothing is shown before a cycle")
+  assert.equal(pollerLineParts({ lastCycle: null }), undefined)
   assert.equal(
-    pollerCell({
+    pollerLineText({
       lastCycle: "2026-11-19T14:32:00.000Z",
       outcome: "ok",
       issues: 11,
@@ -284,10 +317,11 @@ test("the poller cell shows its cycle time, its distinct reason and what the cyc
       failed: [],
       possiblyCut: false,
     }),
-    "poller 14:32 ✓ 11 issues · 4 threads · 2 conversations",
+    "Poller 14:32 · 11 issues",
+    "a healthy cycle names no reason and no failure",
   )
   assert.equal(
-    pollerCell({
+    pollerLineText({
       lastCycle: "2026-11-19T14:32:00.000Z",
       outcome: "rate limited",
       issues: 11,
@@ -297,11 +331,11 @@ test("the poller cell shows its cycle time, its distinct reason and what the cyc
       failed: [7],
       possiblyCut: true,
     }),
-    "poller 14:32 ✗ rate limited · 11 issues · 4 threads · 2 conversations · 1 unattended · list cut at 100",
+    "Poller 14:32 ✗ rate limited · 11 issues · 1 failed: #7 · 1 unattended · list cut at 100",
     "throttling is told from a sign-in problem, and an incomplete list is not hidden by a failure",
   )
   assert.equal(
-    pollerCell({
+    pollerLineText({
       lastCycle: "2026-11-19T14:32:00.000Z",
       outcome: "gh failed: not logged in",
       issues: 0,
@@ -312,14 +346,46 @@ test("the poller cell shows its cycle time, its distinct reason and what the cyc
       ghError: "not logged in",
       possiblyCut: false,
     }),
-    "poller 14:32 ✗ not logged in · 0 issues · 0 threads · 0 conversations",
+    "Poller 14:32 ✗ not logged in · 0 issues",
+    "a gh failure is named by its own error",
   )
+})
+
+test("the poller line lists every failed issue, not only the first", () => {
+  const poller = {
+    lastCycle: "2026-11-19T14:32:00.000Z",
+    outcome: "read failed: #7",
+    issues: 11,
+    threads: 4,
+    conversations: 2,
+    unattended: [],
+    ghError: null,
+    failed: [7, 8, 9],
+    possiblyCut: false,
+  }
+  assert.equal(
+    pollerLineText(poller),
+    "Poller 14:32 ✗ read failed: #7 · 11 issues · 3 failed: #7 #8 #9",
+    "all three numbers and their count",
+  )
+  assert.ok(pollerLineText(poller).includes("#8"), "the second failure is named")
+  assert.ok(pollerLineText(poller).includes("#9"), "and the third")
+})
+
+test("the header draws the Slack scan line and, once a cycle has run, the poller line", () => {
+  assert.deepEqual(headerLines(STATUS).map(partsText), [slackLineText(STATUS)], "one line before a cycle")
+  assert.deepEqual(
+    headerLines(STATUS_WITH_POLLER).map(partsText),
+    [slackLineText(STATUS_WITH_POLLER), pollerLineText(POLLER)],
+    "the poller line follows the Slack scan line",
+  )
+  assert.equal(headerLines(undefined).length, 1, "a status with no poller still draws the scan line")
 })
 
 test("no line names a STATE column, and the dialog carries no table header", () => {
   const lines = [
     partsText(titleParts()),
-    headerText(STATUS),
+    ...headerLines(STATUS_WITH_POLLER).map(partsText),
     countsText(pageRows(ITEMS, liveOf)),
     todayText(STATUS),
     footerText(),
@@ -376,10 +442,21 @@ test("the colour roles name the mark, the text and the bar each part takes", () 
       ["esc", "muted", false],
     ],
   )
-  const header = headerParts(STATUS)
+  const header = slackLineParts(STATUS)
   assert.deepEqual(
     header.map((entry) => entry.role),
-    ["muted", "muted", "muted", "workspace-ok", "muted", "muted", "workspace-fail", "muted"],
+    ["muted", "muted", "muted", "muted", "workspace-ok", "muted", "muted", "workspace-fail", "muted"],
+  )
+  const poller = pollerLineParts(POLLER)
+  assert.deepEqual(
+    poller.map((entry) => entry.role),
+    ["muted", "workspace-fail"],
+    "the poller line's failing cell takes the attention colour",
+  )
+  assert.deepEqual(
+    pollerLineParts({ ...POLLER, outcome: "ok", failed: [] }).map((entry) => entry.role),
+    ["muted", "workspace-ok"],
+    "a healthy poller cell does not",
   )
   const counts = countsParts(pageRows(ITEMS, liveOf))
   assert.deepEqual(
@@ -423,7 +500,7 @@ test("the colour roles name the mark, the text and the bar each part takes", () 
   assert.deepEqual(todayParts(STATUS).map((entry) => entry.role), ["muted", "muted"])
 })
 
-test("one row is the bar, the session mark, then ITEM, ASKER, CHANNEL, the issue and AGE", () => {
+test("one row is the bar, the session mark, then the issue, the requester, the type, the text and the age", () => {
   const rows = pageRows(ITEMS, liveOf)
   const parts = rowParts(rows[0], { selected: true, now: NOW, hours: HOURS })
 
@@ -433,12 +510,12 @@ test("one row is the bar, the session mark, then ITEM, ASKER, CHANNEL, the issue
   assert.equal(parts[1].role, "bar")
   assert.equal(parts[3].text, SESSION_MARK.running, "a running turn shows its mark on the row")
   assert.equal(parts[3].role, "state-working")
-  assert.equal(parts[5].text.trimEnd(), "Why the nightly export job fails")
-  assert.equal(parts[5].role, "base", "ITEM is base text on a row outside the Idle section")
-  assert.equal(parts[7].text.trimEnd(), "Ana Silva")
-  assert.equal(parts[9].text.trimEnd(), "#data-eng")
-  assert.equal(parts[11].text.trimEnd(), issueLabel(rows[0].item))
-  assert.equal(parts[13].text, "2m", "AGE keeps its calendar text")
+  assert.equal(parts[5].text.trimEnd(), issueLabel(rows[0].item), "ISSUE comes first")
+  assert.equal(parts[7].text.trimEnd(), "Ana Silva", "then the requester")
+  assert.equal(parts[9].text.trimEnd(), "#data-eng", "then the type")
+  assert.equal(parts[11].text.trimEnd(), "Why the nightly export job fails", "then the text")
+  assert.equal(parts[11].role, "base", "the text is base text on a row outside the Idle section")
+  assert.equal(parts[13].text, "2m", "and the age last")
 
   const quiet = rowParts(rows[1], { selected: false, now: NOW, hours: HOURS })
   assert.equal(quiet[1].text, " ")
@@ -448,16 +525,56 @@ test("one row is the bar, the session mark, then ITEM, ASKER, CHANNEL, the issue
 
   const idle = rowParts(rows[4], { selected: false, now: NOW, hours: HOURS })
   assert.equal(rows[4].state, "idle")
-  assert.equal(idle[5].role, "muted", "an idle row is muted throughout")
-  assert.equal(idle[7].role, "muted")
+  assert.equal(idle[11].role, "muted", "an idle row is muted throughout")
+  assert.equal(idle[5].role, "muted")
+
+  const unattended = rowParts(pageRows([], () => ({}), [orphan()])[0], { now: NOW, hours: HOURS })
+  assert.equal(unattended[3].text, NO_SESSION_MARK)
+  assert.equal(unattended[5].text.trimEnd(), "#36", "an unattended row keeps the same column order")
+  assert.equal(unattended[7].text.trimEnd(), "Nuno Ferreira")
+  assert.equal(unattended[9].text.trimEnd(), "#eng-infra")
+  assert.equal(unattended[11].text.trimEnd(), "VPN profile for the contractors")
+  assert.equal(unattended[13].text, "5h")
+})
+
+test("the TYPE cell is DM, GDM or the channel's name with a leading #", () => {
+  assert.equal(typeLabel("DM"), "DM")
+  assert.equal(typeLabel("GDM"), "GDM")
+  assert.equal(typeLabel("#eng-infra"), "#eng-infra", "a session record already carries the #")
+  assert.equal(typeLabel("eng-infra"), "#eng-infra", "the issue's yaml field carries the name alone")
+  assert.equal(typeLabel(""), "")
+  assert.equal(typeLabel(undefined), "")
+})
+
+test("a session row and an unattended row both show DM, GDM or the channel's own name", () => {
+  const rows = pageRows(ITEMS, liveOf)
+  const typeOf = (row) => rowParts(row, { now: NOW, hours: HOURS })[9].text.trimEnd()
+  assert.equal(typeOf(rows.find((row) => row.item.sessionID === "ses_2")), "DM")
+  assert.equal(typeOf(rows.find((row) => row.item.sessionID === "ses_4")), "GDM")
+  assert.equal(typeOf(rows.find((row) => row.item.sessionID === "ses_3")), "#data-eng")
+
+  const unattended = (channel) => rowParts(pageRows([], () => ({}), [orphan({ channel_name: channel })])[0], {
+    now: NOW,
+    hours: HOURS,
+  })
+  assert.equal(unattended("DM")[9].text.trimEnd(), "DM")
+  assert.equal(unattended("GDM")[9].text.trimEnd(), "GDM")
+  assert.equal(unattended("eng-infra")[9].text.trimEnd(), "#eng-infra")
+
+  // The poller's entry carries the issue's own asker and channel_name, and the
+  // row shows both: neither is dropped on the way.
+  const [group] = pageRows([], () => ({}), [orphan({ asker: "Maria Costa (U123)", channel_name: "GDM" })])
+  const parts = rowParts(group, { now: NOW, hours: HOURS })
+  assert.equal(parts[7].text.trimEnd(), "Maria Costa", "the requester comes from the entry's asker")
+  assert.equal(parts[9].text.trimEnd(), "GDM", "and the type from its channel_name")
 })
 
 test("a value too long for its column is shortened with an ellipsis", () => {
-  const long = item({ title: "B".repeat(80), asker: "A".repeat(40), channel: "C".repeat(40) })
+  const long = item({ title: "B".repeat(80), asker: "A".repeat(40), channel: "#" + "C".repeat(40) })
   const parts = rowParts({ item: long, state: "needs-me" }, { now: NOW, hours: HOURS })
-  assert.equal(parts[5].text, `${"B".repeat(ROW_WIDTHS.item - 1)}…`)
+  assert.equal(parts[11].text, `${"B".repeat(ROW_WIDTHS.item - 1)}…`)
   assert.equal(parts[7].text, `${"A".repeat(ROW_WIDTHS.asker - 1)}…`, "ASKER is shortened to its column")
-  assert.equal(parts[9].text, `${"C".repeat(ROW_WIDTHS.channel - 1)}…`)
+  assert.equal(parts[9].text, `${"#"}${"C".repeat(ROW_WIDTHS.channel - 2)}…`)
 })
 
 test("the ITEM cell drops a leading asker, so ASKER is not shown twice", () => {
@@ -637,19 +754,64 @@ test("an unattended open issue shows one row, in its state's section, marked as 
   const parts = rowParts(row, { now: NOW, hours: HOURS })
   assert.equal(parts[3].text, NO_SESSION_MARK)
   assert.equal(parts[3].role, "muted")
-  assert.equal(parts[5].text.trimEnd(), "VPN profile for the contractors", "the row keeps the issue's title")
-  assert.equal(parts[7].text.trimEnd(), "Nuno Ferreira", "and the asker the issue's title carries")
+  assert.equal(parts[5].text.trimEnd(), issueLabel(row.item), "the row names its intake issue")
+  assert.equal(parts[7].text.trimEnd(), "Nuno Ferreira", "and the requester the issue's yaml carries")
+  assert.equal(parts[9].text.trimEnd(), "#eng-infra", "and the type the issue's yaml carries")
+  assert.equal(parts[11].text.trimEnd(), "VPN profile for the contractors", "and keeps the issue's title")
 })
 
-test("an unattended row carries the new activity flag while the poller reports unseen messages", () => {
+test("an unattended row carries the new activity mark while the poller reports unseen messages", () => {
   const rows = pageRows(ITEMS, liveOf, [orphan({ newActivity: true })])
   const row = rows.find((entry) => entry.item.issueNumber === 36)
   assert.equal(row.note, NEW_ACTIVITY_MARK)
   const parts = rowParts(row, { now: NOW, hours: HOURS })
-  assert.equal(parts.at(-1).text, NEW_ACTIVITY_MARK, "the flag follows the age cell")
+  assert.equal(parts.at(-1).text, NEW_ACTIVITY_MARK, "the mark follows the age cell")
+  assert.equal(parts.at(-1).role, "new-activity", "and it takes the new-activity colour")
   const text = rowText(row, { now: NOW, hours: HOURS })
   assert.ok(text.includes(NO_SESSION_MARK), "the row still carries the no session mark")
-  assert.ok(text.includes(NEW_ACTIVITY_MARK), "and the new activity flag")
+  assert.ok(text.includes(NEW_ACTIVITY_MARK), "and the new activity mark")
+  assert.ok(!text.includes("new activity"), "the row shows the mark, not the words")
+  assert.equal(NEW_ACTIVITY_MARK, "★")
+})
+
+test("the legend line explains every row mark, built from the same constants the rows draw", () => {
+  assert.deepEqual(
+    MARK_LEGEND,
+    [
+      [SESSION_MARK.running, "turn running"],
+      [SESSION_MARK.pending, "waiting for your permission"],
+      [NO_SESSION_MARK, "no session"],
+      [NEW_ACTIVITY_MARK, "new activity"],
+    ],
+    "the legend holds every mark a row draws",
+  )
+  assert.equal(
+    legendText(),
+    `${SESSION_MARK.running} turn running · ${SESSION_MARK.pending} waiting for your permission · ${NO_SESSION_MARK} no session · ${NEW_ACTIVITY_MARK} new activity`,
+  )
+  for (const [mark, meaning] of MARK_LEGEND) {
+    assert.ok(legendText().includes(`${mark} ${meaning}`), `the legend explains ${mark}: ${meaning}`)
+  }
+  assert.deepEqual(legendParts().map((entry) => entry.role), ["muted"])
+})
+
+test("a Slack ts reads as the time it stamps, in the age cell and in the stamp", () => {
+  const slack = "1795606369.104969"
+  const at = Number(slack) * 1000
+  assert.equal(timeOf(slack), at, "ten digits, a dot and six digits read as that time")
+  assert.equal(timeOf(`"${slack}"`), at, "quoted or not")
+  assert.equal(ageText(slack, at + 60 * 60 * 1000), "1h", "an hour later it reads 1h")
+  assert.equal(ageText(`"${slack}"`, at + 60 * 60 * 1000), "1h")
+  assert.equal(ageText(minutes(12), NOW), "12m", "an ISO time renders as before")
+  assert.equal(timeOf("1795606369"), undefined, "a value with no dot names no time")
+  assert.equal(ageText("not a time", NOW), "—", "an unparseable value still renders a dash")
+  assert.equal(ageText(undefined, NOW), "—")
+
+  // An unattended row whose asked_at is a Slack ts shows an age rather than a dash.
+  const rows = pageRows([], () => ({}), [orphan({ state_since: undefined, asked_at: slack })])
+  assert.equal(rows[0].at, slack, "the row ages from the Slack ts")
+  assert.equal(rowParts(rows[0], { now: at + 2 * 60 * 60 * 1000, hours: HOURS })[13].text, "2h")
+  assert.equal(ageStamp({ stateSince: slack }), slack, "an issue's state_since may be a Slack ts too")
 })
 
 test("an unattended row ages by its state_since, else by its asked_at", () => {

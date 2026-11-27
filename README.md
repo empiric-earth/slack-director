@@ -48,72 +48,88 @@ screen. Open it with `/slack-director`, or with the `Slack Director` entry in
 the command palette:
 
 - the title row names the dialog, with `esc` on the right;
-- the header names the last poll, each workspace — a workspace that failed
-  carries `✗` and the reason — and the poller's one cell;
+- the header is two labelled lines: `Slack` names the last flag scan — its time
+  and each workspace, a failed one with `✗` and its reason — and `Poller` names
+  the thread poller's last cycle, the issues it read, every issue whose read
+  failed, the unattended count and a possibly cut list;
 - the counts line counts the rows by request state;
 - the rows are grouped under `Needs me`, `Blocked`, `Waiting on requester` and
   `Idle`, one section per request state that has rows, in that order;
-- each row is one mark, then the item's title, its asker, its channel, its
-  intake issue and how long its request has been in its state;
+- each row is one mark, then the intake issue, the requester, the type, the
+  item's text and how long its request has been in its state;
 - the today line carries the day's counts;
+- the legend line explains every row mark;
 - the footer names the keys.
 
 The dialog's shape, with one blank line between two groups that are shown:
 
 ```
-Slack Director                                                                            esc
-last poll 14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps · poller 14:32 ✓ 11 issues · 4 threads · 2 conversations
+Slack Director                                                                                esc
+Slack  14:32 · nexar ✓ · nauto ✗ sign-in expired — run /mcps
+Poller 14:32 · 11 issues · 1 unattended
 
-2 needs me   1 blocked   1 waiting on requester   1 idle
+2 needs me   2 blocked   1 waiting on requester   1 idle
 
 Needs me
- ┃ ◐ Why the nightly export job fails             Ana Silva       #data-eng        #<n>   2m
-   ● Access to the staging dashboards             Maria Costa     #platform-help   #<n>   12m
+ ┃ ◐ #42    Ana Silva       #data-eng        Why the nightly export job fails             2m
+   ● #41    Maria Costa     #platform-help   Access to the staging dashboards             12m
 
 Blocked
-   ∅ VPN profile for the contractors              Nuno Ferreira                    #<n>   5h  new activity
+     #40    João Pereira    DM               Review of the Terraform module change        1h
+   ∅ #36    Nuno Ferreira   #eng-infra       VPN profile for the contractors              5h  ★
 
 Waiting on requester
-     Onboarding steps for the new laptop          Tiago Lopes     #porto-office    #<n>   3d
+     #37    Tiago Lopes     #porto-office    Onboarding steps for the new laptop          3d
 
 Idle
-     Budget numbers for Q1 infra                  Rui Santos      GDM              #<n>   1d
+     #38    Rui Santos      GDM              Budget numbers for Q1 infra                  1d
 
-today  4 flagged · 3 next steps posted
+today  5 flagged · 3 next steps posted
 
+◐ turn running · ● waiting for your permission · ∅ no session · ★ new activity
 ↵ session   i issue   s slack   r refresh   e settings   d done
 ```
 
 The section a row sits under is the request state the poller read from its
 intake issue's yaml block. Inside a section the newest comes first: the newest
 flag for a row with a session behind it, and the newest state time for an
-unattended row, which has no flag. The
-issue cell shows the intake issue's number, and `—` until the item's first turn
-has named its issue. A heading sits directly above its first row, and no blank
-line is drawn for a group that is not shown.
+unattended row, which has no flag. The issue cell shows the intake issue's
+number, and `—` until the item's first turn has named its issue. The type is
+`DM`, `GDM`, or the channel's own name with a leading `#`. A heading sits
+directly above its first row, and no blank line is drawn for a group that is not
+shown. The legend is the last line before the footer.
 
 Click an action or use its shortcut. The Esc hint closes the overview.
 
 There is no table header, and no state column of its own: the section a row
 sits under is its request state, and the mark says what its session is doing.
 The dialog follows OpenCode's own list dialog: an inset panel, a bold title, a
-bold muted section header, and a filled background with a `┃` bar on the row
+bold section header, and a filled background with a `┃` bar on the row
 the selection is on.
 
 The mark on a row is its session: `◐` while a turn runs, `●` while an OpenCode
-permission request waits, and nothing otherwise. Only that mark takes a state
-colour — `●` the theme's warning colour, `◐` its info colour. On a row outside
-the `Idle` section the title is normal text and the asker, the channel and the
-issue number are muted; an idle row is muted throughout. AGE counts the time in
-the request's state — from the issue's `state_since`, or from the flag when the
-issue names none — and keeps its working-hours colours: normal text under four
-working hours, the theme's warning colour from four working hours, and its
-error colour from one working day, where a working day is the length of one
-day's window, so time outside `work_hours` and on a day the window does not list
-does not count.
+permission request waits, and nothing otherwise. An unattended row carries `∅`,
+and while the poller reports a message it has not seen on that request's source
+the row carries a `★` after its age. The legend line at the bottom explains each
+mark.
 
-The dialog carries no Slack message text: a row's title is the item session's
-own title, and the poller keeps only Slack timestamps.
+The dialog's title, the section headers and what needs attention — a failed
+workspace, the poller's failed part — take the theme's primary text colour,
+`text.action.primary.base`, and fall back to the colour each took before a theme
+named one. `★` takes the theme's yellow hue where the theme has one, else its
+warning colour, and `●` and `◐` keep the theme's warning and info colours. On a
+row outside the `Idle` section the row's text is normal text and the issue, the
+requester and the type are muted; an idle row is muted throughout. AGE counts
+the time in the request's state — from the issue's `state_since`, or from the
+flag when the issue names none — and keeps its working-hours colours: normal
+text under four working hours, the theme's warning colour from four working
+hours, and its error colour from one working day, where a working day is the
+length of one day's window, so time outside `work_hours` and on a day the window
+does not list does not count. A time stored as a Slack `ts` — ten digits, a dot
+and six digits — reads as the time it stamps, the same as an ISO time.
+
+The dialog carries no Slack message text: a row's text column is the item
+session's own title, and the poller keeps only Slack timestamps.
 
 An item's row leaves the dialog once its issue is closed: a poll whose list is
 complete and does not name the issue marks the item closed, and a poll whose
@@ -121,9 +137,10 @@ list failed or may have been cut at 100 leaves every row exactly where it is.
 
 An open issue whose session was deleted or archived shows as a row of its own,
 marked `∅`: no session stands behind it, and the poller's own status carries its
-title, its state and its times. While the poller reports messages it has not
-seen on that request's source, the row carries `new activity` after its age.
-`i` opens its issue and `s` opens the message in Slack; `enter` and `d` do
+title, its requester, its type, its state and its times. While the poller
+reports messages it has not seen on that request's source, the row carries a
+`★` after its age. `i` opens its issue and `s` opens the message in Slack;
+`enter` and `d` do
 nothing on that row, because there is no session to open or close — the dialog
 says so, and the issue is closed on GitHub when you are done with it. No session
 is ever created for it. The row goes when a complete poll no longer lists the
@@ -235,11 +252,12 @@ stays.
   on the issue.
 - An open, in-scope issue whose session was deleted or archived is **unattended**:
   the poller still reads it — so a new message is noticed — but it is never
-  woken and never given a new session. The overview's header shows the poller's
-  last cycle (its time, the issues, threads and conversations read, the
-  unattended issues, a `gh` failure, a rate-limited read, a possibly cut list),
-  and the status lists each unattended issue with its `permalink`, `state`,
-  `state_since` and `asked_at`, and a mark when its source has newer activity.
+  woken and never given a new session. The overview's `Poller` line shows the
+  poller's last cycle (its time, the issues read, every issue whose read failed,
+  the unattended count, a `gh` failure, a rate-limited read, a possibly cut
+  list), and the status lists each unattended issue with its `permalink`, its
+  `asker`, its `channel_name`, its `state`, its `state_since` and its
+  `asked_at`, and a mark when its source has newer activity.
   An issue is listed because it is open and in scope, not because its Slack read
   worked: a failed, rate-limited or unauthorized read leaves it listed, with the
   mark and the age the last cycle gave it, and moves no watermark.
@@ -297,9 +315,9 @@ stays.
   plugin's log: when the watcher forgets a message it writes one line,
   `slack-director: forgot <permalink>: its flag is gone and its issue is not
   open`, naming the message's own permalink. Flag the message again only after
-  that line appears. The header's `last poll` and the `poller` cell's last cycle
-  are not that sign: `last poll` moves on a scan that was not complete too, and
-  a scan can run before the poller's next read, so both can look right while the
+  that line appears. The header's `Slack` line and `Poller` line are not that
+  sign: the `Slack` time moves on a scan that was not complete too, and a scan
+  can run before the poller's next read, so both can look right while the
   message is still seen. The defaults are `poll_seconds` 60 for the scan and
   `poll_minutes` 5 for the read, so the line takes up to a few minutes. A flag
   put back before that line does nothing, because the message is still seen: if

@@ -21,12 +21,15 @@ import {
   footerParts,
   footerText,
   hasSession,
-  headerText,
+  headerLines,
+  legendText,
   moveSelection,
   pageRows,
   partsText,
+  pollerLineText,
   rowText,
   sidebarText,
+  slackLineText,
   titleParts,
   todayText,
 } from "../src/page.js"
@@ -66,7 +69,8 @@ const CONFIG = {
 }
 
 // A stub theme with OpenCode v2.4.0's shape: every role and every step a
-// distinct value, and the two hues the waiting and working marks take.
+// distinct value, the primary action text the title and the sections take, and
+// the hues the waiting, working and new-activity marks take.
 const STEPS = [100, 200, 300, 400, 500, 600, 700, 800, 900]
 const scale = (name) => Object.fromEntries(STEPS.map((step) => [step, `${name}-${step}`]))
 const SEMANTIC_HUES = { accent: scale("accent"), interactive: scale("interactive"), neutral: scale("neutral") }
@@ -74,14 +78,17 @@ const THEME = {
   text: {
     base: "base",
     muted: "muted",
+    action: { primary: { base: "primary" } },
     formfield: { focused: "formfield-focused" },
     feedback: { warning: { base: "warning" }, error: { base: "error" }, info: { base: "info" } },
   },
   background: { action: { primary: { focused: "bg-primary-focused" } } },
-  hue: { ...SEMANTIC_HUES, orange: scale("orange"), blue: scale("blue") },
+  hue: { ...SEMANTIC_HUES, orange: scale("orange"), blue: scale("blue"), yellow: scale("yellow") },
 }
-/** A theme that defines only the required semantic hues, so orange and blue are absent. */
+/** A theme that defines only the required semantic hues, so orange, blue and yellow are absent. */
 const THEME_NO_HUES = { ...THEME, hue: SEMANTIC_HUES }
+/** A theme whose action record names no primary text colour, so the accent falls back. */
+const THEME_NO_PRIMARY = { ...THEME, text: { ...THEME.text, action: {} } }
 const BOLD = 1
 
 const ITEM = {
@@ -128,6 +135,20 @@ const UNATTENDED = {
   state_since: "2026-11-19T09:32:00.000Z",
   asked_at: "2026-11-18T08:32:00.000Z",
   newActivity: true,
+  asker: "Nuno Ferreira (U0000000036)",
+  channel_name: "eng-infra",
+}
+
+/** The same entry as a status the older build stored carries it: the two new fields absent. */
+const OLDER_UNATTENDED = {
+  number: 36,
+  url: "https://github.com/empiric-earth/almeida-slack-intake/issues/36",
+  title: "Nuno Ferreira — VPN profile for the contractors",
+  permalink: "https://nexar.slack.com/archives/C0IT/p1795194400999000",
+  state: "blocked",
+  state_since: "2026-11-19T09:32:00.000Z",
+  asked_at: "2026-11-18T08:32:00.000Z",
+  newActivity: true,
 }
 
 /** The status with one poller cycle, carrying the unattended issue. */
@@ -144,6 +165,18 @@ const STATUS_WITH_POLLER = {
     failed: [],
     possiblyCut: false,
   },
+}
+
+/** The same status as the older build stored it: the unattended entry lacks the two new fields. */
+const OLDER_STATUS = {
+  ...STATUS_WITH_POLLER,
+  poller: { ...STATUS_WITH_POLLER.poller, unattended: [OLDER_UNATTENDED] },
+}
+
+/** The same status whose last cycle failed on three issues. */
+const STATUS_FAILED = {
+  ...STATUS_WITH_POLLER,
+  poller: { ...STATUS_WITH_POLLER.poller, outcome: "rate limited: #7", failed: [7, 8, 9] },
 }
 
 function fakeTuiContext({
@@ -420,10 +453,10 @@ function clickPart(view, content) {
 /** A primary click on the footer's Done hint. */
 const clickDone = (view) => clickPart(view, "d")
 
-/** The ITEM cell of the row the marker is on, or undefined when no row is marked. */
+/** The text cell of the row the marker is on, or undefined when no row is marked. */
 function markedItem(view) {
   const line = rowLines(view).find((candidate) => childWith(candidate, "┃") !== undefined)
-  return line ? lineChildren(line)[5].props.content.trim() : undefined
+  return line ? lineChildren(line)[11].props.content.trim() : undefined
 }
 
 /** The modal layers the dialog has registered and not dropped. */
@@ -457,16 +490,32 @@ test("the RPC contract defines every method and every event with a schema", () =
   assert.deepEqual(status.output.properties.workspaces.items.required, ["name", "ok", "error"])
   assert.deepEqual(status.output.properties.today.required, ["flagged", "nextStepsPosted", "skipped"])
   const poller = status.output.properties.poller
+  const unattended = poller.properties.unattended.items
   assert.deepEqual(
-    poller.properties.unattended.items.required,
+    unattended.required,
     ["number", "url", "title", "permalink", "state", "state_since", "asked_at", "newActivity"],
     "an unattended issue carries what a row needs, from the poller's own status",
+  )
+  assert.deepEqual(
+    [unattended.properties.asker, unattended.properties.channel_name],
+    [{ type: "string" }, { type: "string" }],
+    "the requester and the type are declared",
+  )
+  assert.ok(
+    !unattended.required.includes("asker") && !unattended.required.includes("channel_name"),
+    "and both are optional, so a status the older build stored still validates",
   )
   assert.equal(
     schemaProblem(status.output, STATUS_WITH_POLLER),
     undefined,
     "a status whose poller read one unattended issue fits the contract",
   )
+  assert.equal(
+    schemaProblem(status.output, OLDER_STATUS),
+    undefined,
+    "a status stored before the two fields existed still validates",
+  )
+  assert.equal(schemaProblem(status.output, STATUS_FAILED), undefined, "a status naming failed issues fits too")
 })
 
 test("the contract's config schema carries the flag emoji and the session agent, and not the retired field", () => {
@@ -1545,9 +1594,9 @@ test("a settings dialog the user closes changes nothing", async () => {
   assert.equal(toasts.length, 0)
 })
 
-test("the dialog draws the title, the header, the counts, the sections, the rows, the today line and the footer in order", () => {
+test("the dialog draws the title, the two header lines, the counts, the sections, the rows, the today line, the legend and the footer in order", () => {
   const rows = pageRows([ITEM, SECOND], (item) => ({ running: item.sessionID === ITEM.sessionID, pending: 0 }))
-  const view = viewOf(rows)
+  const view = viewOf(rows, { status: STATUS_WITH_POLLER })
   const lines = drawnLines(view)
 
   const title = lines[0]
@@ -1557,26 +1606,71 @@ test("the dialog draws the title, the header, the counts, the sections, the rows
   assert.equal(title.props.paddingRight, DIALOG_INSET, "and leaves esc a right margin")
   assert.equal(lineChildren(title)[0].props.content, PAGE_TITLE)
   assert.equal(lineChildren(title)[1].props.content, "esc")
-  assert.equal(lineText(lines[1]), headerText(STATUS), "the header names the last poll and each workspace")
-  assert.equal(lineText(lines[2]), "", "a blank line separates the blocks")
-  assert.equal(lineText(lines[3]), countsText(rows))
-  assert.equal(lines[4].props.content, "", "the counts line is followed by a blank line")
-  const needsMe = childWith(lines[5], "Needs me")
+  assert.equal(lineText(lines[1]), slackLineText(STATUS_WITH_POLLER), "the Slack line names the scan and each workspace")
+  assert.equal(lineText(lines[2]), pollerLineText(STATUS_WITH_POLLER.poller), "the poller line follows it")
+  assert.equal(lineText(lines[3]), "", "a blank line separates the blocks")
+  assert.equal(lineText(lines[4]), countsText(rows))
+  assert.equal(lines[5].props.content, "", "the counts line is followed by a blank line")
+  const needsMe = childWith(lines[6], "Needs me")
   assert.ok(needsMe, "the first section is Needs me")
-  assert.equal(lines[5].props.paddingLeft, DIALOG_INSET, "a section header shares the title's left edge")
-  assert.equal(lineText(lines[6]), rowText(rows[0], { selected: true, now: NOW, hours: HOURS }))
+  assert.equal(lines[6].props.paddingLeft, DIALOG_INSET, "a section header shares the title's left edge")
+  assert.equal(lineText(lines[7]), rowText(rows[0], { selected: true, now: NOW, hours: HOURS }))
   assert.equal(
-    lineText(lines[6]).indexOf(SESSION_MARK.running),
+    lineText(lines[7]).indexOf(SESSION_MARK.running),
     DIALOG_INSET,
     "and the row's session mark aligns with it",
   )
-  assert.equal(lineText(lines[7]), "", "exactly one blank line separates the two visible groups")
-  assert.equal(childWith(lines[8], "Idle") !== undefined, true, "the idle section follows, with no empty section")
-  assert.equal(lineText(lines[9]), rowText(rows[1], { selected: false, now: NOW, hours: HOURS }))
-  assert.equal(lineText(lines[11]), todayText(STATUS))
-  assert.equal(lineText(lines[13]), footerText())
-  assert.equal(lines.length, 15)
-  assert.equal(lineText(lines[14]), "", "a blank margin line sits below the footer")
+  assert.equal(lineText(lines[8]), "", "exactly one blank line separates the two visible groups")
+  assert.equal(childWith(lines[9], "Idle") !== undefined, true, "the idle section follows, with no empty section")
+  assert.equal(lineText(lines[10]), rowText(rows[1], { selected: false, now: NOW, hours: HOURS }))
+  assert.equal(lineText(lines[12]), todayText(STATUS_WITH_POLLER))
+  assert.equal(lineText(lines[14]), legendText(), "the legend is the last line before the footer")
+  assert.equal(lineText(lines[15]), footerText())
+  assert.equal(lines.length, 17)
+  assert.equal(lineText(lines[16]), "", "a blank margin line sits below the footer")
+})
+
+test("the header draws one line before a cycle has run and two after it", () => {
+  const rows = pageRows([ITEM], () => ({ running: false, pending: 0 }))
+  const before = drawnLines(viewOf(rows))
+  const after = drawnLines(viewOf(rows, { status: STATUS_WITH_POLLER }))
+  assert.equal(lineText(before[1]), slackLineText(STATUS), "the Slack line is always drawn")
+  assert.equal(before[2].props.content, "", "with no poller cycle, the blank line follows it")
+  assert.deepEqual(
+    after.slice(1, 3).map(lineText),
+    headerLines(STATUS_WITH_POLLER).map(partsText),
+    "a cycle adds the poller line under the Slack line",
+  )
+})
+
+test("the dialog draws the header and the legend once per render, whatever the rows", () => {
+  const many = Array.from({ length: 100 }, (_, index) => ({
+    item: { ...ITEM, sessionID: `ses_${index}`, issueNumber: 100 + index },
+    state: "needs-me",
+    session: {},
+  }))
+  const lines = drawnLines(viewOf(many, { status: STATUS_WITH_POLLER })).map(lineText)
+  assert.equal(lines.filter((text) => text === slackLineText(STATUS_WITH_POLLER)).length, 1, "one Slack line")
+  assert.equal(lines.filter((text) => text === pollerLineText(STATUS_WITH_POLLER.poller)).length, 1, "one poller line")
+  assert.equal(lines.filter((text) => text === legendText()).length, 1, "one legend line")
+  assert.equal(lines.filter((text) => text.startsWith("Slack Director")).length, 1, "one title row")
+  assert.equal(lines.length, 13 + many.length, "the blocks are drawn once and one line is drawn per row")
+})
+
+test("opening and refreshing the dialog read the items, the status and the config, and nothing per row", async () => {
+  const fake = fakeTuiContext({ items: [ITEM, SECOND] })
+  await renderedTui().setup(fake.context)
+  await tick()
+
+  fake.calls.length = 0
+  await fake.layers[0].commands[0].run()
+  assert.deepEqual(fake.calls, ["items", "status", "getConfig"], "three reads to open it, and no per-row call")
+
+  const updated = fake.eventHandlers.find(([name]) => name === "updated")[1]
+  fake.calls.length = 0
+  updated({})
+  await tick()
+  assert.deepEqual(fake.calls, ["items", "status", "getConfig"], "a refresh makes the same three reads")
 })
 
 test("exactly one blank line separates two visible groups, and none sits under a heading", () => {
@@ -1592,7 +1686,7 @@ test("exactly one blank line separates two visible groups, and none sits under a
   const threeTexts = texts(three)
   assert.deepEqual(threeTexts, [
     partsText(titleParts()),
-    headerText(STATUS),
+    slackLineText(STATUS),
     "",
     countsText([needsMe, blocked, idle]),
     "",
@@ -1607,6 +1701,7 @@ test("exactly one blank line separates two visible groups, and none sits under a
     "",
     todayText(STATUS),
     "",
+    legendText(),
     footerText(),
     "",
   ])
@@ -1630,15 +1725,27 @@ test("exactly one blank line separates two visible groups, and none sits under a
 
   // No group at all: no separator is drawn for a group that is not shown.
   const none = viewOf([])
-  assert.deepEqual(texts(none).slice(3, 8), [countsText([]), "", "", todayText(STATUS), ""])
+  assert.deepEqual(texts(none).slice(3, 9), [countsText([]), "", "", todayText(STATUS), "", legendText()])
 })
 
-test("a failing workspace's mark takes the warning colour, and the rest of the header is muted", () => {
+test("a failing workspace's mark takes the theme's primary colour, and the rest of the Slack line is muted", () => {
   const view = viewOf(pageRows([ITEM], () => ({ running: false, pending: 0 })))
   const header = drawnLines(view)[1]
-  assert.equal(childWith(header, "✗").props.fg, THEME.text.feedback.warning.base, "a failing workspace stands out")
+  assert.equal(childWith(header, "✗").props.fg, THEME.text.action.primary.base, "a failing workspace stands out")
   assert.equal(childWith(header, "✓").props.fg, THEME.text.muted, "a healthy workspace is dimmed")
-  assert.equal(childWith(header, "last poll 14:32").props.fg, THEME.text.muted)
+  assert.equal(childWith(header, "Slack  ").props.fg, THEME.text.muted, "the label is muted")
+  assert.equal(childWith(header, "14:32").props.fg, THEME.text.muted, "and so is the scan time")
+})
+
+test("the poller line's failing part takes the theme's primary colour, and a healthy one is muted", () => {
+  const rows = pageRows([ITEM], () => ({}))
+  const failed = drawnLines(viewOf(rows, { status: STATUS_FAILED }))[2]
+  assert.equal(lineChildren(failed)[1].props.fg, THEME.text.action.primary.base, "a failed read stands out")
+  assert.ok(lineText(failed).includes("3 failed: #7 #8 #9"), "and the line names every failed issue")
+
+  const healthy = drawnLines(viewOf(rows, { status: STATUS_WITH_POLLER }))[2]
+  assert.equal(lineChildren(healthy)[1].props.fg, THEME.text.muted, "a healthy cell is muted")
+  assert.ok(!lineText(healthy).includes("failed:"), "and names no failure")
 })
 
 test("only the session mark takes a state colour: the title is base text and the rest of the row is muted", () => {
@@ -1655,17 +1762,35 @@ test("only the session mark takes a state colour: the title is base text and the
   assert.equal(childWith(running, SESSION_MARK.running).props.fg, THEME.hue.blue[200])
   assert.equal(childWith(idle, NO_SESSION_MARK), undefined, "a quiet row carries no mark at all")
 
-  // ITEM is base text, and it is not the state colour.
-  const pendingItem = lineChildren(pending)[5]
-  assert.equal(pendingItem.props.fg, THEME.text.base, "ITEM is base text on a row that needs the user")
-  assert.notEqual(pendingItem.props.fg, THEME.hue.orange[200], "the whole row is not the state colour")
-  assert.equal(lineChildren(running)[5].props.fg, THEME.text.base, "ITEM is base text on a blocked row")
-  assert.equal(lineChildren(idle)[5].props.fg, THEME.text.muted, "an idle row is muted throughout")
+  // The text cell is base text, and it is not the state colour.
+  const pendingText = lineChildren(pending)[11]
+  assert.equal(pendingText.props.fg, THEME.text.base, "the text is base text on a row that needs the user")
+  assert.notEqual(pendingText.props.fg, THEME.hue.orange[200], "the whole row is not the state colour")
+  assert.equal(lineChildren(running)[11].props.fg, THEME.text.base, "the text is base text on a blocked row")
+  assert.equal(lineChildren(idle)[11].props.fg, THEME.text.muted, "an idle row is muted throughout")
 
-  // ASKER, CHANNEL and the issue number are muted on every row.
+  // The issue, the requester and the type are muted on every row.
   for (const line of [pending, running, idle]) {
-    for (const index of [7, 9, 11]) assert.equal(lineChildren(line)[index].props.fg, THEME.text.muted)
+    for (const index of [5, 7, 9]) assert.equal(lineChildren(line)[index].props.fg, THEME.text.muted)
   }
+})
+
+test("the new-activity mark takes the theme's yellow hue, else the warning colour", () => {
+  const row = { item: { ...ITEM, requestState: "blocked" }, state: "blocked", session: {}, note: NEW_ACTIVITY_MARK }
+  const withYellow = rowLines(viewOf([row]))[0]
+  assert.equal(
+    childWith(withYellow, NEW_ACTIVITY_MARK).props.fg,
+    THEME.hue.yellow[200],
+    "the star takes the yellow hue when the theme has one",
+  )
+  const noYellow = rowLines(viewOf([row], { theme: THEME_NO_HUES }))[0]
+  assert.equal(
+    childWith(noYellow, NEW_ACTIVITY_MARK).props.fg,
+    THEME.text.feedback.warning.base,
+    "and the warning colour when it does not",
+  )
+  assert.equal(roleColour(THEME, "new-activity"), THEME.hue.yellow[200])
+  assert.equal(roleColour(THEME_NO_HUES, "new-activity"), THEME.text.feedback.warning.base)
 })
 
 test("a theme without an orange or a blue hue falls back to the warning and info colours", () => {
@@ -1718,19 +1843,40 @@ test("the counts line counts by request state, its numbers in base text and its 
   assert.equal(childWith(counts, "waiting on requester").props.fg, THEME.text.muted)
 })
 
-test("the title and the section header and the footer's keys are bold, and their labels are muted", () => {
+test("the title, the section header and the footer's keys are bold, and the accent colours the titles", () => {
   const view = viewOf(pageRows([ITEM], () => ({ running: false, pending: 0 })))
   const lines = drawnLines(view)
   assert.equal(childWith(lines[0], PAGE_TITLE).props.attributes, BOLD, "the title is bold")
-  assert.equal(childWith(lines[0], PAGE_TITLE).props.fg, THEME.text.base)
+  assert.equal(childWith(lines[0], PAGE_TITLE).props.fg, THEME.text.action.primary.base, "the title takes the accent")
   assert.equal(childWith(lines[0], "esc").props.fg, THEME.text.muted, "esc is muted")
   const section = childWith(lines[5], "Needs me")
   assert.equal(section.props.attributes, BOLD, "the section header is bold")
-  assert.equal(section.props.fg, THEME.text.muted, "and muted")
+  assert.equal(section.props.fg, THEME.text.action.primary.base, "and takes the accent")
   const footer = lines.at(-2)
   assert.equal(childWith(footer, "↵").props.attributes, BOLD, "a footer key is bold")
   assert.equal(childWith(footer, "↵").props.fg, THEME.text.base)
   assert.equal(childWith(footer, " session").props.fg, THEME.text.muted, "and its label is muted")
+})
+
+test("a theme with no primary action colour falls back to the colours each part took before", () => {
+  const rows = pageRows([ITEM], () => ({}))
+  const view = viewOf(rows, { theme: THEME_NO_PRIMARY, status: STATUS_FAILED })
+  const lines = drawnLines(view)
+  assert.equal(childWith(lines[0], PAGE_TITLE).props.fg, THEME.text.base, "the title falls back to base text")
+  assert.equal(childWith(lines[6], "Needs me").props.fg, THEME.text.muted, "the section to muted text")
+  assert.equal(
+    childWith(lines[1], "✗").props.fg,
+    THEME.text.feedback.warning.base,
+    "a failing workspace to the warning colour",
+  )
+  assert.equal(
+    lineChildren(lines[2])[1].props.fg,
+    THEME.text.feedback.warning.base,
+    "and the poller's failing part to the warning colour",
+  )
+  assert.equal(roleColour(THEME_NO_PRIMARY, "title"), THEME.text.base)
+  assert.equal(roleColour(THEME_NO_PRIMARY, "section"), THEME.text.muted)
+  assert.equal(roleColour(THEME_NO_PRIMARY, "workspace-fail"), THEME.text.feedback.warning.base)
 })
 
 test("AGE's colour is the theme's own: base, then warning from 4 working hours, then error from one day", () => {

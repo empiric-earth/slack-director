@@ -26,7 +26,8 @@ import {
   fieldValue,
   footerParts,
   hasSession,
-  headerParts,
+  headerLines,
+  legendParts,
   moveSelection,
   openerCommand,
   pageRows,
@@ -110,16 +111,23 @@ const BOLD = 1
 
 /**
  * The theme colour one role takes, or undefined for the host's own default. The
- * waiting and working marks take step 200 of the theme's `orange` and `blue`
- * hue scales — a hue is a scale keyed by the steps 100 to 900, not a colour —
- * and fall back to the warning and info feedback text when the theme defines no
- * such hue.
+ * dialog title, the section titles and the attention parts take the theme's
+ * primary action text, and fall back to the colour each took before the theme
+ * named one. The new-activity mark takes step 200 of the theme's `yellow` hue
+ * scale, and falls back to the warning feedback text; the waiting and working
+ * marks take step 200 of the `orange` and `blue` scales — a hue is a scale keyed
+ * by the steps 100 to 900, not a colour — and fall back to the warning and info
+ * feedback text when the theme defines no such hue.
  */
 export function roleColour(theme, role) {
   const text = theme?.text ?? {}
   const hue = theme?.hue ?? {}
+  const primary = text.action?.primary?.base
   switch (role) {
     case "title":
+      return primary ?? text.base
+    case "section":
+      return primary ?? text.muted
     case "base":
     case "age-calm":
       return text.base
@@ -131,9 +139,12 @@ export function roleColour(theme, role) {
       return hue?.orange?.[200] ?? text.feedback?.warning?.base
     case "state-working":
       return hue?.blue?.[200] ?? text.feedback?.info?.base
+    case "new-activity":
+      return hue?.yellow?.[200] ?? text.feedback?.warning?.base
     case "age-warn":
-    case "workspace-fail":
       return text.feedback?.warning?.base
+    case "workspace-fail":
+      return primary ?? text.feedback?.warning?.base
     case "age-error":
       return text.feedback?.error?.base
     case "bar":
@@ -225,11 +236,13 @@ function plainLine(renderer, content) {
 
 /**
  * Every line of the dialog's body, in the order the mock lays them out: the
- * title row, the header line, the counts line, one section per state that has
- * rows — each a bold muted header, then its rows — the today line and the
- * footer, one blank line between each block. Two sections that are both shown
- * take exactly one blank line between them, and a section's header is followed
- * by its first row with no blank between.
+ * title row, the header's own lines — the Slack scan, then the poller once a
+ * cycle has run — the counts line, one section per state that has rows — each a
+ * bold accented header, then its rows — the today line, the legend of the row
+ * marks and the footer, one blank line between each block but none between the
+ * legend and the footer. Two sections that are both shown take exactly one blank
+ * line between them, and a section's header is followed by its first row with no
+ * blank between.
  */
 function bodyLines({ renderer, rows, status, selected, now, hours, theme, actions }) {
   const lines = [
@@ -239,17 +252,18 @@ function bodyLines({ renderer, rows, status, selected, now, hours, theme, action
       justifyContent: "space-between",
       actions,
     }),
-    rowBox(renderer, headerParts(read(status)), theme, { paddingLeft: DIALOG_INSET }),
-    blankLine(renderer),
-    rowBox(renderer, countsParts(read(rows)), theme, { paddingLeft: DIALOG_INSET }),
-    blankLine(renderer),
   ]
+  for (const header of headerLines(read(status))) {
+    lines.push(rowBox(renderer, header, theme, { paddingLeft: DIALOG_INSET }))
+  }
+  lines.push(blankLine(renderer), rowBox(renderer, countsParts(read(rows)), theme, { paddingLeft: DIALOG_INSET }))
+  lines.push(blankLine(renderer))
   for (const [position, section] of sections(read(rows)).entries()) {
     // One blank line between two visible groups, and none before the first one
     // and none between a heading and its first row.
     if (position > 0) lines.push(blankLine(renderer))
     lines.push(
-      rowBox(renderer, [{ text: section.title, role: "muted", bold: true }], theme, { paddingLeft: DIALOG_INSET }),
+      rowBox(renderer, [{ text: section.title, role: "section", bold: true }], theme, { paddingLeft: DIALOG_INSET }),
     )
     for (const entry of section.entries) {
       const marked = entry.index === read(selected)
@@ -261,8 +275,11 @@ function bodyLines({ renderer, rows, status, selected, now, hours, theme, action
     }
   }
   lines.push(blankLine(renderer), rowBox(renderer, todayParts(read(status)), theme, { paddingLeft: DIALOG_INSET }))
+  // The legend sits directly above the footer, so it is the last line a reader
+  // passes before the keys.
   lines.push(
     blankLine(renderer),
+    rowBox(renderer, legendParts(), theme, { paddingLeft: DIALOG_INSET }),
     rowBox(renderer, footerParts(), theme, { paddingLeft: DIALOG_INSET, actions }),
   )
   lines.push(blankLine(renderer))

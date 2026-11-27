@@ -85,6 +85,13 @@ const dmReport = (timestamps) => ({
   pagination_info: "There are more messages available. To view the next page, use cursor: `abc123`",
 })
 
+// The live answer for a DM or group-DM range with no message: the one
+// `Channel: <name> (<id>)` header line, and a blank line below it.
+const emptyConversationReport = (header) => ({
+  messages: `${header}\n`,
+  pagination_info: "There are no more messages in this conversation.",
+})
+
 function harness({
   issues = [],
   reads = () => answer([]),
@@ -810,6 +817,97 @@ test("a nonempty answer whose report holds no timestamp is a failed read, and a 
     assert.deepEqual(h.status().failed, [], "a recognized empty answer is a healthy read")
     assert.equal(h.prompts.length, 0, "and wakes nothing")
   }
+})
+
+test("the conversation header alone is an empty read for a DM and a group DM", async () => {
+  const link = "https://nexar.slack.com/archives/D03KHBF103X/p1795194443137219"
+  const setup = (channelName, channelID, header) => {
+    const h = harness({
+      issues: [
+        openIssue(11, {
+          permalink: link,
+          workspace: "slack_nexar",
+          channel_id: channelID,
+          channel_name: channelName,
+          thread_ts: "1795194443.137219",
+        }),
+      ],
+      reads: () => reportAnswer(emptyConversationReport(header)),
+    })
+    h.setItems({ [link]: recordFor(11, link) })
+    h.setWatermarks({ 11: { ts: tsOf(600), firstReadAt: new Date(NOW).toISOString() } })
+    return h
+  }
+
+  for (const [channelName, channelID, header] of [
+    ["DM", "D03KHBF103X", "Channel: DM (D03KHBF103X)"],
+    ["GDM", "G03KHBF103X", "Channel: GDM (G03KHBF103X)"],
+  ]) {
+    const h = setup(channelName, channelID, header)
+    await h.run()
+    assert.deepEqual(h.status().failed, [], `${channelName}: an empty read is no failure`)
+    assert.equal(h.watermarks()["11"].ts, tsOf(600), `${channelName}: the watermark stays`)
+    assert.equal(h.prompts.length, 0, `${channelName}: and wakes nothing`)
+    assert.equal(h.reads(READ_CHANNEL_TOOL).length, 1, `${channelName}: one conversation read per cycle`)
+  }
+})
+
+test("a conversation header a further non-blank line follows stays a failed read", async () => {
+  const link = "https://nexar.slack.com/archives/D03KHBF103X/p1795194443137219"
+  const setup = (rest) => {
+    const h = harness({
+      issues: [
+        openIssue(11, {
+          permalink: link,
+          workspace: "slack_nexar",
+          channel_id: "D03KHBF103X",
+          channel_name: "DM",
+          thread_ts: "1795194443.137219",
+        }),
+      ],
+      reads: () => reportAnswer({ messages: `Channel: DM (D03KHBF103X)\n${rest}\n` }),
+    })
+    h.setItems({ [link]: recordFor(11, link) })
+    h.setWatermarks({ 11: { ts: tsOf(600), firstReadAt: new Date(NOW).toISOString() } })
+    return h
+  }
+
+  for (const rest of ["some unrecognised line", "=== Message from Maria Costa (U123) ===\n> placeholder text"]) {
+    const h = setup(rest)
+    await h.run()
+    assert.deepEqual(h.status().failed, [11], "the status names the issue")
+    assert.equal(h.watermarks()["11"].ts, tsOf(600), "and no watermark moves")
+    assert.equal(h.prompts.length, 0, "and wakes nothing")
+  }
+})
+
+test("a conversation answer whose header also carries a message still yields its ts", async () => {
+  const link = "https://nexar.slack.com/archives/D03KHBF103X/p1795194443137219"
+  const withMessage = {
+    messages: `Channel: DM (D03KHBF103X)\n=== Message from Maria Costa (U123) ===\nMessage TS: ${tsOf(30)}\n> placeholder text`,
+    pagination_info: "There are no more messages in this conversation.",
+  }
+  const h = harness({
+    issues: [
+      openIssue(11, {
+        permalink: link,
+        workspace: "slack_nexar",
+        channel_id: "D03KHBF103X",
+        channel_name: "DM",
+        thread_ts: "1795194443.137219",
+      }),
+    ],
+    reads: ({ name }) =>
+      name === READ_CHANNEL_TOOL
+        ? reportAnswer(withMessage)
+        : reportAnswer(emptyConversationReport("Channel: DM (D03KHBF103X)")),
+  })
+  h.setItems({ [link]: recordFor(11, link) })
+  h.setWatermarks({ 11: { ts: tsOf(600), firstReadAt: new Date(NOW).toISOString() } })
+  await h.run()
+  assert.equal(h.prompts.length, 1, "the message still wakes the session")
+  assert.ok(h.prompts[0].text.includes("Source: conversation"))
+  assert.equal(h.watermarks()["11"].ts, tsOf(30), "the watermark follows the read's newest ts")
 })
 
 test("a rate-limited read is reported and the watermark stays", async () => {

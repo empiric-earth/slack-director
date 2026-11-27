@@ -616,10 +616,19 @@ export function newestTs(values) {
 // A report text the live read answers give for a conversation with no message.
 const EMPTY_REPORT = /^no\s+(?:thread\s+)?mess+ages?\b/i
 
+// The other empty shape a conversation read answers with: the
+// `Channel: <name> (<id>)` header line alone, and nothing below it. A DM or
+// group-DM read whose range holds no message answers this way. Anchored on the
+// whole report, so a header that a further non-blank line follows is not empty.
+const EMPTY_CHANNEL_REPORT = /^Channel:[ \t]*\S[^\n]*\([A-Z0-9]+\)[ \t]*$/
+
 /** Whether a report field is one this reader recognizes as holding no message. */
 function emptyReport(value) {
   if (Array.isArray(value)) return value.length === 0
-  if (typeof value === "string") return value.trim() === "" || EMPTY_REPORT.test(value.trim())
+  if (typeof value === "string") {
+    const text = value.trim()
+    return text === "" || EMPTY_REPORT.test(text) || EMPTY_CHANNEL_REPORT.test(text)
+  }
   return false
 }
 

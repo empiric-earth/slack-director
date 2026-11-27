@@ -817,6 +817,28 @@ test("enter on a row whose server part has no adopt says to reload OpenCode", as
   assert.equal(fake.cleared.length, 0, "the overview stays up")
 })
 
+test("the board shows the rollback and leftover reasons the adopt path answers with", async () => {
+  // The three reasons the watcher builds around one session id, shown by the
+  // board exactly as the server part answers them.
+  const reasons = [
+    "the new session did not take its first prompt — press enter to try again",
+    "an earlier session for this issue could not be removed (ses_1) — delete it in OpenCode, then try again",
+    "a session made for this issue could not be recorded or removed (ses_1) — delete it in OpenCode",
+  ]
+  for (const reason of reasons) {
+    const fake = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [], adoptRejection: new Error(reason) })
+    await renderedTui().setup(fake.context)
+    await fake.layers[0].commands[0].run()
+    renderDialog(fake.dialogs)
+    modalLayer(fake.layers).commands.find((entry) => entry.bind === "return").run()
+    await tick()
+    assert.ok(fake.toasts.at(-1).message.includes(reason), `the toast carries the reason: ${reason}`)
+    assert.deepEqual(fake.navigations, [], "no navigation for a refused adopt")
+    assert.deepEqual(fake.opened, [], "and no session is marked read")
+    assert.equal(fake.cleared.length, 0, "the overview stays up on the row")
+  }
+})
+
 test("d on an unattended row still closes nothing", async () => {
   const fake = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [] })
   await renderedTui().setup(fake.context)

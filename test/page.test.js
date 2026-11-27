@@ -615,6 +615,38 @@ test("the ASKER cell drops the id or the address the search reported beside the 
   assert.equal(askerName(""), "")
 })
 
+test("the requester cell reads an asker the issue stored with the Slack id first", () => {
+  assert.equal(askerName("U0123456789 Maria Costa"), "Maria Costa", "id then name")
+  assert.equal(askerName("U0123456789 (Maria Costa)"), "Maria Costa", "id then a bracketed name")
+  assert.equal(
+    askerName("U0123456789 (Ana Silva / Joao Pereira)"),
+    "Ana Silva / Joao Pereira",
+    "a display name that keeps its own slash",
+  )
+  assert.equal(askerName("U0123456 Maria Costa"), "Maria Costa", "an older, shorter id")
+  assert.equal(askerName("Maria Costa (U0000000000)"), "Maria Costa", "name-first behaviour is unchanged")
+  assert.equal(askerName("André Almeida <aalmeida@empiricearth.com>"), "André Almeida")
+  assert.equal(askerName("Maria Costa"), "Maria Costa")
+  assert.equal(askerName("U0123456789"), "U0123456789", "an asker that is only an id leaves no name to show")
+  assert.equal(askerName("UPDATE Maria Costa"), "UPDATE Maria Costa", "a word is never read as an id")
+
+  const stored = {
+    asker: "U0123456789 (Maria Costa)",
+    title: "Maria Costa — Access to the staging dashboards",
+    issueNumber: 36,
+    issueUrl: "https://github.com/empiric-earth/almeida-slack-intake/issues/36",
+  }
+  assert.equal(itemAsker(stored), "Maria Costa", "the requester cell shows the name")
+  assert.equal(itemTitle(stored), "Access to the staging dashboards", "and the text does not repeat it")
+
+  const [row] = pageRows([], () => ({}), [orphan({ asker: "U0123456789 (Maria Costa)" })])
+  assert.equal(
+    rowParts(row, { now: NOW, hours: HOURS })[7].text.trimEnd(),
+    "Maria Costa",
+    "an unattended row's requester is the name, not the id",
+  )
+})
+
 test("a record whose first turn has named no issue keeps its neutral title and shows no asker", () => {
   const fresh = item({
     asker: "",

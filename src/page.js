@@ -307,14 +307,30 @@ export function typeLabel(channel) {
 }
 
 /**
+ * Whether one whitespace-separated word is a Slack user id, as an intake issue
+ * may store it ahead of the asker's name: a `U` or a `W`, then at least six more
+ * capitals or digits with a digit among them. No word does, so a name-first
+ * asker is left as it is.
+ */
+function slackUserId(word) {
+  return /^[UW][A-Z0-9]{6,}$/.test(word) && /[0-9]/.test(word)
+}
+
+/**
  * The name part of an asker. Slack reports the display name with an id or an
  * address beside it — `Maria Costa (U123)`, `André Almeida <a@example.com>` —
- * and the session writes the issue title from the name alone, so the two agree
- * only on this part.
+ * and an intake issue's `asker` field may instead store the Slack id first:
+ * `U0123456789 Maria Costa`, `U0123456789 (Maria Costa)`. The session writes the
+ * issue title from the name alone, so the two agree only on this part.
  */
 export function askerName(asker) {
   const text = typeof asker === "string" ? asker.trim() : ""
-  return text.replace(/\s*[<(][^>)]*[>)]\s*$/, "").trim()
+  const [head = "", ...rest] = text.split(/\s+/)
+  // A leading Slack user id is not a name: drop it, and unwrap the bracket a
+  // stored id-first asker may put its name in.
+  const named = slackUserId(head) && rest.length > 0 ? rest.join(" ") : text
+  const unwrapped = named.replace(/^\(([^)]*)\)$/, "$1").trim()
+  return unwrapped.replace(/\s*[<(][^>)]*[>)]\s*$/, "").trim()
 }
 
 /** Whether the record already names the intake issue its title comes from. */

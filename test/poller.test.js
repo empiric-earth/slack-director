@@ -443,17 +443,17 @@ test("an unattended issue's status entry carries its requester and its type for 
         channel_id: "C0PLATFORM",
         channel_name: "platform-help",
         thread_ts: "1795194443.137219",
-        asker: "Maria Costa (U123)",
+        asker: "U0123456789 (Maria Costa)",
       }),
     ],
     reads: () => answer([{ ts: tsOf(30) }]),
   })
   await h.run()
   const [entry] = h.status().unattended
-  assert.equal(entry.asker, "Maria Costa (U123)", "the requester the issue's yaml block carries")
+  assert.equal(entry.asker, "U0123456789 (Maria Costa)", "the requester the issue's yaml block carries, unchanged")
   assert.equal(entry.channel_name, "platform-help", "and its type")
   const [row] = pageRows([], () => ({}), h.status().unattended)
-  assert.equal(row.item.asker, "Maria Costa (U123)", "the dialog's row reads the requester from the entry")
+  assert.equal(row.item.asker, "U0123456789 (Maria Costa)", "the dialog's row reads the requester from the entry")
   assert.equal(row.item.channel, "platform-help", "and its type")
 })
 

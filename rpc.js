@@ -8,7 +8,10 @@
 //
 // The overview dialog reads `status`, `items` and the `updated` event, and the
 // settings dialog reads and writes the config through `getConfig` and
-// `setConfig`. The overview's `d` key closes one item with `done`: the item's
+// `setConfig`. A row with no session behind it is adopted with `adopt`: the
+// plugin creates the issue's item session, records it and sends the first
+// prompt, so the row becomes a normal one. The overview's `d` key closes one
+// item with `done`: the item's
 // own session closes its intake issue, and the plugin deletes the session on the
 // close turn's own proof, and a close it refuses reaches the dialog as the
 // `closeRefused` event, so the user is not left waiting for one that never ran.
@@ -59,9 +62,12 @@ const workspace = {
 }
 
 // One open, in-scope issue whose session was deleted or archived. It is shown,
-// never woken, and never given a new session. The requester and the type are
-// optional: a status the older build stored carries neither, and the row shows
-// them empty until the next cycle writes them.
+// never woken by the poller, and given a new session only when the user's
+// `enter` adopts it. The requester and the type are optional: a status the
+// older build stored carries neither, and the row shows them empty until the
+// next cycle writes them. `workspace`, `channel_id` and `thread_ts` are
+// optional too: a status the older build stored carries none, and `adopt`
+// refuses such an entry until the next cycle writes them.
 const unattended = {
   type: "object",
   properties: {
@@ -75,6 +81,9 @@ const unattended = {
     newActivity: { type: "boolean" },
     asker: { type: "string" },
     channel_name: { type: "string" },
+    workspace: { type: "string" },
+    channel_id: { type: "string" },
+    thread_ts: { type: "string" },
   },
   required: ["number", "url", "title", "permalink", "state", "state_since", "asked_at", "newActivity"],
   additionalProperties: false,
@@ -227,6 +236,32 @@ export const SlackDirectorRpc = {
       },
     },
     pollNow: { input: emptyObject, output: emptyObject },
+    // Adopt one unattended intake issue: create a session for it on the
+    // configured agent, record it as the issue's item, send it the first prompt
+    // and answer its session id. Every refusal carries the reason the board
+    // shows, and leaves no item record behind.
+    adopt: {
+      input: {
+        type: "object",
+        properties: { issueNumber: { type: "integer" } },
+        required: ["issueNumber"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: { sessionID: { type: "string" } },
+        required: ["sessionID"],
+        additionalProperties: false,
+      },
+      errors: {
+        refused: {
+          type: "object",
+          properties: { reason: { type: "string" } },
+          required: ["reason"],
+          additionalProperties: false,
+        },
+      },
+    },
     done: {
       input: {
         type: "object",

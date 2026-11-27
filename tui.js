@@ -50,14 +50,15 @@ export const COMMAND_ID = "slack-director.page"
 export const SETTINGS_COMMAND_ID = "slack-director.settings"
 
 /**
- * What `enter` says on a row whose open issue has no session behind it: the row
- * is opened in the browser, and the request is handled on GitHub.
+ * What `enter` says when the plugin's server part does not know the `adopt`
+ * RPC: the board is newer than the server part it reached, and a reload loads
+ * both.
  */
-export const NO_SESSION_OPEN_NOTICE = "this request has no session — its issue is open on GitHub"
+export const OLDER_SERVER_NOTICE = "the plugin's server part is older than its board — run opencode reload"
 
 /**
- * What `d` says on the same row: there is no session to close, and the issue is
- * closed by hand on GitHub.
+ * What `d` says on a row with no session behind it: there is no session to
+ * close, and the issue is closed by hand on GitHub.
  */
 export const NO_SESSION_CLOSE_NOTICE = "this request has no session — close its issue on GitHub"
 
@@ -71,6 +72,15 @@ const messageOf = (error) => {
   } catch {
     return String(error)
   }
+}
+
+/**
+ * Whether an error is the RPC layer's answer to a method the server part does
+ * not serve: the board is newer than the plugin the host loaded.
+ */
+function unknownMethod(error) {
+  if (error?.code === "UNKNOWN_METHOD") return true
+  return /unknown method|no such method|method not found|not a method/i.test(messageOf(error))
 }
 
 /**
@@ -405,6 +415,35 @@ async function setup(context, spawnProcess, rendererOverride) {
     }
 
     /**
+     * Adopt an unattended row's issue and open the session the call made: the
+     * plugin creates the session, records it and sends the first prompt, and the
+     * board opens it and marks it read, exactly as a row with a session is
+     * opened. A refusal, and a server part older than the board, show the reason
+     * and leave the overview up on the same row.
+     */
+    async function adoptItem(item) {
+      let sessionID
+      try {
+        sessionID = (await rpc().adopt({ issueNumber: item.issueNumber }))?.sessionID
+      } catch (error) {
+        const reason = unknownMethod(error) ? OLDER_SERVER_NOTICE : messageOf(error)
+        toast(`${PAGE_TITLE}: ${reason}`, "error")
+        return
+      }
+      if (typeof sessionID !== "string" || sessionID === "") {
+        toast(`${PAGE_TITLE}: the session could not be opened — press enter to try again`, "error")
+        return
+      }
+      closeDialog()
+      try {
+        await rpc().markOpened({ sessionID })
+      } catch (error) {
+        toast(`${PAGE_TITLE}: ${messageOf(error)}`, "error")
+      }
+      context.ui.router.navigate({ type: "session", sessionID })
+    }
+
+    /**
      * Open a URL with the operating system's own opener; nothing else is opened.
      * An opener that cannot start reports it asynchronously, on the child's own
      * `error` event, so that failure is shown as well: otherwise the keys look
@@ -547,10 +586,11 @@ async function setup(context, spawnProcess, rendererOverride) {
     const closeOverview = () => closeDialog()
     const openSelected = () => {
       const item = current()
-      // An unattended row has no session to open: its issue is opened with `i`,
-      // and the overview stays up so the marked row is still there.
+      // An unattended row has no session yet: `enter` adopts its issue, which
+      // creates the session and opens it; the overview stays up until the call
+      // answers.
       if (item && !hasSession(item)) {
-        toast(`${PAGE_TITLE}: ${NO_SESSION_OPEN_NOTICE}`)
+        void adoptItem(item)
         return
       }
       closeDialog()

@@ -339,6 +339,13 @@ export function createPoller({
         newActivity: newActivity ?? before?.newActivity === true,
         asker: fields.asker ?? "",
         channel_name: fields.channel_name ?? "",
+        // The three fields a session needs to be created for the issue. They
+        // are optional in the RPC contract, so an entry the older build stored
+        // still validates; `adopt` refuses such an entry until a cycle rewrites
+        // it.
+        workspace: fields.workspace ?? "",
+        channel_id: fields.channel_id ?? "",
+        thread_ts: fields.thread_ts ?? "",
       }
     }
     // The request state every open issue carries, read before anything else is
@@ -395,6 +402,15 @@ export function createPoller({
       if (watermark === undefined && typeof record?.pollerFrom === "string") {
         const flaggedTs = tsOfIso(record.pollerFrom)
         if (flaggedTs !== undefined) watermark = tsBefore(flaggedTs, 60)
+      }
+      // An adopted item is never woken for a message older than its adopt time:
+      // the session's first turn already read the thread at that point, so the
+      // adopt time is the floor whatever watermark the issue was baselined with.
+      if (typeof record?.adoptedAt === "string") {
+        const adoptedTs = tsOfIso(record.adoptedAt)
+        if (adoptedTs !== undefined && (watermark === undefined || Number(adoptedTs) > Number(watermark))) {
+          watermark = adoptedTs
+        }
       }
 
       const server = slackServer(servers, fields.workspace)

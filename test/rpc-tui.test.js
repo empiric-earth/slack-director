@@ -36,7 +36,7 @@ import {
 import tui, {
   COMMAND_ID,
   NO_SESSION_CLOSE_NOTICE,
-  NO_SESSION_OPEN_NOTICE,
+  OLDER_SERVER_NOTICE,
   SETTINGS_COMMAND_ID,
   createTui,
   dialogView,
@@ -139,7 +139,7 @@ const UNATTENDED = {
   channel_name: "eng-infra",
 }
 
-/** The same entry as a status the older build stored carries it: the two new fields absent. */
+/** The same entry as a status the older build stored carries it: the three new fields absent. */
 const OLDER_UNATTENDED = {
   number: 36,
   url: "https://github.com/empiric-earth/almeida-slack-intake/issues/36",
@@ -150,6 +150,9 @@ const OLDER_UNATTENDED = {
   asked_at: "2026-11-18T08:32:00.000Z",
   newActivity: true,
 }
+
+/** The session id the fake `adopt` answers with when a test gives no other. */
+const ADOPTED_SESSION = "ses_adopted"
 
 /** The status with one poller cycle, carrying the unattended issue. */
 const STATUS_WITH_POLLER = {
@@ -188,6 +191,8 @@ function fakeTuiContext({
   selectAnswer,
   promptAnswer,
   confirmAnswer,
+  adoptAnswer,
+  adoptRejection,
 } = {}) {
   // The item map the contract serves. `setItems` swaps it, so a test drives a
   // refresh with rows that appeared, reordered or left.
@@ -208,6 +213,7 @@ function fakeTuiContext({
   const prompts = []
   const confirms = []
   const doneInputs = []
+  const adoptInputs = []
   const dialogs = []
   const dialogSettings = []
   const cleared = []
@@ -281,6 +287,12 @@ function fakeTuiContext({
             opened.push(input)
             return {}
           },
+          async adopt(input) {
+            calls.push("adopt")
+            adoptInputs.push(input)
+            if (adoptRejection) throw adoptRejection
+            return adoptAnswer ?? { sessionID: ADOPTED_SESSION }
+          },
           async done(input) {
             calls.push("done")
             doneInputs.push(input)
@@ -317,6 +329,7 @@ function fakeTuiContext({
     prompts,
     confirms,
     doneInputs,
+    adoptInputs,
     dialogs,
     dialogSettings,
     cleared,
@@ -466,6 +479,7 @@ const liveModalLayers = ({ layers, dropped }) =>
 test("the RPC contract defines every method and every event with a schema", () => {
   assert.equal(SlackDirectorRpc.id, "slack-director")
   assert.deepEqual(Object.keys(SlackDirectorRpc.methods).sort(), [
+    "adopt",
     "done",
     "getConfig",
     "items",
@@ -505,6 +519,15 @@ test("the RPC contract defines every method and every event with a schema", () =
     !unattended.required.includes("asker") && !unattended.required.includes("channel_name"),
     "and both are optional, so a status the older build stored still validates",
   )
+  assert.deepEqual(
+    [unattended.properties.workspace, unattended.properties.channel_id, unattended.properties.thread_ts],
+    [{ type: "string" }, { type: "string" }, { type: "string" }],
+    "the three fields a session is created from are declared too",
+  )
+  assert.ok(
+    ["workspace", "channel_id", "thread_ts"].every((field) => !unattended.required.includes(field)),
+    "and all three are optional, so a status the older build stored still validates",
+  )
   assert.equal(
     schemaProblem(status.output, STATUS_WITH_POLLER),
     undefined,
@@ -513,9 +536,28 @@ test("the RPC contract defines every method and every event with a schema", () =
   assert.equal(
     schemaProblem(status.output, OLDER_STATUS),
     undefined,
-    "a status stored before the two fields existed still validates",
+    "a status stored before the three fields existed still validates",
   )
   assert.equal(schemaProblem(status.output, STATUS_FAILED), undefined, "a status naming failed issues fits too")
+
+  // The adopt method: one unattended issue in, one session id out, and one
+  // refusal that carries the reason.
+  const adopt = SlackDirectorRpc.methods.adopt
+  assert.deepEqual(adopt.input.required, ["issueNumber"], "adopt takes the row's issue number")
+  assert.equal(adopt.input.properties.issueNumber.type, "integer", "and only that")
+  assert.equal(adopt.input.additionalProperties, false)
+  assert.equal(schemaProblem(adopt.input, { issueNumber: 36 }), undefined)
+  assert.match(schemaProblem(adopt.input, { issueNumber: "36" }), /issueNumber is not an integer/)
+  assert.match(schemaProblem(adopt.input, { issueNumber: 36, extra: true }), /undeclared extra/)
+  assert.equal(schemaProblem(adopt.output, { sessionID: "ses_1" }), undefined, "a session id fits the output")
+  assert.match(schemaProblem(adopt.output, {}), /has no sessionID/)
+  assert.equal(
+    schemaProblem(adopt.errors.refused, { reason: "this issue already has a session — press r to refresh" }),
+    undefined,
+    "a refusal carries the reason the board shows",
+  )
+  assert.match(schemaProblem(adopt.errors.refused, {}), /has no reason/)
+  assert.equal(adopt.errors.refused.additionalProperties, false)
 })
 
 test("the contract's config schema carries the flag emoji and the session agent, and not the retired field", () => {
@@ -715,22 +757,74 @@ test("the unattended row leaves the dialog once the poller's list no longer carr
   assert.equal(rowLines(view).length, 0, "a complete list without the issue leaves no row behind")
 })
 
-test("enter and d on an unattended row open no session and close nothing", async () => {
+test("enter on an unattended row adopts its issue and opens the session the call made", async () => {
+  const fake = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [] })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  const view = renderDialog(fake.dialogs)
+  const modal = modalLayer(fake.layers)
+
+  modal.commands.find((entry) => entry.bind === "return").run()
+  await tick()
+  assert.deepEqual(fake.adoptInputs, [{ issueNumber: UNATTENDED.number }], "the row's own issue number is adopted")
+  assert.deepEqual(fake.opened, [{ sessionID: ADOPTED_SESSION }], "the new session is marked read")
+  assert.deepEqual(
+    fake.navigations,
+    [{ type: "session", sessionID: ADOPTED_SESSION }],
+    "and the board opens the session the adopt made",
+  )
+  assert.equal(fake.cleared.length, 1, "the overview closes onto the new session")
+
+  // The footer's own session control runs the same operation.
+  const second = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [] })
+  await renderedRecordedTui([]).setup(second.context)
+  await second.layers[0].commands[0].run()
+  const secondView = renderDialog(second.dialogs)
+  clickPart(secondView, "↵")
+  await tick()
+  assert.deepEqual(second.adoptInputs, [{ issueNumber: UNATTENDED.number }], "a click on the control adopts too")
+  assert.equal(second.navigations.at(-1)?.sessionID, ADOPTED_SESSION)
+})
+
+test("a refused adopt shows its reason and leaves the overview up on the row", async () => {
+  const reason = "this issue already has a session — press r to refresh"
+  const fake = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [], adoptRejection: new Error(reason) })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+  const modal = modalLayer(fake.layers)
+
+  modal.commands.find((entry) => entry.bind === "return").run()
+  await tick()
+  assert.ok(fake.toasts.at(-1).message.includes(reason), "the dialog shows the reason the call refused with")
+  assert.deepEqual(fake.navigations, [], "no session is opened")
+  assert.deepEqual(fake.opened, [], "and none is marked read")
+  assert.equal(fake.cleared.length, 0, "the overview stays up, so the row is still there to act on")
+})
+
+test("enter on a row whose server part has no adopt says to reload OpenCode", async () => {
+  const older = Object.assign(new Error("unknown method: adopt"), { code: "UNKNOWN_METHOD" })
+  const fake = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [], adoptRejection: older })
+  await renderedTui().setup(fake.context)
+  await fake.layers[0].commands[0].run()
+  renderDialog(fake.dialogs)
+  const modal = modalLayer(fake.layers)
+
+  modal.commands.find((entry) => entry.bind === "return").run()
+  await tick()
+  assert.ok(fake.toasts.at(-1).message.includes(OLDER_SERVER_NOTICE), "the toast says to reload OpenCode")
+  assert.deepEqual(fake.navigations, [], "and nothing opens")
+  assert.equal(fake.cleared.length, 0, "the overview stays up")
+})
+
+test("d on an unattended row still closes nothing", async () => {
   const fake = fakeTuiContext({ status: STATUS_WITH_POLLER, items: [] })
   await renderedTui().setup(fake.context)
   await fake.layers[0].commands[0].run()
   renderDialog(fake.dialogs)
   const modal = modalLayer(fake.layers)
-  const command = (bind) => modal.commands.find((entry) => entry.bind === bind)
 
-  command("return").run()
-  await tick()
-  assert.deepEqual(fake.opened, [], "no session is marked read, and none is opened")
-  assert.deepEqual(fake.navigations, [], "no session is opened for an unattended issue")
-  assert.ok(fake.toasts.at(-1).message.includes(NO_SESSION_OPEN_NOTICE), "the dialog says it has no session")
-  assert.equal(fake.cleared.length, 0, "the overview stays up, so the row is still there to act on")
-
-  command("d").run()
+  modal.commands.find((entry) => entry.bind === "d").run()
   await tick()
   assert.deepEqual(fake.doneInputs, [], "no close is requested")
   assert.deepEqual(fake.confirms, [], "and no confirm is asked for it")

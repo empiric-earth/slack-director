@@ -3365,3 +3365,195 @@ test("an answer whose report field holds text the reader cannot read forgets not
     }
   }
 })
+
+// One flag per message: a message's identity is its channel and its own
+// timestamp, so the two link forms of one message are one flag, and two replies
+// in one thread stay two.
+
+/** The same message link with the thread query Slack writes in a thread view. */
+const threadForm = (permalink, threadTs, channel) => `${permalink}?thread_ts=${threadTs}&cid=${channel}`
+
+test("one scan that lists one message's two link forms gives one claim and one session", async () => {
+  const ts = message(60)
+  const plain = permalinkOf("C0PLATFORM", ts)
+  const queried = threadForm(plain, "1795194000.000000", "C0PLATFORM")
+  const h = harness({
+    servers: [NEXAR],
+    pages: {
+      "tok-nexar": rowsPages([
+        { channel: "C0PLATFORM", channelName: "#platform-help", ts, permalink: plain },
+        { channel: "C0PLATFORM", channelName: "#platform-help", ts, permalink: queried },
+      ]),
+    },
+  })
+  try {
+    await h.watcher.poll()
+    assert.equal(h.created.length, 1, "the two link forms make one session")
+    assert.equal(h.prompts.length, 1, "and one first prompt")
+    assert.deepEqual(h.seen(), [plain], "the first form is the permalink the scan stored")
+    assert.deepEqual(Object.keys(h.items()), [plain], "and the record's key")
+    assert.deepEqual(
+      readdirSync(h.dir).filter((name) => name.endsWith(".claim.0")),
+      [`${permalinkHash(plain)}.claim.0`],
+      "and one claim file, under the first form's hash",
+    )
+  } finally {
+    h.clean()
+  }
+})
+
+test("a message seen in one link form gets no second session when a later scan lists the other form", async () => {
+  const ts = message(60)
+  const plain = permalinkOf("C0PLATFORM", ts)
+  const queried = threadForm(plain, "1795194000.000000", "C0PLATFORM")
+  for (const [first, later] of [
+    [plain, queried],
+    [queried, plain],
+  ]) {
+    const h = harness({
+      servers: [NEXAR],
+      pages: {
+        "tok-nexar": (index, search, args) =>
+          rowsPages([{ channel: "C0PLATFORM", channelName: "#platform-help", ts, permalink: search === 0 ? first : later }])(
+            index,
+            search,
+            args,
+          ),
+      },
+    })
+    try {
+      await h.watcher.poll()
+      assert.equal(h.created.length, 1, `${first}: the first scan makes one session`)
+      assert.deepEqual(h.seen(), [first], `${first}: the stored permalink is the form the scan saw`)
+      h.clock.ms += h.config.poll_seconds * 1000
+      await h.watcher.poll()
+      assert.equal(h.created.length, 1, `${first} then ${later}: the other form makes no second session`)
+      assert.deepEqual(h.seen(), [first], `${first} then ${later}: and changes no stored value`)
+      assert.equal(h.status().today.skipped, 1, `${first} then ${later}: the other form is the same seen message`)
+      assert.equal(h.toolCalls().length, 2, `${first} then ${later}: the other form adds no search call`)
+    } finally {
+      h.clean()
+    }
+  }
+})
+
+test("a seen message listed in another link form as a candidate adds no search call", async () => {
+  const ts = message(60)
+  const other = message(120)
+  const seenForm = permalinkOf("C0PLATFORM", ts)
+  const otherForm = threadForm(seenForm, "1795194000.000000", "C0PLATFORM")
+  const fresh = permalinkOf("C0OTHER", other)
+  const h = harness({
+    servers: [NEXAR],
+    pages: {
+      "tok-nexar": rowsPages([
+        { channel: "C0OTHER", channelName: "#other", ts: other, permalink: fresh },
+        { channel: "C0PLATFORM", channelName: "#platform-help", ts, permalink: otherForm },
+      ]),
+    },
+  })
+  try {
+    h.setItems({ [seenForm]: storedRecord(7, seenForm) })
+    h.setSeen([seenForm])
+
+    await h.watcher.poll()
+    assert.equal(h.created.length, 1, "only the fresh message gets a session")
+    assert.equal(h.toolCalls().length, 1, "the seen message's other form is no candidate to establish")
+    assert.deepEqual(h.seen().sort(), [fresh, seenForm].sort(), "and the seen message keeps its stored form")
+  } finally {
+    h.clean()
+  }
+})
+
+test("two replies in one thread are two flags, and get two sessions", async () => {
+  const tsA = message(120)
+  const tsB = message(60)
+  const thread = "1795194000.000000"
+  const linkA = permalinkOf("C0PLATFORM", tsA)
+  const linkB = permalinkOf("C0PLATFORM", tsB)
+  const h = harness({
+    servers: [NEXAR],
+    pages: {
+      "tok-nexar": rowsPages([
+        { channel: "C0PLATFORM", channelName: "#platform-help", ts: tsA, permalink: threadForm(linkA, thread, "C0PLATFORM") },
+        { channel: "C0PLATFORM", channelName: "#platform-help", ts: tsB, permalink: threadForm(linkB, thread, "C0PLATFORM") },
+      ]),
+    },
+  })
+  try {
+    await h.watcher.poll()
+    assert.equal(h.created.length, 2, "different timestamps in one thread are two sessions")
+    assert.deepEqual(
+      Object.keys(h.items()).sort(),
+      [threadForm(linkA, thread, "C0PLATFORM"), threadForm(linkB, thread, "C0PLATFORM")].sort(),
+      "each reply keeps its own raw permalink",
+    )
+  } finally {
+    h.clean()
+  }
+})
+
+test("a still-flagged message is not forgotten when the scan lists its other link form", async () => {
+  const ts = message(60)
+  const plain = permalinkOf("C0PLATFORM", ts)
+  const queried = threadForm(plain, "1795194000.000000", "C0PLATFORM")
+  const h = harness({
+    servers: [NEXAR],
+    pages: { "tok-nexar": rowsPages([{ channel: "C0PLATFORM", channelName: "#platform-help", ts, permalink: plain }]) },
+  })
+  try {
+    h.setItems({ [queried]: storedRecord(7, queried) })
+    h.setSeen([queried])
+    h.setOpen(wholeList([]))
+
+    await h.watcher.poll()
+    assert.deepEqual(h.seen(), [queried], "the stored form stays: the scan's form is the same message")
+    assert.ok(h.items()[queried], "and its record stays")
+    assert.equal(h.status().today.skipped, 1, "and the scan counts it as seen")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a message whose open issue carries another link form is not forgotten", async () => {
+  const ts = message(60)
+  const plain = permalinkOf("C0PLATFORM", ts)
+  const queried = threadForm(plain, "1795194000.000000", "C0PLATFORM")
+  const h = harness({ servers: [NEXAR], pages: { "tok-nexar": rowsPages([]) } })
+  try {
+    h.setItems({ [queried]: storedRecord(7, queried) })
+    h.setSeen([queried])
+    h.setOpen(wholeList([plain]))
+
+    await h.watcher.poll()
+    assert.deepEqual(h.seen(), [queried], "the open issue's other link form holds the message")
+    assert.ok(h.items()[queried], "and its record stays")
+  } finally {
+    h.clean()
+  }
+})
+
+test("a reissue hit in another link form reissues its record once, and makes no second session", async () => {
+  const ts = message(60)
+  const plain = permalinkOf("C0PLATFORM", ts)
+  const queried = threadForm(plain, "1795194000.000000", "C0PLATFORM")
+  const h = harness({
+    servers: [NEXAR],
+    pages: { "tok-nexar": rowsPages([{ channel: "C0PLATFORM", channelName: "#platform-help", ts, permalink: plain }]) },
+  })
+  try {
+    const flaggedAt = new Date(h.now()).toISOString()
+    h.setItems({ [queried]: earlierRecord({ link: queried, ts, sessionID: "ses_old", flaggedAt }) })
+    h.setSeen([queried])
+    h.sessions.set("ses_old", { time: quietTimes(h.now()) })
+
+    await h.watcher.poll()
+    assert.equal(h.created.length, 1, "the record's own raw permalink is reissued: one session")
+    assert.equal(h.items()[plain], undefined, "no record appears under the scan's other link form")
+    assert.ok(h.items()[queried], "the earlier record keeps its key")
+    assert.equal(h.items()[queried].recordFormat, RECORD_FORMAT, "and takes this build's record form")
+    assert.equal(h.status().today.skipped, 0, "a reissued hit is not counted as skipped")
+  } finally {
+    h.clean()
+  }
+})

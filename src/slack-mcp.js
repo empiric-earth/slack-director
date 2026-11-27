@@ -104,6 +104,20 @@ export function parsePermalink(permalink) {
   }
 }
 
+/**
+ * The identity two permalinks share when they name the same Slack message: the
+ * channel id and the message timestamp of the link's path. Slack writes one
+ * message's link with and without a query string, and the query does not change
+ * which message the link names, so the two forms are one identity. Two replies
+ * in one thread carry different timestamps, so they stay two. A permalink whose
+ * path does not parse keeps its own raw text as its identity, so a link this
+ * reader does not understand is never folded into another.
+ */
+export function flagIdentity(permalink) {
+  const parsed = parsePermalink(permalink)
+  return parsed ? `${parsed.channel.id}/${parsed.ts}` : String(permalink ?? "")
+}
+
 /** The JSON object a tool result carries, from its structured or text content. */
 export function resultPayload(result) {
   if (result?.structuredContent && typeof result.structuredContent === "object") return result.structuredContent
@@ -178,12 +192,18 @@ function hitOfBlock(block) {
   return hit
 }
 
+/**
+ * One hit per flagged message: two hits whose permalinks carry the same
+ * identity are the same message, so the later one is dropped and the first
+ * one's raw permalink is the hit.
+ */
 function dedupe(hits) {
   const seen = new Set()
   const out = []
   for (const hit of hits) {
-    if (seen.has(hit.permalink)) continue
-    seen.add(hit.permalink)
+    const identity = flagIdentity(hit.permalink)
+    if (seen.has(identity)) continue
+    seen.add(identity)
     out.push(hit)
   }
   return out
@@ -209,8 +229,8 @@ export function pageOf(result) {
   const blocks = reports.flatMap(resultBlocks)
   const [first, ...rest] = blocks.map(hitOfBlock)
   const established = first ? [first] : []
-  const known = new Set(established.map((hit) => hit.permalink))
-  const candidates = dedupe(rest.filter(Boolean)).filter((hit) => !known.has(hit.permalink))
+  const known = new Set(established.map((hit) => flagIdentity(hit.permalink)))
+  const candidates = dedupe(rest.filter(Boolean)).filter((hit) => !known.has(flagIdentity(hit.permalink)))
   return { established, candidates, blocks: blocks.length }
 }
 

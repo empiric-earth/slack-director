@@ -51,6 +51,17 @@ permissions:
   - action: "external_directory"
     resource: "*"
     effect: deny
+  # Opening a work session on the user's ask: exactly two API calls, nothing
+  # else. Each body is a file the director writes in its own session folder and
+  # the shell reads with `$(cat …)`, so the command names no path outside that
+  # folder. The prompt call reaches any session id; only the skill keeps it on
+  # the session the create call just made.
+  - action: "shell"
+    resource: "opencode api post /api/session -d *"
+    effect: allow
+  - action: "shell"
+    resource: "opencode api post /api/session/*/prompt -d *"
+    effect: allow
 ---
 
 The plugin starts one session per Slack message the user flags by reacting to it

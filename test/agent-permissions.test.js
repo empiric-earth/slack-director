@@ -157,6 +157,39 @@ test("other authenticated shell clients stay by the user's own rules", () => {
   }
 })
 
+// A baseline shaped like a user's rules where the shell asks by default, so the
+// only way a shell command proceeds without a prompt is a rule of the agent
+// file. The session-opening fixture uses this shape.
+const SHELL_ASKS = [
+  { action: "*", resource: "*", effect: "allow" },
+  { action: "shell", resource: "*", effect: "ask" },
+]
+const RESOLVED_ASKING = [...SHELL_ASKS, ...FILE_RULES, ...TRAILING]
+const effectAsking = (action, resource = "*") => resolve(RESOLVED_ASKING, action, resource)
+
+test("the director opens a work session with exactly two shell calls and nothing else", () => {
+  const create = `opencode api post /api/session -d "$(cat open-session-121-20261127T130000Z-create.json)"`
+  const prompt = `opencode api post /api/session/ses_fixture1/prompt -d "$(cat open-session-121-20261127T130000Z-prompt.json)"`
+  assert.equal(effectAsking("shell", create), "allow", "the session create call proceeds without a prompt")
+  assert.equal(effectAsking("shell", prompt), "allow", "the first-message call proceeds without a prompt")
+  assert.equal(effectAsking("external_directory"), "deny", "work outside the session directory is still refused")
+
+  const otherCalls = [
+    "opencode api get /api/session",
+    "opencode api delete /api/session/ses_fixture1",
+    "opencode api post /api/session/ses_fixture1/interrupt -d {}",
+    "opencode api post /api/session/ses_fixture1/agent -d {}",
+    "opencode api post /api/session/ses_fixture1/fork -d {}",
+  ]
+  for (const command of otherCalls) {
+    assert.equal(effectAsking("shell", command), "ask", `${command} stays by the user's own rules`)
+    assert.ok(
+      !FILE_RULES.some((rule) => matches(rule.action, "shell") && matches(rule.resource, command)),
+      `no rule of ${AGENT_REL} matches ${command}`,
+    )
+  }
+})
+
 // The one agent the watcher runs its short refresh session on. Its file starts
 // from the same baseline and the same trailing rules, and decides everything
 // else itself.

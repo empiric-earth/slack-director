@@ -8,6 +8,7 @@ import { test } from "node:test"
 import assert from "node:assert/strict"
 import {
   cursorOf,
+  flagIdentity,
   PAGE_LIMIT,
   pageLimitReached,
   pageOf,
@@ -91,6 +92,22 @@ test("a Slack permalink is read on a workspace host and on an Enterprise Grid ho
   })
   assert.deepEqual(parsePermalink(PLAIN).channel.id, "C0PLATFORM")
   assert.equal(parsePermalink("https://nexar.slack.com/archives/C0PLATFORM"), undefined, "a channel link is not a hit")
+})
+
+test("one message's two link forms share an identity, and two replies in one thread do not", () => {
+  const queried = `${PLAIN}?thread_ts=1795008700.837299&cid=C0PLATFORM`
+  assert.equal(flagIdentity(queried), flagIdentity(PLAIN), "the query string is not part of the identity")
+  assert.equal(flagIdentity(PLAIN), "C0PLATFORM/1795008741.837299", "the identity is the channel id and the message ts")
+  assert.notEqual(
+    flagIdentity("https://nexar.slack.com/archives/C0PLATFORM/p1795008741837300"),
+    flagIdentity(PLAIN),
+    "two replies in one thread carry different timestamps, so they stay two identities",
+  )
+  assert.equal(
+    flagIdentity("https://nexar.slack.com/archives/C0PLATFORM"),
+    "https://nexar.slack.com/archives/C0PLATFORM",
+    "a link whose path does not parse keeps its own raw text as its identity",
+  )
 })
 
 test("the first block of a report is established, and its context blocks are not hits", () => {
@@ -449,6 +466,44 @@ test("a page whose candidates were all seen is not searched again", async () => 
   })
   assert.equal(asked.length, 1, "one call, no walk")
   assert.ok(search.hits.some((hit) => hit.permalink === GRID))
+})
+
+test("one message's two link forms on one page are one hit, not a duplicate", async () => {
+  const queried = `${PLAIN}?thread_ts=1795008700.837299&cid=C0PLATFORM`
+  // The first block is established; the second repeats it in the other link
+  // form, so the page carries the same message once and no separate candidate.
+  const repeated = pageOf(
+    answer({
+      results: report([
+        block(PLAIN, "#data-eng (C0PLATFORM)", "1795008741.837299"),
+        block(queried, "#data-eng (C0PLATFORM)", "1795008741.837299"),
+      ]),
+    }),
+  )
+  assert.deepEqual(repeated.established.map((hit) => hit.permalink), [PLAIN])
+  assert.deepEqual(repeated.candidates, [], "the other link form of the first block is not a second hit")
+
+  // Two candidate blocks in the two link forms of one message count once.
+  const twice = pageOf(
+    answer({
+      results: report([
+        block(GRID, "DM (D03KHBF103X)", "1795008741.837299"),
+        block(PLAIN, "#data-eng (C0PLATFORM)", "1795008742.837299"),
+        block(queried, "#data-eng (C0PLATFORM)", "1795008742.837299"),
+      ]),
+    }),
+  )
+  assert.deepEqual(twice.candidates.map((hit) => hit.permalink), [PLAIN], "the repeated candidate counts once")
+
+  // And the scan returns that message once, with no extra call.
+  const asked = []
+  const rows = [
+    { permalink: PLAIN, channel: "#data-eng (C0PLATFORM)", text: "A flagged message." },
+    { permalink: queried, channel: "#data-eng (C0PLATFORM)", text: "A flagged message." },
+  ]
+  const search = await searchFlagged({ fetch: rowsFetch(rows, asked), token: "tok", emoji: "oc" })
+  assert.deepEqual(search.hits.map((hit) => hit.permalink), [PLAIN], "the scan returns the message once")
+  assert.equal(asked.length, 1, "and the duplicate form costs no further call")
 })
 
 test("a candidate that is not one of the user's flagged messages is never returned, whatever the page position", async () => {

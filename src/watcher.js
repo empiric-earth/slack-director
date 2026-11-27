@@ -51,7 +51,7 @@ import { permalinkHash, STALE_MS } from "./claims.js"
 import { DEFAULT_POLL_SECONDS } from "./config.js"
 import { itemFirstPrompt, closePrompt, refreshPrompt } from "./first-prompt.js"
 import { closeReply, contextMessages, parseReply, replyText } from "./reply.js"
-import { REQUEST_TIMEOUT_MS, searchFlagged, SLACK_MCP_URL } from "./slack-mcp.js"
+import { flagIdentity, REQUEST_TIMEOUT_MS, searchFlagged, SLACK_MCP_URL } from "./slack-mcp.js"
 import { KEYS, LEASE_MS } from "./state.js"
 import { inWorkHours } from "./work-hours.js"
 
@@ -419,20 +419,26 @@ export function createWatcher({
   /**
    * Forget every seen permalink a complete scan no longer lists and no open
    * issue carries: its seen entry, its item record, and its claim and commit
-   * files, so the next flag of the same message is a fresh one. The record's
-   * session is never deleted — a session the user kept stays, whether the item
-   * was closed or its session was archived. One writer at a time, and nothing
-   * at all unless the latest open-issue read was complete; the caller checks
-   * the scan is complete too. Answers the permalinks it forgot.
+   * files, so the next flag of the same message is a fresh one. A stored
+   * permalink and a listed one that carry the same identity are the same
+   * message, so another link form holds it. The record's session is never
+   * deleted — a session the user kept stays, whether the item was closed or its
+   * session was archived. One writer at a time, and nothing at all unless the
+   * latest open-issue read was complete; the caller checks the scan is complete
+   * too. Answers the permalinks it forgot.
    */
   function forgetUnlisted({ listed, open }) {
     if (!open.complete) return Promise.resolve([])
     return serializedWrite(async () => {
       const seen = new Set((await storage.get(KEYS.seen)) ?? [])
       const items = await readItems()
+      // One identity set per list, built once for the whole scan.
+      const listedIdentities = new Set([...listed].map(flagIdentity))
+      const openIdentities = new Set([...open.permalinks].map(flagIdentity))
       const forgotten = []
       for (const permalink of [...seen]) {
-        if (listed.has(permalink) || open.permalinks.has(permalink)) continue
+        const identity = flagIdentity(permalink)
+        if (listedIdentities.has(identity) || openIdentities.has(identity)) continue
         seen.delete(permalink)
         delete items[permalink]
         const hash = permalinkHash(permalink)
@@ -747,7 +753,7 @@ export function createWatcher({
     await storage.set(KEYS.suspended, suspended)
   }
 
-  async function scanWorkspace(server, config, seen, candidates) {
+  async function scanWorkspace(server, config, seenIdentities, candidateByIdentity) {
     const name = server.name
     const suspended = (await storage.get(KEYS.suspended)) ?? {}
     if (Object.hasOwn(suspended, name)) {
@@ -762,9 +768,13 @@ export function createWatcher({
       refreshed = true
       credential = (await refresh(name, config)) ?? credential
     }
-    // A candidate's permalink is treated as unseen, so the search establishes
-    // its hit as the tool's own result exactly as it does a new one.
-    const isSeen = (permalink) => seen.has(permalink) && !candidates.has(permalink)
+    // A hit is one the scan left alone when its identity is in the seen set; a
+    // candidate's identity is treated as unseen, so the search establishes its
+    // hit as the tool's own result exactly as it does a new one.
+    const isSeen = (permalink) => {
+      const identity = flagIdentity(permalink)
+      return seenIdentities.has(identity) && !candidateByIdentity.has(identity)
+    }
     let search = await searchFlagged({
       fetch,
       url: server.url,
@@ -797,13 +807,16 @@ export function createWatcher({
     }
     const skipped = []
     for (const hit of search.hits) {
+      const identity = flagIdentity(hit.permalink)
       // A reissued hit is not one the scan left alone, so it is never counted
-      // in today's skipped.
-      if (candidates.has(hit.permalink)) {
-        await handleReissue({ ...hit, workspace: name }, config)
+      // in today's skipped. The record's own raw permalink is the one its claim
+      // file and item record carry, whatever link form this scan returned.
+      const candidate = candidateByIdentity.get(identity)
+      if (candidate !== undefined) {
+        await handleReissue({ ...hit, permalink: candidate, workspace: name }, config)
         continue
       }
-      if (seen.has(hit.permalink)) {
+      if (seenIdentities.has(identity)) {
         skipped.push(hit.permalink)
         continue
       }
@@ -869,6 +882,12 @@ export function createWatcher({
 
     const seen = new Set((await storage.get(KEYS.seen)) ?? [])
     const candidates = await reissueCandidates()
+    // One identity set for the seen entries, and one map from a reissue
+    // candidate's identity to the record's own raw permalink, built once for the
+    // whole scan so every gate is one lookup per hit.
+    const seenIdentities = new Set([...seen].map(flagIdentity))
+    const candidateByIdentity = new Map()
+    for (const permalink of candidates.keys()) candidateByIdentity.set(flagIdentity(permalink), permalink)
     const workspaces = []
     const skipped = []
     // Every permalink the scan listed, and whether each workspace's paging saw
@@ -888,7 +907,7 @@ export function createWatcher({
     for (const server of servers) {
       let outcome
       try {
-        outcome = await scanWorkspace(server, config, seen, candidates)
+        outcome = await scanWorkspace(server, config, seenIdentities, candidateByIdentity)
       } catch (error) {
         log(`scan failed for ${server.name}: ${messageOf(error)}`)
         outcome = { ok: false, error: messageOf(error) }

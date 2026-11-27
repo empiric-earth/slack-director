@@ -255,11 +255,15 @@ stays.
 - Removing the flag from a message you have handled keeps the scan short: the
   watcher searches for the messages you have flagged, so a cleared flag leaves
   the search.
-- One permalink gets one item session and one intake issue. Flagging the same
-  message again, or sending the first prompt for it again, finds the issue that
-  permalink already has, so no second issue appears. A second message in the
-  same thread is a different permalink, so it gets its own issue, unless a
-  closed issue of that thread is there to reopen.
+- One message gets one item session and one intake issue. A message is its
+  channel and its own timestamp: the `?thread_ts=…&cid=…` query string on a
+  link does not change which message the link names, so the two link forms of
+  one message are one flag and one session. Two replies in one thread carry
+  different timestamps, so each is its own flag and its own issue. Flagging the
+  same message again, or sending the first prompt for it again, finds the issue
+  that message already has, so no second issue appears, unless a closed issue of
+  that thread is there to reopen. Two sessions that both exist for one message
+  are not merged: close the extra one with `d`.
 - An item an earlier build left without an issue is reissued once, on the next
   poll, when its message is still flagged and its earlier session is quiet: one
   new session on `session_agent`, whose first turn makes the issue that

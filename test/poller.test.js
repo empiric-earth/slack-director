@@ -434,6 +434,39 @@ test("an unattended issue is read, never woken, keeps its watermark and is liste
   assert.equal(entry.newActivity, true, "a newer message marks it")
 })
 
+test("an unattended issue's status entry carries its requester and its type for the dialog's row", async () => {
+  const h = harness({
+    issues: [
+      openIssue(11, {
+        permalink: "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219",
+        workspace: "slack_nexar",
+        channel_id: "C0PLATFORM",
+        channel_name: "platform-help",
+        thread_ts: "1795194443.137219",
+        asker: "U0123456789 (Maria Costa)",
+      }),
+    ],
+    reads: () => answer([{ ts: tsOf(30) }]),
+  })
+  await h.run()
+  const [entry] = h.status().unattended
+  assert.equal(entry.asker, "U0123456789 (Maria Costa)", "the requester the issue's yaml block carries, unchanged")
+  assert.equal(entry.channel_name, "platform-help", "and its type")
+  const [row] = pageRows([], () => ({}), h.status().unattended)
+  assert.equal(row.item.asker, "U0123456789 (Maria Costa)", "the dialog's row reads the requester from the entry")
+  assert.equal(row.item.channel, "platform-help", "and its type")
+})
+
+test("an unattended issue whose yaml block names no asker keeps an empty one, so the row still builds", async () => {
+  const h = harness({ issues: [unattendedIssue()], reads: () => answer([{ ts: tsOf(30) }]) })
+  await h.run()
+  const [entry] = h.status().unattended
+  assert.equal(entry.asker, "", "no asker in the block reads as empty")
+  assert.equal(entry.channel_name, "platform-help", "the block's own channel name is passed through")
+  const [row] = pageRows([], () => ({}), h.status().unattended)
+  assert.equal(row.item.asker, "", "the row carries the empty requester")
+})
+
 test("an unattended issue's asked_at falls back to the time the poller first read it", async () => {
   const link = "https://nexar.slack.com/archives/C0PLATFORM/p1795194443137219"
   const h = harness({

@@ -60,8 +60,20 @@ export const SESSION_MARK = { running: "◐", pending: "●" }
  */
 export const NO_SESSION_MARK = "∅"
 
-/** The flag an unattended row carries while the poller reports unseen messages on its source. */
-export const NEW_ACTIVITY_MARK = "new activity"
+/** The mark an unattended row carries while the poller reports unseen messages on its source. */
+export const NEW_ACTIVITY_MARK = "★"
+
+/**
+ * Every mark a row draws, with the meaning the legend gives it, in the order the
+ * marks are defined above. The legend is built from this list, so the marks the
+ * dialog draws and the legend never drift apart.
+ */
+export const MARK_LEGEND = [
+  [SESSION_MARK.running, "turn running"],
+  [SESSION_MARK.pending, "waiting for your permission"],
+  [NO_SESSION_MARK, "no session"],
+  [NEW_ACTIVITY_MARK, "new activity"],
+]
 
 /** How long a flag may age before its AGE colour warns: four working hours. */
 export const AGE_WARNING_MINUTES = 4 * 60
@@ -107,36 +119,55 @@ export function requestStateOf(item) {
 }
 
 /**
+ * A Slack `ts` — ten digits, a dot and six digits, quoted or not — as an intake
+ * issue may store it for `asked_at` or `state_since`.
+ */
+const SLACK_TS = /^["']?(\d{10}\.\d{6})["']?$/
+
+/**
+ * The instant one stored time names, or undefined when it names no usable one.
+ * A Slack `ts` reads as the time it stamps; anything else is read as the date
+ * text it is, so an ISO time and a Slack `ts` are the same age.
+ */
+export function timeOf(value) {
+  if (typeof value !== "string") return undefined
+  const text = value.trim()
+  const slack = SLACK_TS.exec(text)
+  if (slack) return Number(slack[1]) * 1000
+  const at = Date.parse(text)
+  return Number.isNaN(at) ? undefined : at
+}
+
+/**
  * The time a row's age counts from: the issue's `state_since` when it has a
  * usable one, else the flag. An unusable `state_since` falls back to the flag,
  * and a record with neither counts from no time at all.
  */
 export function ageStamp(item) {
-  if (typeof item?.stateSince === "string" && !Number.isNaN(Date.parse(item.stateSince))) return item.stateSince
+  if (typeof item?.stateSince === "string" && timeOf(item.stateSince) !== undefined) return item.stateSince
   return typeof item?.flaggedAt === "string" ? item.flaggedAt : undefined
 }
 
 /** The instant one row stamp names, or 0 when it names no usable time. */
 function atTime(stamp) {
-  const at = Date.parse(stamp)
-  return Number.isNaN(at) ? 0 : at
+  return timeOf(stamp) ?? 0
 }
 
 /**
  * One unattended open issue as a row: it has no item record behind it, so its
- * title, its issue number, its permalink and its request state come from the
- * poller's status. Its age counts from its `state_since`, else from its
- * `asked_at`.
+ * title, its requester, its type, its issue number, its permalink and its
+ * request state come from the poller's status, which reads them from the issue's
+ * yaml block. Its age counts from its `state_since`, else from its `asked_at`.
  */
 function unattendedRow(entry) {
   const at = typeof entry?.state_since === "string" ? entry.state_since : undefined
   const asked = typeof entry?.asked_at === "string" ? entry.asked_at : undefined
-  const stamp = at !== undefined && !Number.isNaN(Date.parse(at)) ? at : asked
+  const stamp = at !== undefined && timeOf(at) !== undefined ? at : asked
   return {
     item: {
       permalink: typeof entry?.permalink === "string" ? entry.permalink : "",
-      channel: "",
-      asker: "",
+      channel: typeof entry?.channel_name === "string" ? entry.channel_name : "",
+      asker: typeof entry?.asker === "string" ? entry.asker : "",
       title: typeof entry?.title === "string" ? entry.title : "",
       issueNumber: entry?.number,
       issueUrl: typeof entry?.url === "string" ? entry.url : "",
@@ -250,8 +281,8 @@ export function reconcileSelection(rows, selectedID, previousOrder = []) {
 
 /** How long ago a row's own time was, in the units the mock uses: minutes, then hours, then days. */
 export function ageText(at, now = Date.now()) {
-  const from = Date.parse(at)
-  if (Number.isNaN(from)) return "—"
+  const from = timeOf(at)
+  if (from === undefined) return "—"
   const minutes = Math.max(0, Math.floor((now - from) / 60000))
   if (minutes < 60) return `${minutes}m`
   const hours = Math.floor(minutes / 60)
@@ -265,14 +296,41 @@ export function issueLabel(item) {
 }
 
 /**
+ * The TYPE cell: the conversation the request came from. A direct message and a
+ * group DM keep their own label; a channel's name takes a leading `#`, whether
+ * the item record stored it with one or the issue's yaml field stored it without.
+ */
+export function typeLabel(channel) {
+  const text = typeof channel === "string" ? channel.trim() : ""
+  if (text === "" || text === "DM" || text === "GDM") return text
+  return text.startsWith("#") ? text : `#${text}`
+}
+
+/**
+ * Whether one whitespace-separated word is a Slack user id, as an intake issue
+ * may store it ahead of the asker's name: a `U` or a `W`, then at least six more
+ * capitals or digits with a digit among them. No word does, so a name-first
+ * asker is left as it is.
+ */
+function slackUserId(word) {
+  return /^[UW][A-Z0-9]{6,}$/.test(word) && /[0-9]/.test(word)
+}
+
+/**
  * The name part of an asker. Slack reports the display name with an id or an
  * address beside it — `Maria Costa (U123)`, `André Almeida <a@example.com>` —
- * and the session writes the issue title from the name alone, so the two agree
- * only on this part.
+ * and an intake issue's `asker` field may instead store the Slack id first:
+ * `U0123456789 Maria Costa`, `U0123456789 (Maria Costa)`. The session writes the
+ * issue title from the name alone, so the two agree only on this part.
  */
 export function askerName(asker) {
   const text = typeof asker === "string" ? asker.trim() : ""
-  return text.replace(/\s*[<(][^>)]*[>)]\s*$/, "").trim()
+  const [head = "", ...rest] = text.split(/\s+/)
+  // A leading Slack user id is not a name: drop it, and unwrap the bracket a
+  // stored id-first asker may put its name in.
+  const named = slackUserId(head) && rest.length > 0 ? rest.join(" ") : text
+  const unwrapped = named.replace(/^\(([^)]*)\)$/, "$1").trim()
+  return unwrapped.replace(/\s*[<(][^>)]*[>)]\s*$/, "").trim()
 }
 
 /** Whether the record already names the intake issue its title comes from. */
@@ -375,59 +433,82 @@ export function titleParts() {
 const countLabel = (count, one, many) => `${count} ${count === 1 ? one : many}`
 
 /**
- * The poller's one cell: the time of its last cycle, whether it was healthy, the
- * distinct reason when it was not, and what it read — the issues, threads and
- * conversations, the unattended issues and a possibly cut list. Nothing is shown
- * until a cycle has run.
+ * The poller line's parts: the time of its last cycle, what it read — the issues
+ * and a possibly cut list — and, when a read failed, the distinct reason and
+ * every failed issue number the status's own `failed` list carries. Nothing is
+ * shown until a cycle has run, and the failing cell takes the attention colour.
  */
-export function pollerCell(poller) {
+export function pollerLineParts(poller) {
   if (!poller || typeof poller.lastCycle !== "string") return undefined
-  const details = [
-    countLabel(poller.issues ?? 0, "issue", "issues"),
-    countLabel(poller.threads ?? 0, "thread", "threads"),
-    countLabel(poller.conversations ?? 0, "conversation", "conversations"),
-  ]
+  const failed = Array.isArray(poller.failed) ? poller.failed.filter((number) => typeof number === "number") : []
   const unattended = Array.isArray(poller.unattended) ? poller.unattended.length : 0
+  const details = [countLabel(poller.issues ?? 0, "issue", "issues")]
+  if (failed.length > 0) {
+    details.push(`${countLabel(failed.length, "failed", "failed")}: ${failed.map((number) => `#${number}`).join(" ")}`)
+  }
   if (unattended > 0) details.push(countLabel(unattended, "unattended", "unattended"))
   if (poller.possiblyCut) details.push("list cut at 100")
-  const detail = details.join(" · ")
-  const clock = pollClock(poller.lastCycle)
   // The distinct reason the last cycle recorded, so throttling is never read as
   // a sign-in problem and an incomplete list is never hidden by a failure.
   const reason = typeof poller.outcome === "string" && poller.outcome !== "" ? poller.outcome : "read failed"
-  if (poller.ghError) return `poller ${clock} ✗ ${poller.ghError} · ${detail}`
-  if (Array.isArray(poller.failed) && poller.failed.length > 0) return `poller ${clock} ✗ ${reason} · ${detail}`
-  return `poller ${clock} ✓ ${detail}`
+  const mark = poller.ghError ? `✗ ${poller.ghError}` : failed.length > 0 ? `✗ ${reason}` : undefined
+  const head = [pollClock(poller.lastCycle), mark].filter((entry) => entry !== undefined).join(" ")
+  const cell = [head, ...details].join(" · ")
+  return [
+    part("Poller ", "muted"),
+    part(cell, mark === undefined ? "workspace-ok" : "workspace-fail"),
+  ]
 }
 
-/** The poller cell's parts, with a failing cell in the warning colour. */
-function pollerParts(poller) {
-  const cell = pollerCell(poller)
-  if (cell === undefined) return []
-  const failed = cell.includes("✗") || cell.includes("!")
-  return [part(" · ", "muted"), part(cell, failed ? "workspace-fail" : "workspace-ok")]
+/** The poller line as one string, or undefined before its first cycle. */
+export function pollerLineText(poller) {
+  const parts = pollerLineParts(poller)
+  return parts === undefined ? undefined : partsText(parts)
 }
 
 /**
- * The header line: the last poll, then each workspace with its mark, then the
- * poller's one cell, when it has run. A failing workspace's mark carries the
- * warning colour and its reason follows it.
+ * The Slack scan line's parts: the last scan's time, then each workspace with
+ * its mark. A failing workspace's mark takes the attention colour and its reason
+ * follows it.
  */
-export function headerParts(status) {
-  const parts = [part(`last poll ${pollClock(status?.lastPoll)}`, "muted")]
+export function slackLineParts(status) {
+  const parts = [part("Slack  ", "muted"), part(pollClock(status?.lastPoll), "muted")]
   for (const workspace of status?.workspaces ?? []) {
     parts.push(part(" · ", "muted"))
     parts.push(part(`${workspaceLabel(workspace.name)} `, "muted"))
     parts.push(part(workspace.ok ? "✓" : "✗", workspace.ok ? "workspace-ok" : "workspace-fail"))
     if (workspace.error) parts.push(part(` ${workspace.error}`, "muted"))
   }
-  parts.push(...pollerParts(status?.poller))
   return parts
 }
 
-/** The header line as one string. */
-export function headerText(status) {
-  return partsText(headerParts(status))
+/** The Slack scan line as one string. */
+export function slackLineText(status) {
+  return partsText(slackLineParts(status))
+}
+
+/**
+ * The header's lines, in the order the dialog draws them: the Slack scan line,
+ * then the poller line once a cycle has run.
+ */
+export function headerLines(status) {
+  const lines = [slackLineParts(status)]
+  const poller = pollerLineParts(status?.poller)
+  if (poller !== undefined) lines.push(poller)
+  return lines
+}
+
+/**
+ * The legend line's parts: every row mark with its meaning, as a test can read
+ * each one from the same list the line is built from.
+ */
+export function legendParts() {
+  return [part(MARK_LEGEND.map(([mark, meaning]) => `${mark} ${meaning}`).join(" · "), "muted")]
+}
+
+/** The legend line as one string. */
+export function legendText() {
+  return partsText(legendParts())
 }
 
 /** The counts line: each request state's own count, in the order the sections show. */
@@ -510,7 +591,7 @@ export function footerText() {
  */
 export function ageRole(state, at, now = Date.now(), hours) {
   if (state === "idle") return "muted"
-  const minutes = workingMinutesBetween(hours, Date.parse(at), now)
+  const minutes = workingMinutesBetween(hours, timeOf(at) ?? NaN, now)
   const day = workingDayMinutes(hours)
   if (day > 0 && minutes >= day) return "age-error"
   if (minutes >= AGE_WARNING_MINUTES) return "age-warn"
@@ -531,21 +612,21 @@ function rowMark(row) {
 }
 
 /**
- * One row's parts: the gutter bar, the session mark, then the item's title, its
- * asker, its channel, its intake issue and the age of its request — measured
+ * One row's parts: the gutter bar, the session mark, then the intake issue, the
+ * requester, the type, the item's text and the age of its request — measured
  * from the issue's `state_since` when it has one, else from the flag. Only the
- * mark takes a state colour; on a row outside the `Idle` section the title is
+ * mark takes a state colour; on a row outside the `Idle` section the text is
  * base text and the rest is muted, and an idle row is muted throughout. An
  * unattended row carries the `no session` mark and, while the poller reports
- * unseen activity on its source, the `new activity` flag after the age. No Slack
- * message text is in the dialog: the title is the session's own.
+ * unseen activity on its source, the `new activity` mark after the age. No Slack
+ * message text is in the dialog: the text is the session's own title.
  */
 export function rowParts(row, options = {}) {
   const item = row?.item ?? {}
   const state = row?.state
   const selected = options.selected === true
   const now = options.now ?? Date.now()
-  const itemRole = state === "idle" ? "muted" : "base"
+  const textRole = state === "idle" ? "muted" : "base"
   const marked = rowMark(row)
   // A row pageRows built carries the time it ages from; a bare row falls back to
   // the item's own issue state time and flag.
@@ -556,17 +637,17 @@ export function rowParts(row, options = {}) {
     part(" "),
     part(marked.mark ?? " ", marked.role),
     part(" "),
-    part(pad(itemTitle(item), ROW_WIDTHS.item), itemRole),
+    part(pad(issueLabel(item), ROW_WIDTHS.issue), "muted"),
     part(" "),
     part(pad(itemAsker(item), ROW_WIDTHS.asker), "muted"),
     part(" "),
-    part(pad(item.channel, ROW_WIDTHS.channel), "muted"),
+    part(pad(typeLabel(item.channel), ROW_WIDTHS.channel), "muted"),
     part(" "),
-    part(pad(issueLabel(item), ROW_WIDTHS.issue), "muted"),
+    part(pad(itemTitle(item), ROW_WIDTHS.item), textRole),
     part(" "),
     part(ageText(at, now), ageRole(state, at, now, options.hours)),
   ]
-  if (row?.note) parts.push(part("  "), part(row.note, "state-waiting"))
+  if (row?.note) parts.push(part("  "), part(row.note, "new-activity"))
   return parts
 }
 

@@ -341,12 +341,15 @@ the way they do for your other agents. On top of them it sets four things:
   first turn's restraint there rests on its prompt alone, and after it each step
   runs only on your approval of a proposed step;
 - on your ask the director may open one work session, with exactly two shell
-  calls: `opencode api post /api/session -d "$(cat <file>)"`, then
-  `opencode api post /api/session/<id>/prompt -d "$(cat <file>)"`, where each
-  body is a file in the session directory. A shell pattern matches a command's
-  text only, so the second call's allow cannot be tied to the session id the
-  first call returns: the director's skill alone keeps the prompt on the session
-  it just made. No other `opencode api` call is allowed;
+  calls, each pinned to one command whose body `jq` reduces to the allowed
+  fields: a create call whose body keeps only `id`, `agent`, `title` and
+  `location.directory`, then a prompt call whose body keeps only `id` and
+  `text`. The agent file allows only those two command forms and denies nothing
+  else, so every other `opencode api` call, and the `jq` and `rm` these calls
+  use, resolve by your own shell rules. A shell pattern matches a command's text
+  only, so the prompt's allow cannot be tied to the session id the create call
+  returns: the director's skill alone keeps the prompt on the session it just
+  made;
 - the director works only in its session directory. OpenCode enforces that with
   its `external_directory` rule: file tools are confined to the workspace, and
   the shell is checked only for its working directory and `cd` targets and can

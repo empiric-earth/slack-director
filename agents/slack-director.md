@@ -51,16 +51,17 @@ permissions:
   - action: "external_directory"
     resource: "*"
     effect: deny
-  # Opening a work session on the user's ask: exactly two API calls, nothing
+  # Opening a work session on the user's ask: exactly these two calls, nothing
   # else. Each body is a file the director writes in its own session folder and
-  # the shell reads with `$(cat …)`, so the command names no path outside that
-  # folder. The prompt call reaches any session id; only the skill keeps it on
-  # the session the create call just made.
+  # `jq` reduces to the allowed fields before the shell hands it to the call, so
+  # no command names a path outside that folder, and no other field — a session
+  # permission list, a parent, a model — can get through. The prompt call reaches any
+  # session id; only the skill keeps it on the session the create call made.
   - action: "shell"
-    resource: "opencode api post /api/session -d *"
+    resource: "opencode api post /api/session -d \"$(jq -c '{id: .id, agent: .agent, title: .title, location: {directory: .location.directory}}' open-session-create.json)\""
     effect: allow
   - action: "shell"
-    resource: "opencode api post /api/session/*/prompt -d *"
+    resource: "opencode api post /api/session/*/prompt -d \"$(jq -c '{id: .id, text: .text}' open-session-prompt.json)\""
     effect: allow
 ---
 

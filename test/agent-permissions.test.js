@@ -16,6 +16,15 @@ import { fileURLToPath } from "node:url"
 const ROOT = fileURLToPath(new URL("..", import.meta.url))
 const AGENT_REL = "agents/slack-director.md"
 
+/** A rule's value: a double-quoted YAML scalar is unquoted, `\"` unescaped. */
+function unquote(value) {
+  const trimmed = value.trim()
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    return trimmed.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, "\\")
+  }
+  return trimmed
+}
+
 /** The rules `permissions:` declares, in the order the file declares them. */
 function declaredRules(text, rel = AGENT_REL) {
   const block = /^permissions:[ \t]*\n((?:[ \t]+\S.*\n|[ \t]*\n)*)/m.exec(text)
@@ -29,10 +38,10 @@ function declaredRules(text, rel = AGENT_REL) {
       rules.push({ action: start[1], resource: "", effect: "" })
       continue
     }
-    const field = /^(resource|effect):[ \t]*"?([^"]*)"?$/.exec(line)
+    const field = /^(resource|effect):[ \t]*(.*)$/.exec(line)
     const rule = rules.at(-1)
     assert.ok(field && rule, `${rel}: a rule field follows its rule, got: ${line}`)
-    rule[field[1]] = field[2]
+    rule[field[1]] = unquote(field[2])
   }
   assert.ok(rules.length > 0, `${rel} declares at least one rule`)
   for (const rule of rules) {
@@ -157,8 +166,8 @@ test("other authenticated shell clients stay by the user's own rules", () => {
   }
 })
 
-// A baseline shaped like a user's rules where the shell asks by default, so the
-// only way a shell command proceeds without a prompt is a rule of the agent
+// A baseline shaped like a user's rules where the shell asks by default, so a
+// shell command proceeds without a prompt only through a rule of the agent
 // file. The session-opening fixture uses this shape.
 const SHELL_ASKS = [
   { action: "*", resource: "*", effect: "allow" },
@@ -167,26 +176,59 @@ const SHELL_ASKS = [
 const RESOLVED_ASKING = [...SHELL_ASKS, ...FILE_RULES, ...TRAILING]
 const effectAsking = (action, resource = "*") => resolve(RESOLVED_ASKING, action, resource)
 
-test("the director opens a work session with exactly two shell calls and nothing else", () => {
-  const create = `opencode api post /api/session -d "$(cat open-session-121-20261127T130000Z-create.json)"`
-  const prompt = `opencode api post /api/session/ses_fixture1/prompt -d "$(cat open-session-121-20261127T130000Z-prompt.json)"`
-  assert.equal(effectAsking("shell", create), "allow", "the session create call proceeds without a prompt")
-  assert.equal(effectAsking("shell", prompt), "allow", "the first-message call proceeds without a prompt")
-  assert.equal(effectAsking("external_directory"), "deny", "work outside the session directory is still refused")
+const CREATE_COMMAND =
+  `opencode api post /api/session -d "$(jq -c '{id: .id, agent: .agent, title: .title, location: {directory: .location.directory}}' open-session-create.json)"`
+const PROMPT_COMMAND = (id) =>
+  `opencode api post /api/session/${id}/prompt -d "$(jq -c '{id: .id, text: .text}' open-session-prompt.json)"`
 
-  const otherCalls = [
-    "opencode api get /api/session",
-    "opencode api delete /api/session/ses_fixture1",
-    "opencode api post /api/session/ses_fixture1/interrupt -d {}",
-    "opencode api post /api/session/ses_fixture1/agent -d {}",
-    "opencode api post /api/session/ses_fixture1/fork -d {}",
+test("the director opens a work session with exactly two pinned shell commands and nothing else", () => {
+  assert.equal(effectAsking("shell", CREATE_COMMAND), "allow", "the pinned create command proceeds without a prompt")
+  assert.equal(
+    effectAsking("shell", PROMPT_COMMAND("ses_x")),
+    "allow",
+    "the pinned prompt command proceeds without a prompt",
+  )
+  assert.equal(
+    effectAsking("external_directory", "/tmp/other"),
+    "deny",
+    "work outside the session directory is still refused",
+  )
+
+  // A body that comes another way, or any other API call, matches no rule of
+  // the agent file: the allow is exactly the two pinned commands.
+  const refused = [
+    `opencode api post /api/session -d "$(cat open-session-create.json)"`,
+    `opencode api post /api/session -d '{"id":"ses_x","agent":"build","title":"t","location":{"directory":"/tmp"}}'`,
+    `opencode api post /api/session -d "$(jq -c '. + {}' open-session-create.json)"`,
+    `opencode api post /api/session -d "$(jq -c '{id: .id, agent: .agent, title: .title, location: {directory: .location.directory}}' other.json)"`,
+    `${CREATE_COMMAND} extra`,
+    `opencode api post /api/session/ses_x/prompt -d "$(cat open-session-prompt.json)"`,
+    `opencode api post /api/session/ses_x/prompt -d "$(jq -c '{id: .id, text: .text, files: .files}' open-session-prompt.json)"`,
+    `opencode api get /api/session`,
+    `opencode api delete /api/session/ses_x`,
+    `opencode api post /api/session/ses_x/interrupt -d {}`,
+    `opencode api post /api/session/ses_x/agent -d {}`,
+    `opencode api post /api/session/ses_x/fork -d {}`,
+    `cat open-session-create.json`,
+    `jq -c '{id: .id, text: .text}' open-session-prompt.json`,
+    `rm open-session-create.json`,
+    `rm open-session-prompt.json`,
   ]
-  for (const command of otherCalls) {
-    assert.equal(effectAsking("shell", command), "ask", `${command} stays by the user's own rules`)
+  for (const command of refused) {
+    assert.notEqual(effectAsking("shell", command), "allow", `${command} is not allowed by the agent file`)
     assert.ok(
       !FILE_RULES.some((rule) => matches(rule.action, "shell") && matches(rule.resource, command)),
       `no rule of ${AGENT_REL} matches ${command}`,
     )
+  }
+})
+
+test("the agent file denies no opencode api call, so the README claims no block it does not enforce", () => {
+  for (const command of ["opencode api get /api/session", "opencode api delete /api/session/ses_x", CREATE_COMMAND]) {
+    const denies = FILE_RULES.filter(
+      (rule) => rule.effect === "deny" && matches(rule.action, "shell") && matches(rule.resource, command),
+    )
+    assert.equal(denies.length, 0, `${AGENT_REL} denies no part of ${command}`)
   }
 })
 
